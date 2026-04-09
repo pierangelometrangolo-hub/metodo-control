@@ -8,11 +8,12 @@ export default function Home() {
 
       <h2>Dashboard</h2>
 
-      <div style={{ display: "flex", gap: "20px", marginTop: "20px" }}>
-        <div style={{ padding: "20px", border: "1px solid #ccc", borderRadius: "8px" }}>
-          <h3>Operations</h3>
-          <p>Gestione task e attività</p>
-        </div>
+      <a href="/operations" style={{ textDecoration: "none", color: "black" }}>
+  <div style={{ padding: "20px", border: "1px solid #ccc", borderRadius: "8px" }}>
+    <h3>Operations</h3>
+    <p>Gestione task e attività</p>
+  </div>
+</a>
 
         <div style={{ padding: "20px", border: "1px solid #ccc", borderRadius: "8px" }}>
           <h3>Performance</h3>

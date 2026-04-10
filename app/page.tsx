@@ -354,7 +354,7 @@ export default function Home() {
             MeToDo si presenta come partner per business consulting,
             management, business intelligence e optimization nell’hospitality di
             alto profilo. Questa home traduce quello stesso linguaggio in una
-            dashboard software, più sobria e orientata al controllo. :contentReference[oaicite:2]{index=2}
+            dashboard software, più sobria e orientata al controllo.
           </p>
         </section>
       </section>

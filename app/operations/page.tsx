@@ -1,646 +1,1069 @@
 "use client";
 
-import Link from "next/link";
 import { useMemo, useState } from "react";
+import Image from "next/image";
+import { Noto_Serif, Open_Sans } from "next/font/google";
+
+const notoSerif = Noto_Serif({
+  subsets: ["latin"],
+  weight: ["400", "700"],
+});
+
+const openSans = Open_Sans({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
 
 type TaskStatus = "Da fare" | "In corso" | "Completato";
 type TaskPriority = "Bassa" | "Media" | "Alta";
-type TeamMember =
-  | "Pierangelo"
-  | "Alessandro"
-  | "Gianluca"
-  | "Giorgia"
-  | "Alessandra"
-  | "Non assegnato";
+type KpiFilter = "Totali" | "Da fare" | "In corso" | "Completate" | "In ritardo";
 
 type Task = {
+  id: number;
   title: string;
   status: TaskStatus;
   priority: TaskPriority;
-  owner: TeamMember;
-  dueDate: string;
+  owner: string;
+  dueDate?: string;
+  openedAt: string;
+  closedAt?: string;
+  archived: boolean;
 };
 
-export default function OperationsPage() {
-  const team: TeamMember[] = [
-    "Pierangelo",
-    "Alessandro",
-    "Gianluca",
-    "Giorgia",
-    "Alessandra",
-    "Non assegnato",
-  ];
+const team = [
+  "Pierangelo",
+  "Alessandro",
+  "Gianluca",
+  "Giorgia",
+  "Alessandra",
+];
 
-  const statuses: Array<"Tutti" | TaskStatus> = [
-    "Tutti",
-    "Da fare",
-    "In corso",
-    "Completato",
-  ];
+function formatDate(date?: string) {
+  if (!date) return "—";
+  return new Date(date).toLocaleDateString("it-IT");
+}
 
+function daysBetween(start?: string, end?: string) {
+  if (!start || !end) return null;
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  const diff = endDate.getTime() - startDate.getTime();
+  return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+}
+
+export default function Operations() {
   const [tasks, setTasks] = useState<Task[]>([
     {
+      id: 1,
       title: "Check camere VIP",
       status: "In corso",
       priority: "Alta",
       owner: "Giorgia",
       dueDate: "2026-04-11",
+      openedAt: "2026-04-08",
+      archived: false,
     },
     {
+      id: 2,
       title: "Aggiornamento listino bar",
       status: "Da fare",
       priority: "Media",
       owner: "Gianluca",
       dueDate: "2026-04-12",
+      openedAt: "2026-04-09",
+      archived: false,
     },
     {
+      id: 3,
       title: "Controllo colazioni",
       status: "Completato",
       priority: "Bassa",
       owner: "Pierangelo",
       dueDate: "2026-04-10",
+      openedAt: "2026-04-07",
+      closedAt: "2026-04-10",
+      archived: true,
     },
   ]);
 
   const [newTask, setNewTask] = useState("");
-  const [newOwner, setNewOwner] = useState<TeamMember | "">("");
+  const [newOwner, setNewOwner] = useState("");
   const [newDueDate, setNewDueDate] = useState("");
-  const [ownerFilter, setOwnerFilter] = useState<"Tutti" | TeamMember>("Tutti");
-  const [statusFilter, setStatusFilter] = useState<"Tutti" | TaskStatus>("Tutti");
 
-  const filteredTasks = useMemo(() => {
-    return tasks.filter((task) => {
-      const ownerMatch = ownerFilter === "Tutti" || task.owner === ownerFilter;
-      const statusMatch = statusFilter === "Tutti" || task.status === statusFilter;
-      return ownerMatch && statusMatch;
-    });
-  }, [tasks, ownerFilter, statusFilter]);
+  const [filterOwner, setFilterOwner] = useState("Tutti");
+  const [filterStatus, setFilterStatus] = useState("Tutti");
+  const [filterPriority, setFilterPriority] = useState("Tutte");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [activeKpi, setActiveKpi] = useState<KpiFilter>("Totali");
+  const [showArchivedOnly, setShowArchivedOnly] = useState(false);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const isLate = (task: Task) => {
+    if (!task.dueDate || task.status === "Completato") return false;
+    const due = new Date(task.dueDate);
+    due.setHours(0, 0, 0, 0);
+    return due < today;
+  };
 
   const totalTasks = tasks.length;
   const todoTasks = tasks.filter((t) => t.status === "Da fare").length;
-  const delayedTasks = tasks.filter(
-    (t) => t.dueDate && new Date(t.dueDate) < new Date() && t.status !== "Completato"
-  ).length;
+  const inProgressTasks = tasks.filter((t) => t.status === "In corso").length;
+  const completedTasks = tasks.filter((t) => t.status === "Completato").length;
+  const delayedTasks = tasks.filter((t) => isLate(t)).length;
 
-  function addTask() {
+  const sortedTasks = useMemo(() => {
+    const priorityOrder: Record<TaskPriority, number> = {
+      Alta: 0,
+      Media: 1,
+      Bassa: 2,
+    };
+
+    const statusOrder: Record<TaskStatus, number> = {
+      "Da fare": 0,
+      "In corso": 1,
+      Completato: 2,
+    };
+
+    return [...tasks].sort((a, b) => {
+      const archivedCompare = Number(a.archived) - Number(b.archived);
+      if (archivedCompare !== 0) return archivedCompare;
+
+      const priorityCompare = priorityOrder[a.priority] - priorityOrder[b.priority];
+      if (priorityCompare !== 0) return priorityCompare;
+
+      const statusCompare = statusOrder[a.status] - statusOrder[b.status];
+      if (statusCompare !== 0) return statusCompare;
+
+      return a.title.localeCompare(b.title);
+    });
+  }, [tasks]);
+
+  const filteredTasks = sortedTasks.filter((task) => {
+    const ownerMatch = filterOwner === "Tutti" || task.owner === filterOwner;
+    const statusMatch = filterStatus === "Tutti" || task.status === filterStatus;
+    const priorityMatch =
+      filterPriority === "Tutte" || task.priority === filterPriority;
+
+    const search = searchTerm.trim().toLowerCase();
+    const searchMatch =
+      search === "" ||
+      task.title.toLowerCase().includes(search) ||
+      task.owner.toLowerCase().includes(search);
+
+    const archivedMatch = showArchivedOnly ? task.archived : true;
+
+    const kpiMatch =
+      activeKpi === "Totali"
+        ? true
+        : activeKpi === "Da fare"
+        ? task.status === "Da fare"
+        : activeKpi === "In corso"
+        ? task.status === "In corso"
+        : activeKpi === "Completate"
+        ? task.status === "Completato"
+        : isLate(task);
+
+    return (
+      ownerMatch &&
+      statusMatch &&
+      priorityMatch &&
+      searchMatch &&
+      archivedMatch &&
+      kpiMatch
+    );
+  });
+
+  const addTask = () => {
     if (!newTask.trim()) return;
+
+    const isoToday = new Date().toISOString().split("T")[0];
 
     setTasks((prev) => [
       ...prev,
       {
-        title: newTask,
+        id: Date.now(),
+        title: newTask.trim(),
         status: "Da fare",
         priority: "Media",
         owner: newOwner || "Non assegnato",
-        dueDate: newDueDate || "",
+        dueDate: newDueDate || undefined,
+        openedAt: isoToday,
+        archived: false,
       },
     ]);
 
     setNewTask("");
     setNewOwner("");
     setNewDueDate("");
-  }
+  };
 
-  function getNextStatus(current: TaskStatus): TaskStatus {
-    if (current === "Da fare") return "In corso";
-    if (current === "In corso") return "Completato";
+  const getNextStatus = (status: TaskStatus): TaskStatus => {
+    if (status === "Da fare") return "In corso";
+    if (status === "In corso") return "Completato";
     return "Da fare";
-  }
+  };
 
-  function getNextPriority(current: TaskPriority): TaskPriority {
-    if (current === "Bassa") return "Media";
-    if (current === "Media") return "Alta";
+  const getNextPriority = (priority: TaskPriority): TaskPriority => {
+    if (priority === "Bassa") return "Media";
+    if (priority === "Media") return "Alta";
     return "Bassa";
-  }
+  };
 
-  function getNextOwner(current: TeamMember): TeamMember {
-    const currentIndex = team.indexOf(current);
-    const nextIndex = (currentIndex + 1) % team.length;
-    return team[nextIndex];
-  }
+  const getNextOwner = (owner: string) => {
+    const currentIndex = team.indexOf(owner);
+    if (currentIndex === -1) return team[0];
+    return team[(currentIndex + 1) % team.length];
+  };
 
-  function updateTask(taskIndex: number, updatedTask: Task) {
-    setTasks((prev) => prev.map((task, index) => (index === taskIndex ? updatedTask : task)));
-  }
+  const updateTask = (id: number, patch: Partial<Task>) => {
+    setTasks((prev) =>
+      prev.map((task) => (task.id === id ? { ...task, ...patch } : task))
+    );
+  };
 
-  function getCardStyle(task: Task): React.CSSProperties {
-    const isLate =
-      !!task.dueDate && new Date(task.dueDate) < new Date() && task.status !== "Completato";
+  const resetFilters = () => {
+    setFilterOwner("Tutti");
+    setFilterStatus("Tutti");
+    setFilterPriority("Tutte");
+    setSearchTerm("");
+    setActiveKpi("Totali");
+    setShowArchivedOnly(false);
+  };
 
-    const base = {
-      padding: 20,
-      borderRadius: 22,
-      border: "1px solid rgba(255,255,255,0.08)",
-      background: "#121212",
-      marginBottom: 16,
-    } satisfies React.CSSProperties;
+  const closeTask = (task: Task) => {
+    const confirmClose = window.confirm(
+      `Vuoi chiudere definitivamente la task "${task.title}"?`
+    );
 
-    if (task.status === "Completato") {
-      return {
-        ...base,
-        borderLeft: "6px solid #6fcf97",
-        background: "rgba(111, 207, 151, 0.10)",
-      };
-    }
+    if (!confirmClose) return;
 
-    if (task.status === "In corso") {
-      return {
-        ...base,
-        borderLeft: "6px solid #f2c94c",
-        background: "rgba(242, 201, 76, 0.10)",
-      };
-    }
+    const isoToday = new Date().toISOString().split("T")[0];
 
-    return {
-      ...base,
-      borderLeft: "6px solid #eb5757",
-      background: "rgba(235, 87, 87, 0.10)",
-      boxShadow: isLate ? "0 0 0 1px rgba(235, 87, 87, 0.28)" : "none",
-    };
-  }
+    updateTask(task.id, {
+      status: "Completato",
+      archived: true,
+      closedAt: isoToday,
+    });
+  };
+
+  const reopenTask = (task: Task) => {
+    updateTask(task.id, {
+      status: "Da fare",
+      archived: false,
+      closedAt: undefined,
+    });
+  };
+
+  const statusStyles: Record<TaskStatus, { bg: string; color: string; border: string }> = {
+    "Da fare": {
+      bg: "#f6fbfc",
+      color: "#017A92",
+      border: "#017A92",
+    },
+    "In corso": {
+      bg: "#f4f1ed",
+      color: "#2B2D2F",
+      border: "#2B2D2F",
+    },
+    Completato: {
+      bg: "#eef7f3",
+      color: "#1f6b57",
+      border: "#b9ddd1",
+    },
+  };
+
+  const priorityStyles: Record<TaskPriority, { bg: string; color: string; border: string }> = {
+    Bassa: {
+      bg: "#f7f7f7",
+      color: "#555555",
+      border: "#dddddd",
+    },
+    Media: {
+      bg: "#f3ece7",
+      color: "#2B2D2F",
+      border: "#d8cfc7",
+    },
+    Alta: {
+      bg: "#f8eaea",
+      color: "#993333",
+      border: "#d8aaaa",
+    },
+  };
+
+  const kpis: { label: KpiFilter; value: number }[] = [
+    { label: "Totali", value: totalTasks },
+    { label: "Da fare", value: todoTasks },
+    { label: "In corso", value: inProgressTasks },
+    { label: "Completate", value: completedTasks },
+    { label: "In ritardo", value: delayedTasks },
+  ];
 
   return (
     <main
+      className={openSans.className}
       style={{
         minHeight: "100vh",
-        background: "#0b0b0b",
-        color: "#f5f5f5",
-        fontFamily:
-          'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        backgroundColor: "#f5f3ef",
+        color: "#2B2D2F",
+        padding: "32px 20px 48px",
       }}
     >
-      <section
-        style={{
-          maxWidth: 1240,
-          margin: "0 auto",
-          padding: "40px 24px 80px",
-        }}
-      >
-        <header
+      <div style={{ maxWidth: "1280px", margin: "0 auto" }}>
+        <section
           style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 16,
-            marginBottom: 34,
-            flexWrap: "wrap",
-          }}
-        >
-          <div>
-            <div
-              style={{
-                fontSize: 14,
-                letterSpacing: "0.24em",
-                textTransform: "uppercase",
-                color: "#bdbdbd",
-                marginBottom: 8,
-              }}
-            >
-              MeToDo Control
-            </div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: "clamp(30px, 5vw, 48px)",
-                letterSpacing: "-0.05em",
-              }}
-            >
-              Operations
-            </h1>
-          </div>
-
-          <Link href="/" style={backLinkStyle}>
-            Torna alla home
-          </Link>
-        </header>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr",
-            gap: 18,
-            marginBottom: 26,
+            background: "#ffffff",
+            border: "1px solid #e7dfd8",
+            borderRadius: "24px",
+            overflow: "hidden",
+            marginBottom: "24px",
+            boxShadow: "0 12px 30px rgba(43,45,47,0.05)",
           }}
         >
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-              gap: 16,
+              gridTemplateColumns: "320px 1fr",
+              minHeight: "220px",
             }}
           >
-            <StatCard label="Task totali" value={String(totalTasks)} />
-            <StatCard label="Da fare" value={String(todoTasks)} />
-            <StatCard
-              label="In ritardo"
-              value={String(delayedTasks)}
-              alert={delayedTasks > 0}
-            />
+            <div
+              style={{
+                background: "#2B2D2F",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "32px",
+              }}
+            >
+              <div
+                style={{
+                  position: "relative",
+                  width: "170px",
+                  height: "170px",
+                }}
+              >
+                <Image
+                  src="/images/metodo-logo.png"
+                  alt="MeToDo logo"
+                  fill
+                  style={{ objectFit: "contain" }}
+                  priority
+                />
+              </div>
+            </div>
+
+            <div
+              style={{
+                padding: "32px",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "space-between",
+                gap: "18px",
+              }}
+            >
+              <div>
+                <p
+                  style={{
+                    margin: 0,
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    letterSpacing: "0.18em",
+                    textTransform: "uppercase",
+                    color: "#017A92",
+                  }}
+                >
+                  MeToDo Control
+                </p>
+
+                <h1
+                  className={notoSerif.className}
+                  style={{
+                    margin: "10px 0 10px",
+                    fontSize: "42px",
+                    lineHeight: 1.05,
+                    fontWeight: 700,
+                    color: "#2B2D2F",
+                  }}
+                >
+                  Operations
+                </h1>
+
+                <p
+                  style={{
+                    margin: 0,
+                    maxWidth: "760px",
+                    fontSize: "15px",
+                    lineHeight: 1.7,
+                    color: "#555555",
+                  }}
+                >
+                  Controllo operativo delle attività in corso con visione chiara su
+                  priorità, stato di avanzamento, owner, tempi e storico.
+                </p>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "12px",
+                }}
+              >
+                <div style={topBadgeStyle}>
+                  <span style={topBadgeLabelStyle}>Task attive</span>
+                  <strong style={topBadgeValueStyle}>{totalTasks}</strong>
+                </div>
+
+                <div style={topBadgeStyle}>
+                  <span style={topBadgeLabelStyle}>Ritardi</span>
+                  <strong style={topBadgeValueStyle}>{delayedTasks}</strong>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
 
         <section
           style={{
-            background: "#121212",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 24,
-            padding: 24,
-            marginBottom: 24,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: "16px",
+            marginBottom: "24px",
           }}
         >
-          <div style={eyebrowStyle}>Nuova attività</div>
-          <h2 style={sectionTitleStyle}>Inserimento task</h2>
+          {kpis.map((item) => {
+            const isActive = activeKpi === item.label;
+
+            return (
+              <button
+                key={item.label}
+                onClick={() => setActiveKpi(item.label)}
+                style={{
+                  ...kpiCardStyle,
+                  cursor: "pointer",
+                  border: isActive ? "2px solid #017A92" : "1px solid #e7dfd8",
+                  background: isActive ? "#f6fbfc" : "#ffffff",
+                  textAlign: "left",
+                }}
+              >
+                <p style={kpiLabelStyle}>{item.label}</p>
+                <p style={kpiValueStyle}>{item.value}</p>
+              </button>
+            );
+          })}
+        </section>
+
+        <section style={sectionCardStyle}>
+          <div style={{ marginBottom: "18px" }}>
+            <h2
+              className={notoSerif.className}
+              style={{
+                margin: 0,
+                fontSize: "28px",
+                color: "#2B2D2F",
+              }}
+            >
+              Nuova task
+            </h2>
+            <p
+              style={{
+                margin: "8px 0 0",
+                fontSize: "14px",
+                color: "#666666",
+                lineHeight: 1.6,
+              }}
+            >
+              Inserisci una nuova attività e assegnala subito al referente operativo.
+            </p>
+          </div>
 
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-              gap: 12,
+              gridTemplateColumns: "2fr 1.1fr 1fr auto",
+              gap: "12px",
+              alignItems: "end",
             }}
           >
-            <input
-              type="text"
-              placeholder="Nuova attività..."
-              value={newTask}
-              onChange={(e) => setNewTask(e.target.value)}
-              style={inputStyle}
-            />
+            <div>
+              <label style={labelStyle}>Attività</label>
+              <input
+                type="text"
+                placeholder="Es. Verifica setup rooftop"
+                value={newTask}
+                onChange={(e) => setNewTask(e.target.value)}
+                style={inputStyle}
+              />
+            </div>
 
-            <select
-              value={newOwner}
-              onChange={(e) => setNewOwner(e.target.value as TeamMember | "")}
-              style={inputStyle}
-            >
-              <option value="">Seleziona responsabile</option>
-              {team
-                .filter((member) => member !== "Non assegnato")
-                .map((member) => (
+            <div>
+              <label style={labelStyle}>Owner</label>
+              <select
+                value={newOwner}
+                onChange={(e) => setNewOwner(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="">Seleziona owner</option>
+                {team.map((member) => (
                   <option key={member} value={member}>
                     {member}
                   </option>
                 ))}
-            </select>
+              </select>
+            </div>
 
-            <input
-              type="date"
-              value={newDueDate}
-              onChange={(e) => setNewDueDate(e.target.value)}
-              style={inputStyle}
-            />
+            <div>
+              <label style={labelStyle}>Scadenza</label>
+              <input
+                type="date"
+                value={newDueDate}
+                onChange={(e) => setNewDueDate(e.target.value)}
+                style={inputStyle}
+              />
+            </div>
 
             <button onClick={addTask} style={primaryButtonStyle}>
-              Aggiungi task
+              Aggiungi
             </button>
           </div>
         </section>
 
-        <section
-          style={{
-            background: "#121212",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 24,
-            padding: 24,
-            marginBottom: 24,
-          }}
-        >
-          <div style={eyebrowStyle}>Vista operativa</div>
-          <h2 style={sectionTitleStyle}>Filtri</h2>
+        <section style={{ ...sectionCardStyle, marginTop: "24px" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-end",
+              gap: "16px",
+              flexWrap: "wrap",
+              marginBottom: "20px",
+            }}
+          >
+            <div>
+              <h2
+                className={notoSerif.className}
+                style={{
+                  margin: 0,
+                  fontSize: "28px",
+                  color: "#2B2D2F",
+                }}
+              >
+                Task list
+              </h2>
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  fontSize: "14px",
+                  color: "#666666",
+                  lineHeight: 1.6,
+                }}
+              >
+                Vista operativa compatta con ricerca, filtri e storico.
+              </p>
+            </div>
 
-          <div style={{ marginBottom: 14, color: "#c9c9c9" }}>Per owner</div>
-          <div style={chipRowStyle}>
-            <Chip
-              active={ownerFilter === "Tutti"}
-              onClick={() => setOwnerFilter("Tutti")}
-              label="Tutti"
-            />
-            {team
-              .filter((member) => member !== "Non assegnato")
-              .map((member) => (
-                <Chip
-                  key={member}
-                  active={ownerFilter === member}
-                  onClick={() => setOwnerFilter(member)}
-                  label={member}
-                />
-              ))}
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                onClick={() => setShowArchivedOnly((prev) => !prev)}
+                style={{
+                  ...secondaryButtonStyle,
+                  background: showArchivedOnly ? "#f6fbfc" : "#ffffff",
+                  border: showArchivedOnly ? "1px solid #017A92" : "1px solid #d8d0c8",
+                  color: showArchivedOnly ? "#017A92" : "#2B2D2F",
+                }}
+              >
+                {showArchivedOnly ? "Mostra tutte" : "Solo archiviate"}
+              </button>
+
+              <button onClick={resetFilters} style={secondaryButtonStyle}>
+                Reset filtri
+              </button>
+            </div>
           </div>
 
-          <div style={{ margin: "18px 0 14px", color: "#c9c9c9" }}>Per stato</div>
-          <div style={chipRowStyle}>
-            {statuses.map((status) => (
-              <Chip
-                key={status}
-                active={statusFilter === status}
-                onClick={() => setStatusFilter(status)}
-                label={status}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1.2fr 220px 220px 220px",
+              gap: "12px",
+              marginBottom: "18px",
+            }}
+          >
+            <div>
+              <label style={labelStyle}>Ricerca task</label>
+              <input
+                type="text"
+                placeholder="Cerca per titolo o owner"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                style={inputStyle}
               />
-            ))}
+            </div>
+
+            <div>
+              <label style={labelStyle}>Filtra per owner</label>
+              <select
+                value={filterOwner}
+                onChange={(e) => setFilterOwner(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="Tutti">Tutti</option>
+                {team.map((member) => (
+                  <option key={member} value={member}>
+                    {member}
+                  </option>
+                ))}
+                <option value="Non assegnato">Non assegnato</option>
+              </select>
+            </div>
+
+            <div>
+              <label style={labelStyle}>Filtra per stato</label>
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="Tutti">Tutti</option>
+                <option value="Da fare">Da fare</option>
+                <option value="In corso">In corso</option>
+                <option value="Completato">Completato</option>
+              </select>
+            </div>
+
+            <div>
+              <label style={labelStyle}>Filtra per priorità</label>
+              <select
+                value={filterPriority}
+                onChange={(e) => setFilterPriority(e.target.value)}
+                style={inputStyle}
+              >
+                <option value="Tutte">Tutte</option>
+                <option value="Alta">Alta</option>
+                <option value="Media">Media</option>
+                <option value="Bassa">Bassa</option>
+              </select>
+            </div>
           </div>
-        </section>
 
-        <section>
-          <div style={eyebrowStyle}>Controllo</div>
-          <h2 style={sectionTitleStyle}>Task list</h2>
-
-          <div style={{ marginTop: 18 }}>
+          <div style={{ display: "grid", gap: "12px" }}>
             {filteredTasks.length === 0 ? (
               <div
                 style={{
-                  background: "#121212",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 24,
-                  padding: 24,
-                  color: "#bdbdbd",
+                  background: "#fcfbf9",
+                  border: "1px solid #ebe4dc",
+                  borderRadius: "18px",
+                  padding: "20px",
+                  color: "#666666",
                 }}
               >
-                Nessun task trovato con i filtri selezionati.
+                Nessuna task trovata con questi filtri.
               </div>
             ) : (
               filteredTasks.map((task) => {
-                const originalIndex = tasks.findIndex(
-                  (t) =>
-                    t.title === task.title &&
-                    t.owner === task.owner &&
-                    t.priority === task.priority &&
-                    t.status === task.status &&
-                    t.dueDate === task.dueDate
-                );
-
-                const isLate =
-                  !!task.dueDate &&
-                  new Date(task.dueDate) < new Date() &&
-                  task.status !== "Completato";
+                const late = isLate(task);
+                const nextStatus = getNextStatus(task.status);
+                const openDays = task.closedAt
+                  ? daysBetween(task.openedAt, task.closedAt)
+                  : null;
 
                 return (
-                  <div key={`${task.title}-${originalIndex}`} style={getCardStyle(task)}>
+                  <article
+                    key={task.id}
+                    style={{
+                      background: task.priority === "Alta" ? "#fff8f8" : "#fcfbf9",
+                      border:
+                        task.priority === "Alta"
+                          ? "1px solid #e7b3b3"
+                          : late
+                          ? "1px solid #d9a7a7"
+                          : "1px solid #ebe4dc",
+                      borderLeft:
+                        task.priority === "Alta"
+                          ? "5px solid #d64545"
+                          : task.status === "In corso"
+                          ? "5px solid #2B2D2F"
+                          : task.status === "Completato"
+                          ? "5px solid #1f6b57"
+                          : "5px solid #017A92",
+                      borderRadius: "18px",
+                      padding: "16px",
+                      boxShadow: "0 6px 16px rgba(43,45,47,0.03)",
+                    }}
+                  >
                     <div
                       style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        gap: 16,
-                        alignItems: "flex-start",
-                        flexWrap: "wrap",
+                        display: "grid",
+                        gridTemplateColumns: "1.6fr 1fr auto",
+                        gap: "16px",
+                        alignItems: "start",
                       }}
                     >
                       <div>
-                        <strong
+                        <div
                           style={{
-                            display: "block",
-                            fontSize: 20,
-                            marginBottom: 10,
-                            letterSpacing: "-0.03em",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                            marginBottom: "8px",
                           }}
                         >
-                          {task.title}
-                        </strong>
-
-                        {isLate && (
-                          <div
+                          <h3
+                            className={notoSerif.className}
                             style={{
-                              display: "inline-flex",
-                              padding: "6px 10px",
-                              borderRadius: 999,
-                              background: "rgba(235, 87, 87, 0.14)",
-                              color: "#ff8b8b",
-                              fontSize: 12,
-                              fontWeight: 700,
-                              letterSpacing: "0.08em",
-                              textTransform: "uppercase",
-                              marginBottom: 10,
+                              margin: 0,
+                              fontSize: "18px",
+                              lineHeight: 1.2,
+                              color: "#2B2D2F",
                             }}
                           >
-                            In ritardo
+                            {task.title}
+                          </h3>
+
+                          <span
+                            style={{
+                              ...pillStyleCompact,
+                              background: statusStyles[task.status].bg,
+                              color: statusStyles[task.status].color,
+                              border: `1px solid ${statusStyles[task.status].border}`,
+                            }}
+                          >
+                            {task.status}
+                          </span>
+
+                          <span
+                            style={{
+                              ...pillStyleCompact,
+                              background: priorityStyles[task.priority].bg,
+                              color: priorityStyles[task.priority].color,
+                              border: `1px solid ${priorityStyles[task.priority].border}`,
+                            }}
+                          >
+                            Priorità {task.priority}
+                          </span>
+
+                          {late && (
+                            <span
+                              style={{
+                                ...pillStyleCompact,
+                                background: "#f8eaea",
+                                color: "#993333",
+                                border: "1px solid #d9a7a7",
+                              }}
+                            >
+                              In ritardo
+                            </span>
+                          )}
+
+                          {task.archived && (
+                            <span
+                              style={{
+                                ...pillStyleCompact,
+                                background: "#f1f5f9",
+                                color: "#475569",
+                                border: "1px solid #cbd5e1",
+                              }}
+                            >
+                              Archiviata
+                            </span>
+                          )}
+                        </div>
+
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+                            gap: "10px",
+                          }}
+                        >
+                          <div>
+                            <span style={metaLabelStyle}>Owner</span>
+                            <div style={metaValueCompactStyle}>{task.owner}</div>
                           </div>
-                        )}
+
+                          <div>
+                            <span style={metaLabelStyle}>Scadenza</span>
+                            <div style={metaValueCompactStyle}>
+                              {formatDate(task.dueDate)}
+                            </div>
+                          </div>
+
+                          <div>
+                            <span style={metaLabelStyle}>Aperta il</span>
+                            <div style={metaValueCompactStyle}>
+                              {formatDate(task.openedAt)}
+                            </div>
+                          </div>
+
+                          <div>
+                            <span style={metaLabelStyle}>Chiusa il</span>
+                            <div style={metaValueCompactStyle}>
+                              {formatDate(task.closedAt)}
+                            </div>
+                          </div>
+
+                          <div>
+                            <span style={metaLabelStyle}>Giorni aperta</span>
+                            <div style={metaValueCompactStyle}>
+                              {openDays ?? "—"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label style={labelStyle}>Modifica scadenza</label>
+                        <input
+                          type="date"
+                          value={task.dueDate || ""}
+                          onChange={(e) =>
+                            updateTask(task.id, {
+                              dueDate: e.target.value || undefined,
+                            })
+                          }
+                          style={inputStyleCompact}
+                        />
                       </div>
 
                       <div
                         style={{
-                          color: "#c8c8c8",
-                          fontSize: 14,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "8px",
+                          minWidth: "150px",
                         }}
                       >
-                        Scadenza
-                        <div style={{ marginTop: 6 }}>
-                          <input
-                            type="date"
-                            value={task.dueDate || ""}
-                            onChange={(e) =>
-                              updateTask(originalIndex, {
-                                ...task,
-                                dueDate: e.target.value,
-                              })
-                            }
-                            style={smallInputStyle}
-                          />
-                        </div>
+                        {!task.archived && (
+                          <>
+                            <button
+                              onClick={() =>
+                                updateTask(task.id, {
+                                  status: nextStatus,
+                                  closedAt:
+                                    nextStatus === "Completato"
+                                      ? new Date().toISOString().split("T")[0]
+                                      : undefined,
+                                })
+                              }
+                              style={secondaryButtonCompactStyle}
+                            >
+                              Stato: {nextStatus}
+                            </button>
+
+                            <button
+                              onClick={() =>
+                                updateTask(task.id, {
+                                  priority: getNextPriority(task.priority),
+                                })
+                              }
+                              style={secondaryButtonCompactStyle}
+                            >
+                              Cambia priorità
+                            </button>
+
+                            <button
+                              onClick={() =>
+                                updateTask(task.id, {
+                                  owner: getNextOwner(task.owner),
+                                })
+                              }
+                              style={secondaryButtonCompactStyle}
+                            >
+                              Cambia owner
+                            </button>
+
+                            <button
+                              onClick={() => closeTask(task)}
+                              style={dangerButtonCompactStyle}
+                            >
+                              Chiudi task
+                            </button>
+                          </>
+                        )}
+
+                        {task.archived && (
+                          <button
+                            onClick={() => reopenTask(task)}
+                            style={secondaryButtonCompactStyle}
+                          >
+                            Riapri task
+                          </button>
+                        )}
                       </div>
                     </div>
-
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                        gap: 12,
-                        marginTop: 16,
-                        marginBottom: 16,
-                      }}
-                    >
-                      <InfoBox label="Stato" value={task.status} />
-                      <InfoBox label="Priorità" value={task.priority} />
-                      <InfoBox label="Owner" value={task.owner} />
-                    </div>
-
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 10,
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <button
-                        onClick={() =>
-                          updateTask(originalIndex, {
-                            ...task,
-                            status: getNextStatus(task.status),
-                          })
-                        }
-                        style={actionButtonStyle}
-                      >
-                        Cambia stato
-                      </button>
-
-                      <button
-                        onClick={() =>
-                          updateTask(originalIndex, {
-                            ...task,
-                            priority: getNextPriority(task.priority),
-                          })
-                        }
-                        style={actionButtonStyle}
-                      >
-                        Cambia priorità
-                      </button>
-
-                      <button
-                        onClick={() =>
-                          updateTask(originalIndex, {
-                            ...task,
-                            owner: getNextOwner(task.owner),
-                          })
-                        }
-                        style={actionButtonStyle}
-                      >
-                        Cambia owner
-                      </button>
-                    </div>
-                  </div>
+                  </article>
                 );
               })
             )}
           </div>
         </section>
-      </section>
+      </div>
     </main>
   );
 }
 
-function StatCard({
-  label,
-  value,
-  alert = false,
-}: {
-  label: string;
-  value: string;
-  alert?: boolean;
-}) {
-  return (
-    <div
-      style={{
-        background: alert ? "rgba(235, 87, 87, 0.10)" : "#121212",
-        border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: 20,
-        padding: 20,
-      }}
-    >
-      <div style={{ color: "#a7a7a7", fontSize: 13, marginBottom: 10 }}>{label}</div>
-      <div
-        style={{
-          fontSize: 30,
-          fontWeight: 700,
-          letterSpacing: "-0.04em",
-        }}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function Chip({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "10px 14px",
-        borderRadius: 999,
-        border: "1px solid rgba(255,255,255,0.12)",
-        background: active ? "#ffffff" : "transparent",
-        color: active ? "#0b0b0b" : "#ffffff",
-        cursor: "pointer",
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function InfoBox({ label, value }: { label: string; value: string }) {
-  return (
-    <div
-      style={{
-        borderRadius: 16,
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.06)",
-        padding: 14,
-      }}
-    >
-      <div style={{ color: "#9a9a9a", fontSize: 12, marginBottom: 6 }}>{label}</div>
-      <div style={{ fontWeight: 600 }}>{value}</div>
-    </div>
-  );
-}
-
-const eyebrowStyle: React.CSSProperties = {
-  fontSize: 12,
-  letterSpacing: "0.22em",
-  textTransform: "uppercase",
-  color: "#8f8f8f",
+const sectionCardStyle: React.CSSProperties = {
+  background: "#ffffff",
+  border: "1px solid #e7dfd8",
+  borderRadius: "24px",
+  padding: "24px",
+  boxShadow: "0 12px 30px rgba(43,45,47,0.05)",
 };
 
-const sectionTitleStyle: React.CSSProperties = {
-  margin: "10px 0 18px",
-  fontSize: 26,
-  letterSpacing: "-0.03em",
+const kpiCardStyle: React.CSSProperties = {
+  background: "#ffffff",
+  border: "1px solid #e7dfd8",
+  borderRadius: "20px",
+  padding: "18px 20px",
+  boxShadow: "0 10px 24px rgba(43,45,47,0.04)",
+};
+
+const kpiLabelStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: "12px",
+  fontWeight: 700,
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+  color: "#017A92",
+};
+
+const kpiValueStyle: React.CSSProperties = {
+  margin: "10px 0 0",
+  fontSize: "34px",
+  lineHeight: 1,
+  fontWeight: 700,
+  color: "#2B2D2F",
+};
+
+const topBadgeStyle: React.CSSProperties = {
+  background: "#f7fbfc",
+  border: "1px solid #d8e8ec",
+  borderRadius: "16px",
+  padding: "12px 16px",
+  display: "flex",
+  flexDirection: "column",
+  gap: "4px",
+  minWidth: "130px",
+};
+
+const topBadgeLabelStyle: React.CSSProperties = {
+  fontSize: "11px",
+  textTransform: "uppercase",
+  letterSpacing: "0.12em",
+  color: "#017A92",
+  fontWeight: 700,
+};
+
+const topBadgeValueStyle: React.CSSProperties = {
+  fontSize: "22px",
+  color: "#2B2D2F",
+};
+
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  marginBottom: "8px",
+  fontSize: "12px",
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "#6b625c",
 };
 
 const inputStyle: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
   padding: "12px 14px",
-  borderRadius: 14,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "#0f0f0f",
-  color: "#ffffff",
+  borderRadius: "14px",
+  border: "1px solid #d8d0c8",
+  background: "#fcfbf9",
+  color: "#2B2D2F",
+  fontSize: "14px",
+  outline: "none",
 };
 
-const smallInputStyle: React.CSSProperties = {
-  padding: "8px 10px",
-  borderRadius: 10,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "#0f0f0f",
-  color: "#ffffff",
+const inputStyleCompact: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
+  padding: "10px 12px",
+  borderRadius: "12px",
+  border: "1px solid #d8d0c8",
+  background: "#fcfbf9",
+  color: "#2B2D2F",
+  fontSize: "13px",
+  outline: "none",
 };
 
 const primaryButtonStyle: React.CSSProperties = {
-  padding: "12px 16px",
-  borderRadius: 14,
+  height: "46px",
+  padding: "0 18px",
+  borderRadius: "14px",
   border: "none",
+  background: "#017A92",
+  color: "#ffffff",
+  fontSize: "14px",
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  padding: "10px 14px",
+  borderRadius: "14px",
+  border: "1px solid #d8d0c8",
   background: "#ffffff",
-  color: "#0b0b0b",
+  color: "#2B2D2F",
+  fontSize: "13px",
   fontWeight: 600,
   cursor: "pointer",
 };
 
-const actionButtonStyle: React.CSSProperties = {
-  padding: "10px 14px",
-  borderRadius: 12,
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "#0f0f0f",
-  color: "#ffffff",
+const secondaryButtonCompactStyle: React.CSSProperties = {
+  padding: "9px 12px",
+  borderRadius: "12px",
+  border: "1px solid #d8d0c8",
+  background: "#ffffff",
+  color: "#2B2D2F",
+  fontSize: "12px",
+  fontWeight: 600,
   cursor: "pointer",
+  textAlign: "left",
 };
 
-const backLinkStyle: React.CSSProperties = {
+const dangerButtonCompactStyle: React.CSSProperties = {
+  padding: "9px 12px",
+  borderRadius: "12px",
+  border: "1px solid #d8aaaa",
+  background: "#f8eaea",
+  color: "#993333",
+  fontSize: "12px",
+  fontWeight: 700,
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const pillStyleCompact: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  justifyContent: "center",
-  padding: "12px 16px",
-  borderRadius: 999,
-  border: "1px solid rgba(255,255,255,0.10)",
-  background: "rgba(255,255,255,0.03)",
-  color: "#ffffff",
-  textDecoration: "none",
+  padding: "5px 9px",
+  borderRadius: "999px",
+  fontSize: "11px",
+  fontWeight: 700,
 };
 
-const chipRowStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 10,
-  flexWrap: "wrap",
+const metaLabelStyle: React.CSSProperties = {
+  display: "block",
+  marginBottom: "3px",
+  fontSize: "10px",
+  textTransform: "uppercase",
+  letterSpacing: "0.12em",
+  color: "#7a726c",
+  fontWeight: 700,
+};
+
+const metaValueCompactStyle: React.CSSProperties = {
+  fontSize: "14px",
+  color: "#2B2D2F",
+  fontWeight: 600,
 };

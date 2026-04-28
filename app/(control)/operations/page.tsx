@@ -1219,8 +1219,7 @@ function OperationsContent() {
     <main className={openSans.className} style={mainStyle}>
       <div style={{ maxWidth: "1280px", margin: "0 auto" }}>
         <section style={heroCardStyle}>
-          <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", minHeight: "240px" }}>
-            <div style={heroLogoAreaStyle}>
+<div style={{ display: "grid", gridTemplateColumns: "1fr", minHeight: "240px" }}>            <div style={heroLogoAreaStyle}>
               <div style={logoBoxStyle}>
                 <div style={{ position: "relative", width: "140px", height: "140px" }}>
                   <Image
@@ -2074,14 +2073,14 @@ const sectionTitleStyle: CSSProperties = {
 
 const newTaskGridStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1fr 1fr",
+  gridTemplateColumns: "1fr",
   gap: "12px",
   alignItems: "end",
 };
 
 const filtersGridStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1.2fr 220px 220px 220px",
+  gridTemplateColumns: "1fr",
   gap: "12px",
   marginBottom: "16px",
 };
@@ -2420,7 +2419,8 @@ const subtaskAssignSelectStyle: CSSProperties = {
   fontSize: "11px",
   fontWeight: 600,
   cursor: "pointer",
-  minWidth: "140px",
+  width: "100%",
+  maxWidth: "180px",
 };
 
 const modalOverlayStyle: CSSProperties = {
@@ -2491,9 +2491,8 @@ const taskRowCardStyle = (
 
 const taskRowHeaderStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1.7fr) 170px 130px 150px 130px 46px",
-  gap: "10px",
-  alignItems: "center",
+  gridTemplateColumns: "1fr",
+  gap: "8px",
   padding: "12px",
 };
 
@@ -2534,7 +2533,7 @@ const expandedPanelStyle: CSSProperties = {
 
 const detailsGridStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
+  gridTemplateColumns: "1fr",
   gap: "10px",
   marginBottom: "14px",
 };
@@ -2549,7 +2548,7 @@ const actionsRowStyle: CSSProperties = {
 
 const newSubtaskGridStyle: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) 180px auto",
+  gridTemplateColumns: "1fr",
   gap: "8px",
   alignItems: "end",
   marginBottom: "10px",
@@ -2595,8 +2594,9 @@ const subtaskRightStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: "8px",
-  minWidth: "360px",
-  justifyContent: "flex-end",
+  flexWrap: "wrap",
+  minWidth: 0,
+  justifyContent: "flex-start",
 };
 
 const avatarWrapStyle: CSSProperties = {

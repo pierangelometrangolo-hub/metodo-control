@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { Suspense, useEffect, useMemo, useState, type CSSProperties } from "react";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 import { Noto_Serif, Open_Sans } from "next/font/google";
@@ -410,7 +410,7 @@ function buildLocalHistoryEntries(
   return entries;
 }
 
-export default function OperationsPage() {
+function OperationsContent() {
   const searchParams = useSearchParams();
   const targetTaskId = searchParams.get("taskId");
   const targetSubtaskId = searchParams.get("subtaskId");
@@ -1539,8 +1539,16 @@ export default function OperationsPage() {
             </div>
           </div>
         </div>
-      ) : null}
+            ) : null}
     </main>
+  );
+}
+
+export default function OperationsPage() {
+  return (
+    <Suspense fallback={null}>
+      <OperationsContent />
+    </Suspense>
   );
 }
 

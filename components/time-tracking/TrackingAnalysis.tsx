@@ -1,18 +1,44 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppButton } from "@/components/ui/AppButton";
 import { AppCard } from "@/components/ui/AppCard";
 import { AppInput } from "@/components/ui/AppInput";
 import { SectionHeader } from "@/components/ui/SectionHeader";
-import { TrackingEntry } from "@/lib/tracking";
+import {
+  activityMap,
+  referenceMap,
+  trackingAreas,
+  TrackingArea,
+  TrackingEntry,
+} from "@/lib/tracking";
+
+type SelectOption = {
+  id: string;
+  label: string;
+};
+
+type AnalysisFiltersState = {
+  macroArea: "all" | TrackingArea;
+  referenceName: string;
+  operator: string;
+  activity: string;
+  startDate: string;
+  endDate: string;
+  searchTerm: string;
+};
 
 type Props = {
   entries: TrackingEntry[];
+  operators: SelectOption[];
+  clientReferences: SelectOption[];
   focus?: {
     type: "all" | "reference" | "activity" | "operator" | "area";
     value?: string;
   } | null;
+  filters: AnalysisFiltersState;
+  onFiltersChange: (filters: AnalysisFiltersState) => void;
 };
 
 type AnalysisGroupKey =
@@ -43,19 +69,89 @@ const PIE_COLORS = [
   "#AEC5CA",
 ];
 
+const selectClassName =
+  "h-11 w-full rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white";
+
+const openOperationsButtonClassName =
+  "inline-flex h-9 items-center justify-center rounded-[12px] border border-[#017A92] bg-[#f3f8fa] px-3 text-[12px] font-semibold text-[#017A92] transition hover:bg-[#e9f4f6]";
+
 export default function TrackingAnalysis({
   entries,
+  operators,
+  clientReferences,
   focus = null,
+  filters,
+  onFiltersChange,
 }: Props) {
+  const router = useRouter();
   const today = new Date().toISOString().split("T")[0];
-
-  const [dateFrom, setDateFrom] = useState(today);
-  const [dateTo, setDateTo] = useState(today);
   const [selectedDetail, setSelectedDetail] = useState<DetailState>(null);
+
+  function goToOperations(taskId?: string, subtaskId?: string) {
+    if (!taskId) return;
+
+    const params = new URLSearchParams();
+    params.set("taskId", taskId);
+
+    if (subtaskId) {
+      params.set("subtaskId", subtaskId);
+    }
+
+    router.push(`/operations?${params.toString()}`);
+  }
+
+  const availableReferences = useMemo(() => {
+    if (filters.macroArea === "all") {
+      return Array.from(
+        new Set([
+          ...clientReferences.map((item) => item.label),
+          ...Object.entries(referenceMap)
+            .filter(([key]) => key !== "consulenza")
+            .flatMap(([, values]) => values),
+        ])
+      );
+    }
+
+    if (filters.macroArea === "consulenza") {
+      return clientReferences.length > 0
+        ? clientReferences.map((item) => item.label)
+        : referenceMap.consulenza;
+    }
+
+    return referenceMap[filters.macroArea] ?? [];
+  }, [filters.macroArea, clientReferences]);
+
+  const availableActivities = useMemo(() => {
+    if (filters.macroArea === "all") {
+      return Array.from(new Set(Object.values(activityMap).flat()));
+    }
+
+    return activityMap[filters.macroArea] ?? [];
+  }, [filters.macroArea]);
+
+  const filtersResetKey = useMemo(() => {
+    return [
+      filters.macroArea,
+      filters.referenceName,
+      filters.operator,
+      filters.activity,
+      filters.startDate,
+      filters.endDate,
+      filters.searchTerm,
+    ].join("|");
+  }, [
+    filters.macroArea,
+    filters.referenceName,
+    filters.operator,
+    filters.activity,
+    filters.startDate,
+    filters.endDate,
+    filters.searchTerm,
+  ]);
 
   useEffect(() => {
     setSelectedDetail(null);
-  }, [dateFrom, dateTo]);
+  }, [filtersResetKey]);
 
   useEffect(() => {
     if (!focus) return;
@@ -97,13 +193,63 @@ export default function TrackingAnalysis({
     }
   }, [focus]);
 
+  function updateFilter<K extends keyof AnalysisFiltersState>(
+    field: K,
+    value: AnalysisFiltersState[K]
+  ) {
+    const nextFilters: AnalysisFiltersState = {
+      ...filters,
+      [field]: value,
+    };
+
+    if (field === "macroArea") {
+      nextFilters.referenceName = "";
+      nextFilters.activity = "";
+    }
+
+    onFiltersChange(nextFilters);
+  }
+
+  function resetFilters() {
+    onFiltersChange({
+      macroArea: "all",
+      referenceName: "",
+      operator: "",
+      activity: "",
+      startDate: today,
+      endDate: today,
+      searchTerm: "",
+    });
+    setSelectedDetail(null);
+  }
+
   const analysisEntries = useMemo(() => {
     return entries.filter((entry) => {
-      const afterStart = !dateFrom || entry.date >= dateFrom;
-      const beforeEnd = !dateTo || entry.date <= dateTo;
-      return afterStart && beforeEnd;
+      const matchesMacroArea =
+        filters.macroArea === "all" || entry.macroArea === filters.macroArea;
+
+      const matchesReference =
+        !filters.referenceName || entry.referenceName === filters.referenceName;
+
+      const matchesOperator =
+        !filters.operator || entry.operator === filters.operator;
+
+      const matchesActivity =
+        !filters.activity || entry.activity === filters.activity;
+
+      const matchesDateRange =
+        (!filters.startDate || entry.date >= filters.startDate) &&
+        (!filters.endDate || entry.date <= filters.endDate);
+
+      return (
+        matchesMacroArea &&
+        matchesReference &&
+        matchesOperator &&
+        matchesActivity &&
+        matchesDateRange
+      );
     });
-  }, [entries, dateFrom, dateTo]);
+  }, [entries, filters]);
 
   const groupedData = useMemo(() => {
     return {
@@ -151,25 +297,95 @@ export default function TrackingAnalysis({
   const detailPercentage =
     totalMinutes > 0 ? Math.round((detailMinutes / totalMinutes) * 100) : 0;
 
-  function resetToToday() {
-    setDateFrom(today);
-    setDateTo(today);
-    setSelectedDetail(null);
-  }
-
   return (
     <div id="tracking-analysis">
       <AppCard className="rounded-[24px] p-7">
         <SectionHeader
           title="Analisi operativa"
-          description="Distribuzione del tempo per area, riferimento, operatore e attività. Di default viene analizzato il giorno corrente; puoi selezionare un intervallo personalizzato."
+          description="Distribuzione del tempo per area, riferimento, operatore e attività, con accesso diretto alla task collegata."
           className="mb-6"
           action={
-            <AppButton variant="ghost" onClick={resetToToday}>
-              Oggi
+            <AppButton variant="ghost" onClick={resetFilters}>
+              Reset filtri
             </AppButton>
           }
         />
+
+        <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-[220px_1fr_220px_220px]">
+          <div>
+            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+              Macroarea
+            </label>
+            <select
+              value={filters.macroArea}
+              onChange={(e) =>
+                updateFilter("macroArea", e.target.value as "all" | TrackingArea)
+              }
+              className={selectClassName}
+            >
+              <option value="all">Tutte</option>
+              {trackingAreas.map((area) => (
+                <option key={area} value={area}>
+                  {formatMacroArea(area)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+              Riferimento
+            </label>
+            <select
+              value={filters.referenceName}
+              onChange={(e) => updateFilter("referenceName", e.target.value)}
+              className={selectClassName}
+            >
+              <option value="">Tutti</option>
+              {availableReferences.map((reference) => (
+                <option key={reference} value={reference}>
+                  {reference}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+              Operatore
+            </label>
+            <select
+              value={filters.operator}
+              onChange={(e) => updateFilter("operator", e.target.value)}
+              className={selectClassName}
+            >
+              <option value="">Tutti</option>
+              {operators.map((operator) => (
+                <option key={operator.id} value={operator.label}>
+                  {operator.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+              Attività
+            </label>
+            <select
+              value={filters.activity}
+              onChange={(e) => updateFilter("activity", e.target.value)}
+              className={selectClassName}
+            >
+              <option value="">Tutte</option>
+              {availableActivities.map((activity) => (
+                <option key={activity} value={activity}>
+                  {formatActivity(activity)}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
 
         <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-[220px_220px_auto] xl:items-end">
           <div>
@@ -178,8 +394,8 @@ export default function TrackingAnalysis({
             </label>
             <AppInput
               type="date"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
+              value={filters.startDate}
+              onChange={(e) => updateFilter("startDate", e.target.value)}
             />
           </div>
 
@@ -189,8 +405,8 @@ export default function TrackingAnalysis({
             </label>
             <AppInput
               type="date"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
+              value={filters.endDate}
+              onChange={(e) => updateFilter("endDate", e.target.value)}
             />
           </div>
 
@@ -199,7 +415,7 @@ export default function TrackingAnalysis({
               Periodo analizzato
             </p>
             <p className="mt-1 text-sm font-semibold text-[#2B2D2F]">
-              {formatRange(dateFrom, dateTo)}
+              {formatRange(filters.startDate, filters.endDate)}
             </p>
           </div>
         </div>
@@ -278,7 +494,7 @@ export default function TrackingAnalysis({
                 <DetailMiniCard label="Minuti" value={`${totalMinutes}`} />
                 <DetailMiniCard
                   label="Periodo"
-                  value={formatRange(dateFrom, dateTo)}
+                  value={formatRange(filters.startDate, filters.endDate)}
                 />
               </div>
 
@@ -312,6 +528,20 @@ export default function TrackingAnalysis({
                           <p className="mt-2 text-sm leading-6 text-[#666666]">
                             {entry.notes?.trim() || "Nessuna nota inserita"}
                           </p>
+
+                          {entry.taskId ? (
+                            <div className="mt-3">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  goToOperations(entry.taskId, entry.subtaskId)
+                                }
+                                className={openOperationsButtonClassName}
+                              >
+                                Apri in Operations
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="grid grid-cols-2 gap-x-6 gap-y-2 xl:min-w-[280px]">
@@ -343,7 +573,7 @@ export default function TrackingAnalysis({
                 />
                 <DetailMiniCard
                   label="Periodo"
-                  value={formatRange(dateFrom, dateTo)}
+                  value={formatRange(filters.startDate, filters.endDate)}
                 />
               </div>
 
@@ -386,6 +616,20 @@ export default function TrackingAnalysis({
                           <p className="mt-2 text-sm leading-6 text-[#666666]">
                             {entry.notes?.trim() || "Nessuna nota inserita"}
                           </p>
+
+                          {entry.taskId ? (
+                            <div className="mt-3">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  goToOperations(entry.taskId, entry.subtaskId)
+                                }
+                                className={openOperationsButtonClassName}
+                              >
+                                Apri in Operations
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="grid grid-cols-2 gap-x-6 gap-y-2 xl:min-w-[280px]">
@@ -750,6 +994,8 @@ function formatMacroArea(value: string) {
       return "Sales & Marketing";
     case "amministrazione-finance":
       return "Amministrazione & Finance";
+    case "it":
+      return "IT";
     default:
       return value;
   }
@@ -777,6 +1023,18 @@ function formatActivity(value: string) {
       return "Organizzazione";
     case "coordinamento":
       return "Coordinamento";
+    case "on-boarding":
+      return "On-boarding";
+    case "sviluppo":
+      return "Sviluppo";
+    case "testing":
+      return "Testing";
+    case "social media":
+      return "Social media";
+    case "contenuti":
+      return "Contenuti";
+    case "PR & networking":
+      return "PR & Networking";
     default:
       return value;
   }

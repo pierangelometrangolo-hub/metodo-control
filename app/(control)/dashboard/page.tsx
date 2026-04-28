@@ -1,28 +1,151 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { tasks } from "../../../lib/tasks";
-import { mockTrackingEntries } from "../../../lib/tracking";
+import { supabase } from "@/lib/supabaseClient";
+
+type SupabaseTask = {
+  id: string;
+  titolo?: string | null;
+  descrizione?: string | null;
+  stato: "todo" | "in_progress" | "completed";
+  priorita?: "low" | "medium" | "high" | null;
+  due_date: string | null;
+  created_at?: string | null;
+  client_id?: string | null;
+  owner_id?: string | null;
+};
+
+type RawTrackingEntry = Record<string, any>;
+type RawProfile = Record<string, any>;
+type RawClient = Record<string, any>;
 
 export default function DashboardPage() {
+  const [supabaseTasks, setSupabaseTasks] = useState<SupabaseTask[]>([]);
+  const [trackingEntries, setTrackingEntries] = useState<RawTrackingEntry[]>([]);
+  const [profiles, setProfiles] = useState<RawProfile[]>([]);
+  const [clients, setClients] = useState<RawClient[]>([]);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  async function loadDashboardData() {
+    const [
+      { data: tasksData, error: tasksError },
+      { data: trackingData, error: trackingError },
+      { data: profilesData, error: profilesError },
+      { data: clientsData, error: clientsError },
+    ] = await Promise.all([
+      supabase
+        .from("tasks")
+        .select("id, titolo, descrizione, stato, priorita, due_date, created_at, client_id, owner_id")
+        .order("created_at", { ascending: false }),
+
+      supabase
+        .from("tracking")
+        .select("*")
+        .order("created_at", { ascending: false }),
+
+      supabase
+        .from("profiles")
+        .select("*"),
+
+      supabase
+        .from("clients")
+        .select("*"),
+    ]);
+
+    if (tasksError) {
+      console.error("Errore lettura tasks:", tasksError);
+    }
+
+    if (trackingError) {
+      console.error("Errore lettura tracking:", trackingError);
+    } else {
+      console.log("TRACKING RAW:", trackingData);
+    }
+
+    if (profilesError) {
+      console.error("Errore lettura profiles:", profilesError);
+    } else {
+      console.log("PROFILES RAW:", profilesData);
+    }
+
+    if (clientsError) {
+      console.error("Errore lettura clients:", clientsError);
+    } else {
+      console.log("CLIENTS RAW:", clientsData);
+    }
+
+    setSupabaseTasks((tasksData as SupabaseTask[]) || []);
+    setTrackingEntries((trackingData as RawTrackingEntry[]) || []);
+    setProfiles((profilesData as RawProfile[]) || []);
+    setClients((clientsData as RawClient[]) || []);
+  }
+
   const today = new Date().toISOString().split("T")[0];
 
-  const openTasks = tasks.filter((task) => task.status === "open");
+  const profilesMap = useMemo(() => {
+    return profiles.reduce<Record<string, string>>((acc, profile) => {
+      const fullName =
+        profile.name ||
+        profile.full_name ||
+        profile.display_name ||
+        [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim() ||
+        profile.email ||
+        "Operatore";
 
-  const overdueTasks = tasks.filter(
-    (task) => task.status === "open" && task.dueDate < today
+      if (profile.id) {
+        acc[profile.id] = fullName;
+      }
+
+      return acc;
+    }, {});
+  }, [profiles]);
+
+  const clientsMap = useMemo(() => {
+    return clients.reduce<Record<string, string>>((acc, client) => {
+      const clientName =
+        client.name ||
+        client.client_name ||
+        client.nome ||
+        "Cliente";
+
+      if (client.id) {
+        acc[client.id] = clientName;
+      }
+
+      return acc;
+    }, {});
+  }, [clients]);
+
+  const openTasks = supabaseTasks.filter((task) => task.stato !== "completed");
+
+  const overdueTasks = supabaseTasks.filter(
+    (task) =>
+      task.stato !== "completed" &&
+      !!task.due_date &&
+      task.due_date < today
   );
 
-  const todayTasks = tasks.filter(
-    (task) => task.status === "open" && task.dueDate === today
+  const todayTasks = supabaseTasks.filter(
+    (task) => task.stato !== "completed" && task.due_date === today
   );
 
-  const todayTrackingEntries = mockTrackingEntries.filter(
-    (entry) => entry.date === today
+  const highPriorityTasks = supabaseTasks.filter(
+    (task) => task.stato !== "completed" && task.priorita === "high"
   );
 
-  const totalTrackedMinutesToday = todayTrackingEntries.reduce(
-    (total, entry) => total + entry.minutes,
-    0
-  );
+  const todayTrackingEntries = trackingEntries.filter((entry) => {
+    const entryDate = entry.date || entry.data || null;
+    return entryDate === today;
+  });
+
+  const totalTrackedMinutesToday = todayTrackingEntries.reduce((total, entry) => {
+    const minutes = entry.minutes ?? entry.minuti ?? 0;
+    return total + Number(minutes);
+  }, 0);
 
   const trackedHours = Math.floor(totalTrackedMinutesToday / 60);
   const trackedMinutes = totalTrackedMinutesToday % 60;
@@ -32,35 +155,17 @@ export default function DashboardPage() {
       ? `${trackedHours}h ${trackedMinutes}m`
       : "0h 0m";
 
-  const highPriorityTasks = tasks.filter(
-    (task) => task.status === "open" && task.priority === "high"
-  );
-
-  const recentTaskActivities = tasks.slice(0, 2).map((task) => ({
-    title: task.title,
-    meta: task.area,
-    status: task.status === "completed" ? "Completata" : "Aperta",
-    badgeVariant:
-      task.status === "completed"
-        ? "border-[#d7e9df] bg-[#eef8f2] text-[#2c7a55]"
-        : "border-[#dbe8eb] bg-[#f3f8fa] text-[#017A92]",
-  }));
-
-  const recentTrackingActivities = todayTrackingEntries.slice(0, 2).map((entry) => ({
-    title: `${entry.activity} • ${entry.referenceName}`,
-    meta: `${entry.macroArea} • ${entry.operator}`,
-    status: `${entry.minutes} min`,
-    badgeVariant: "border-[#dbe8eb] bg-[#f3f8fa] text-[#017A92]",
-  }));
-
-  const recentActivities = [...recentTaskActivities, ...recentTrackingActivities].slice(
-    0,
-    4
-  );
-
   const areaMinutesMap = todayTrackingEntries.reduce<Record<string, number>>(
     (acc, entry) => {
-      acc[entry.macroArea] = (acc[entry.macroArea] || 0) + entry.minutes;
+      const areaName =
+        entry.macro_area ||
+        entry.macroArea ||
+        (entry.client_id ? clientsMap[entry.client_id] : null) ||
+        "Nessun dato";
+
+      const minutes = Number(entry.minutes ?? entry.minuti ?? 0);
+
+      acc[areaName] = (acc[areaName] || 0) + minutes;
       return acc;
     },
     {}
@@ -68,7 +173,21 @@ export default function DashboardPage() {
 
   const operatorMinutesMap = todayTrackingEntries.reduce<Record<string, number>>(
     (acc, entry) => {
-      acc[entry.operator] = (acc[entry.operator] || 0) + entry.minutes;
+      const operatorId =
+        entry.operator_id ||
+        entry.owner_id ||
+        entry.operator ||
+        null;
+
+      const operatorName =
+        (operatorId ? profilesMap[operatorId] : null) ||
+        entry.operator_name ||
+        entry.nome_operatore ||
+        "Nessun dato";
+
+      const minutes = Number(entry.minutes ?? entry.minuti ?? 0);
+
+      acc[operatorName] = (acc[operatorName] || 0) + minutes;
       return acc;
     },
     {}
@@ -95,6 +214,66 @@ export default function DashboardPage() {
         minutes: topOperatorEntry[1],
       }
     : null;
+
+  const recentTaskActivities = supabaseTasks.slice(0, 2).map((task) => ({
+    title: task.titolo || "Task senza titolo",
+    meta:
+      (task.client_id ? clientsMap[task.client_id] : null) ||
+      "Operations",
+    status:
+      task.stato === "completed"
+        ? "Completata"
+        : task.stato === "in_progress"
+        ? "In corso"
+        : "Da fare",
+    badgeVariant:
+      task.stato === "completed"
+        ? "border-[#d7e9df] bg-[#eef8f2] text-[#2c7a55]"
+        : task.stato === "in_progress"
+        ? "border-[#dbe8eb] bg-[#f3f8fa] text-[#017A92]"
+        : "border-[#efe4cf] bg-[#fcf7ef] text-[#b0741a]",
+  }));
+
+  const recentTrackingActivities = todayTrackingEntries.slice(0, 2).map((entry) => {
+    const activityName =
+      entry.activity ||
+      entry.attivita ||
+      "Tracking registrato";
+
+    const referenceName =
+      entry.referenceName ||
+      entry.reference_name ||
+      (entry.client_id ? clientsMap[entry.client_id] : null) ||
+      "";
+
+    const operatorId =
+      entry.operator_id ||
+      entry.owner_id ||
+      entry.operator ||
+      null;
+
+    const operatorName =
+      (operatorId ? profilesMap[operatorId] : null) ||
+      entry.operator_name ||
+      entry.nome_operatore ||
+      entry.macro_area ||
+      entry.macroArea ||
+      "Time Tracking";
+
+    const minutes = Number(entry.minutes ?? entry.minuti ?? 0);
+
+    return {
+      title: referenceName ? `${activityName} • ${referenceName}` : activityName,
+      meta: operatorName,
+      status: `${minutes} min`,
+      badgeVariant: "border-[#dbe8eb] bg-[#f3f8fa] text-[#017A92]",
+    };
+  });
+
+  const recentActivities = [...recentTaskActivities, ...recentTrackingActivities].slice(
+    0,
+    4
+  );
 
   const quickAccess = [
     {
@@ -135,7 +314,7 @@ export default function DashboardPage() {
     {
       title: "Task aperte",
       value: openTasks.length.toString(),
-      note: "Task attualmente aperte",
+      note: "Task reali da Supabase",
       href: "/operations",
       accent: "bg-[#017A92]",
       cardClass: "border-[#017A92] bg-[#f3f8fa]",

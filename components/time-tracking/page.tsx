@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/ui/PageHeader";
 import TrackingStats from "@/components/time-tracking/TrackingStats";
 import TrackingAnalysis from "@/components/time-tracking/TrackingAnalysis";
@@ -50,6 +50,11 @@ type ClientRow = {
   status: string | null;
 };
 
+type TrackingHistoryProfileRow = {
+  nome: string | null;
+  cognome: string | null;
+};
+
 type TrackingHistoryRow = {
   id: string;
   campo_modificato: string;
@@ -57,6 +62,7 @@ type TrackingHistoryRow = {
   valore_nuovo: string | null;
   changed_at: string;
   changed_by: string | null;
+  profiles: TrackingHistoryProfileRow | null;
 };
 
 type TrackingRow = {
@@ -88,6 +94,14 @@ function getProfileDisplayName(profile: ProfileRow) {
   }
 
   return `${nome} ${cognome.charAt(0).toUpperCase()}.`;
+}
+
+function getHistoryProfileDisplayName(profile: TrackingHistoryProfileRow | null) {
+  if (!profile?.nome) return "Sistema";
+
+  return profile.cognome
+    ? `${profile.nome} ${profile.cognome.charAt(0).toUpperCase()}.`
+    : profile.nome;
 }
 
 export default function TimeTrackingPage() {
@@ -145,13 +159,17 @@ export default function TimeTrackingPage() {
         .from("tracking")
         .select(`
           *,
-          tracking_history!tracking_history_tracking_fk (
+          tracking_history (
             id,
             campo_modificato,
             valore_precedente,
             valore_nuovo,
             changed_at,
-            changed_by
+            changed_by,
+            profiles:changed_by (
+              nome,
+              cognome
+            )
           )
         `)
         .order("created_at", { ascending: false }),
@@ -242,7 +260,7 @@ export default function TimeTrackingPage() {
             previousValue: historyItem.valore_precedente || "",
             nextValue: historyItem.valore_nuovo || "",
             changedAt: historyItem.changed_at,
-            changedBy: historyItem.changed_by ? "Utente" : "Sistema",
+            changedBy: getHistoryProfileDisplayName(historyItem.profiles),
           })) || [],
       })
     );

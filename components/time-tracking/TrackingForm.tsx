@@ -5,17 +5,24 @@ import { AppCard } from "@/components/ui/AppCard";
 import { AppButton } from "@/components/ui/AppButton";
 import { AppInput } from "@/components/ui/AppInput";
 import { SectionHeader } from "@/components/ui/SectionHeader";
+import { supabase } from "@/lib/supabaseClient";
 import {
+  activityMap,
   referenceMap,
-  trackingActivities,
   trackingAreas,
-  trackingOperators,
   TrackingArea,
   TrackingEntry,
 } from "@/lib/tracking";
 
+type SelectOption = {
+  id: string;
+  label: string;
+};
+
 type TrackingFormProps = {
   onAddEntry: (entry: TrackingEntry) => void;
+  operators: SelectOption[];
+  clientReferences: SelectOption[];
 };
 
 type FormState = {
@@ -27,12 +34,17 @@ type FormState = {
   minutes: string;
   notes: string;
   taskId: string;
+  subtaskId: string;
 };
 
 const selectClassName =
   "h-11 w-full rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white";
 
-export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
+export default function TrackingForm({
+  onAddEntry,
+  operators,
+  clientReferences,
+}: TrackingFormProps) {
   const [form, setForm] = useState<FormState>({
     macroArea: "consulenza",
     referenceName: "",
@@ -42,16 +54,30 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
     minutes: "",
     notes: "",
     taskId: "",
+    subtaskId: "",
   });
 
+  const [isSaving, setIsSaving] = useState(false);
+
   const availableReferences = useMemo(() => {
+    if (form.macroArea === "consulenza") {
+      return clientReferences.length > 0
+        ? clientReferences.map((item) => item.label)
+        : referenceMap.consulenza;
+    }
+
     return referenceMap[form.macroArea] ?? [];
+  }, [form.macroArea, clientReferences]);
+
+  const availableActivities = useMemo(() => {
+    return activityMap[form.macroArea] ?? [];
   }, [form.macroArea]);
 
   useEffect(() => {
     setForm((prev) => ({
       ...prev,
       referenceName: "",
+      activity: "",
     }));
   }, [form.macroArea]);
 
@@ -65,8 +91,10 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
     }));
   }
 
-  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    if (isSaving) return;
 
     if (
       !form.referenceName ||
@@ -83,17 +111,58 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
       return;
     }
 
+    const operatorMatch = operators.find(
+      (item) => item.label === form.operator
+    );
+
+    const clientMatch =
+      form.macroArea === "consulenza"
+        ? clientReferences.find((item) => item.label === form.referenceName)
+        : undefined;
+
+    const payload = {
+      macroarea: form.macroArea,
+      riferimento: form.referenceName,
+      operatore_id: operatorMatch?.id || null,
+      data: form.date,
+      attivita: form.activity,
+      minuti: parsedMinutes,
+      notes: form.notes.trim() || null,
+      task_id: form.taskId.trim() || null,
+      subtask_id: form.subtaskId.trim() || null,
+      client_id: clientMatch?.id || null,
+    };
+
+    setIsSaving(true);
+
+    const { data, error } = await supabase
+      .from("tracking")
+      .insert(payload)
+      .select("*")
+      .single();
+
+    setIsSaving(false);
+
+    if (error || !data) {
+      console.error("Errore inserimento tracking:", error?.message);
+      return;
+    }
+
     const newEntry: TrackingEntry = {
-      id: crypto.randomUUID(),
+      id: data.id,
       macroArea: form.macroArea,
       referenceName: form.referenceName,
       operator: form.operator as TrackingEntry["operator"],
+      operatorId: operatorMatch?.id,
+      clientId: clientMatch?.id,
       date: form.date,
       activity: form.activity as TrackingEntry["activity"],
       minutes: parsedMinutes,
-      notes: form.notes.trim(),
+      notes: form.notes.trim() || undefined,
       taskId: form.taskId.trim() || undefined,
-      createdAt: new Date().toISOString(),
+      subtaskId: form.subtaskId.trim() || undefined,
+      createdAt: data.created_at || new Date().toISOString(),
+      editHistory: [],
     };
 
     onAddEntry(newEntry);
@@ -105,6 +174,7 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
       minutes: "",
       notes: "",
       taskId: "",
+      subtaskId: "",
     }));
   }
 
@@ -165,9 +235,9 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
               className={selectClassName}
             >
               <option value="">Seleziona operatore</option>
-              {trackingOperators.map((operator) => (
-                <option key={operator} value={operator}>
-                  {operator}
+              {operators.map((operator) => (
+                <option key={operator.id} value={operator.label}>
+                  {operator.label}
                 </option>
               ))}
             </select>
@@ -196,7 +266,7 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
               className={selectClassName}
             >
               <option value="">Seleziona attività</option>
-              {trackingActivities.map((activity) => (
+              {availableActivities.map((activity) => (
                 <option key={activity} value={activity}>
                   {formatActivity(activity)}
                 </option>
@@ -217,11 +287,13 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
           </div>
 
           <div className="xl:pb-[1px]">
-            <AppButton>Aggiungi</AppButton>
+            <AppButton>
+              {isSaving ? "Salvataggio..." : "Aggiungi"}
+            </AppButton>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr]">
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[2fr_1fr_1fr]">
           <div>
             <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
               Note
@@ -245,6 +317,17 @@ export default function TrackingForm({ onAddEntry }: TrackingFormProps) {
               onChange={(e) => handleChange("taskId", e.target.value)}
             />
           </div>
+
+          <div>
+            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+              Subtask ID
+            </label>
+            <AppInput
+              placeholder="Facoltativo"
+              value={form.subtaskId}
+              onChange={(e) => handleChange("subtaskId", e.target.value)}
+            />
+          </div>
         </div>
       </form>
     </AppCard>
@@ -263,6 +346,8 @@ function formatMacroArea(value: string) {
       return "Sales & Marketing";
     case "amministrazione-finance":
       return "Amministrazione & Finance";
+    case "it":
+      return "IT";
     default:
       return value;
   }
@@ -290,6 +375,18 @@ function formatActivity(value: string) {
       return "Organizzazione";
     case "coordinamento":
       return "Coordinamento";
+    case "on-boarding":
+      return "On-boarding";
+    case "sviluppo":
+      return "Sviluppo";
+    case "testing":
+      return "Testing";
+    case "social media":
+      return "Social media";
+    case "contenuti":
+      return "Contenuti";
+    case "PR & networking":
+      return "PR & Networking";
     default:
       return value;
   }

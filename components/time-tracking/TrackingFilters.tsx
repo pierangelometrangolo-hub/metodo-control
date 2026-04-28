@@ -5,13 +5,20 @@ import { AppCard } from "@/components/ui/AppCard";
 import { AppButton } from "@/components/ui/AppButton";
 import { AppInput } from "@/components/ui/AppInput";
 import { SectionHeader } from "@/components/ui/SectionHeader";
-import { referenceMap, trackingAreas, TrackingArea } from "@/lib/tracking";
+import {
+  referenceMap,
+  trackingActivities,
+  trackingAreas,
+  TrackingArea,
+} from "@/lib/tracking";
 
 export type TrackingFiltersState = {
   macroArea: "all" | TrackingArea;
   referenceName: string;
   operator: string;
-  date: string;
+  activity: string;
+  startDate: string;
+  endDate: string;
   searchTerm: string;
 };
 
@@ -41,7 +48,7 @@ export default function TrackingFilters({
     field: K,
     value: TrackingFiltersState[K]
   ) {
-    const nextFilters = {
+    const nextFilters: TrackingFiltersState = {
       ...filters,
       [field]: value,
     };
@@ -58,7 +65,9 @@ export default function TrackingFilters({
       macroArea: "all",
       referenceName: "",
       operator: "",
-      date: "",
+      activity: "",
+      startDate: "",
+      endDate: "",
       searchTerm: "",
     });
   }
@@ -67,7 +76,7 @@ export default function TrackingFilters({
     <AppCard className="rounded-[24px] p-7">
       <SectionHeader
         title="Filtri tracking"
-        description="Vista operativa compatta con ricerca e lettura del tempo registrato."
+        description="Vista operativa compatta con ricerca, attività e filtro periodo."
         className="mb-6"
         action={
           <AppButton variant="ghost" onClick={resetFilters}>
@@ -76,7 +85,7 @@ export default function TrackingFilters({
         }
       />
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_220px_1fr_220px_220px]">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.5fr_220px_1fr_220px_220px_220px]">
         <div>
           <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
             Ricerca track
@@ -146,13 +155,50 @@ export default function TrackingFilters({
 
         <div>
           <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-            Data
+            Attività
           </label>
-          <AppInput
-            type="date"
-            value={filters.date}
-            onChange={(e) => updateFilter("date", e.target.value)}
-          />
+          <select
+            value={filters.activity}
+            onChange={(e) => updateFilter("activity", e.target.value)}
+            className={selectClassName}
+          >
+            <option value="">Tutte</option>
+            {trackingActivities.map((activity) => (
+              <option key={activity} value={activity}>
+                {formatActivity(activity)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="rounded-[18px] border border-[#ebe4dc] bg-[#fcfbf9] p-4">
+          <label className="mb-3 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+            Periodo
+          </label>
+
+          <div className="grid gap-3">
+            <div>
+              <span className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[#7a726c]">
+                Data inizio
+              </span>
+              <AppInput
+                type="date"
+                value={filters.startDate}
+                onChange={(e) => updateFilter("startDate", e.target.value)}
+              />
+            </div>
+
+            <div>
+              <span className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[#7a726c]">
+                Data fine
+              </span>
+              <AppInput
+                type="date"
+                value={filters.endDate}
+                onChange={(e) => updateFilter("endDate", e.target.value)}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </AppCard>
@@ -171,6 +217,37 @@ function formatMacroArea(value: string) {
       return "Sales & Marketing";
     case "amministrazione-finance":
       return "Amministrazione & Finance";
+    default:
+      return value;
+  }
+}
+
+function formatActivity(value: string) {
+  switch (value) {
+    case "call":
+      return "Call";
+    case "email":
+      return "Email";
+    case "whatsapp":
+      return "WhatsApp";
+    case "meeting":
+      return "Meeting";
+    case "follow up":
+      return "Follow up";
+    case "analisi":
+      return "Analisi";
+    case "reportistica":
+      return "Reportistica";
+    case "amministrazione":
+      return "Amministrazione";
+    case "organizzazione":
+      return "Organizzazione";
+    case "coordinamento":
+      return "Coordinamento";
+    case "onboarding":
+      return "Onboarding";
+    case "sviluppo / IT":
+      return "Sviluppo / IT";
     default:
       return value;
   }

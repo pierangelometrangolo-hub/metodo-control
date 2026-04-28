@@ -4,6 +4,7 @@ export const trackingAreas = [
   "commerciale",
   "sales-marketing",
   "amministrazione-finance",
+  "it",
 ] as const;
 
 export type TrackingArea = (typeof trackingAreas)[number];
@@ -29,6 +30,7 @@ export const consulenzaReferences = [
 export const projectReferences = [
   "Puglia Destination Off",
   "Formazione",
+  "Sviluppo piattaforma",
 ];
 
 export const commercialeReferences = [
@@ -53,35 +55,108 @@ export const adminFinanceReferences = [
   "Budget",
 ];
 
+export const itReferences = [
+  "Sviluppo piattaforma",
+  "Bug fixing",
+  "Testing interno",
+  "Integrazione Supabase",
+  "Dashboard",
+];
+
 export const referenceMap: Record<TrackingArea, string[]> = {
   consulenza: consulenzaReferences,
   projects: projectReferences,
   commerciale: commercialeReferences,
   "sales-marketing": salesMarketingReferences,
   "amministrazione-finance": adminFinanceReferences,
+  it: itReferences,
 };
 
-export const trackingActivities = [
-  "call",
-  "email",
-  "whatsapp",
-  "meeting",
-  "follow up",
-  "analisi",
-  "reportistica",
-  "amministrazione",
-  "organizzazione",
-  "coordinamento",
-] as const;
+export const activityMap: Record<TrackingArea, string[]> = {
+  consulenza: [
+    "call",
+    "email",
+    "whatsapp",
+    "meeting",
+    "follow up",
+    "analisi",
+    "reportistica",
+    "coordinamento",
+    "on-boarding",
+  ],
+  projects: [
+    "meeting",
+    "analisi",
+    "organizzazione",
+    "coordinamento",
+    "reportistica",
+    "sviluppo",
+    "testing",
+  ],
+  commerciale: [
+    "call",
+    "email",
+    "whatsapp",
+    "meeting",
+    "follow up",
+    "analisi",
+    "coordinamento",
+  ],
+  "sales-marketing": [
+    "call",
+    "email",
+    "meeting",
+    "follow up",
+    "analisi",
+    "social media",
+    "contenuti",
+    "PR & networking",
+    "coordinamento",
+  ],
+  "amministrazione-finance": [
+    "email",
+    "meeting",
+    "analisi",
+    "reportistica",
+    "amministrazione",
+    "coordinamento",
+  ],
+  it: [
+    "analisi",
+    "sviluppo",
+    "testing",
+    "meeting",
+    "coordinamento",
+    "reportistica",
+  ],
+};
+
+export const trackingActivities = Array.from(
+  new Set(Object.values(activityMap).flat())
+) as string[];
 
 export type TrackingActivity = (typeof trackingActivities)[number];
+
+export type TrackingEditHistoryField =
+  | "macroArea"
+  | "referenceName"
+  | "operator"
+  | "date"
+  | "activity"
+  | "minutes"
+  | "notes"
+  | "taskId"
+  | "subtaskId"
+  | "operatorId"
+  | "clientId";
 
 export type TrackingEditHistoryItem = {
   id: string;
   changedAt: string;
-  field: "macroArea" | "referenceName" | "operator" | "date" | "activity" | "minutes" | "notes" | "taskId";
+  field: TrackingEditHistoryField;
   previousValue: string;
   nextValue: string;
+  changedBy?: string;
 };
 
 export type TrackingEntry = {
@@ -90,49 +165,13 @@ export type TrackingEntry = {
   referenceName: string;
   date: string;
   operator: TrackingOperator;
+  operatorId?: string;
+  clientId?: string;
   activity: TrackingActivity;
   minutes: number;
   notes?: string;
   taskId?: string;
+  subtaskId?: string;
   createdAt: string;
   editHistory?: TrackingEditHistoryItem[];
 };
-
-export const mockTrackingEntries: TrackingEntry[] = [
-  {
-    id: "1",
-    macroArea: "consulenza",
-    referenceName: "Palazzo Rollo",
-    date: "2026-04-11",
-    operator: "Pierangelo",
-    activity: "call",
-    minutes: 25,
-    notes: "Call operativa con la struttura",
-    createdAt: "2026-04-11T09:00:00.000Z",
-    editHistory: [],
-  },
-  {
-    id: "2",
-    macroArea: "projects",
-    referenceName: "Puglia Destination Off",
-    date: "2026-04-11",
-    operator: "Pierangelo",
-    activity: "organizzazione",
-    minutes: 50,
-    notes: "Allineamento attività progetto",
-    createdAt: "2026-04-11T10:00:00.000Z",
-    editHistory: [],
-  },
-  {
-    id: "3",
-    macroArea: "sales-marketing",
-    referenceName: "Tour operator",
-    date: "2026-04-10",
-    operator: "Giorgia",
-    activity: "meeting",
-    minutes: 40,
-    notes: "Incontro commerciale",
-    createdAt: "2026-04-10T15:30:00.000Z",
-    editHistory: [],
-  },
-];

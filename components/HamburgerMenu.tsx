@@ -66,27 +66,6 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-async function getOneSignalInstance(timeoutMs = 10000): Promise<OneSignalClient> {
-  if (window.OneSignal) {
-    console.log("[HamburgerMenu] OneSignal disponibile su window");
-    return window.OneSignal;
-  }
-
-  console.log("[HamburgerMenu] OneSignal non ancora su window, uso OneSignalDeferred fallback");
-
-  return new Promise<OneSignalClient>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      reject(new Error("Timeout attesa OneSignal SDK"));
-    }, timeoutMs);
-
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    window.OneSignalDeferred.push((oneSignal) => {
-      window.clearTimeout(timer);
-      resolve(oneSignal);
-    });
-  });
-}
-
 async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: string) {
   if (window.__oneSignalInitialized) {
     console.log("[HamburgerMenu] OneSignal già inizializzato");
@@ -143,6 +122,31 @@ export default function HamburgerMenu() {
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  async function getOneSignalInstance(timeoutMs = 10000): Promise<OneSignalClient> {
+    if (window.OneSignal) {
+      setNotificationDebugMessage("OneSignal già presente su window");
+      console.log("[HamburgerMenu] OneSignal disponibile su window");
+      return window.OneSignal;
+    }
+
+    setNotificationDebugMessage("OneSignal assente, uso deferred");
+    console.log("[HamburgerMenu] OneSignal non ancora su window, uso OneSignalDeferred fallback");
+
+    return new Promise<OneSignalClient>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        setNotificationDebugMessage("timeout attesa OneSignal SDK");
+        reject(new Error("Timeout attesa OneSignal SDK"));
+      }, timeoutMs);
+
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      window.OneSignalDeferred.push((oneSignal) => {
+        window.clearTimeout(timer);
+        setNotificationDebugMessage("OneSignal deferred risolto");
+        resolve(oneSignal);
+      });
+    });
+  }
 
   async function handleEnableNotifications() {
     if (activatingNotifications) return;
@@ -383,7 +387,7 @@ export default function HamburgerMenu() {
             disabled={activatingNotifications}
             className="flex h-11 w-full items-center rounded-lg border border-[#dbe8eb] bg-[#f3f8fa] px-3 text-sm font-medium text-[#017A92] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {activatingNotifications ? "Attivazione in corso..." : "Attiva notifiche push"}
+            {activatingNotifications ? "Attivazione in corso..." : "Attiva notifiche"}
           </button>
 
           <p className="px-1 text-[11px] leading-4 text-[#6a6d70]">{notificationDebugMessage}</p>

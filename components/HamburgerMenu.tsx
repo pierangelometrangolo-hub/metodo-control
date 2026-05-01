@@ -124,6 +124,7 @@ export default function HamburgerMenu() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [activatingNotifications, setActivatingNotifications] = useState(false);
+  const [notificationDebugMessage, setNotificationDebugMessage] = useState("");
   const pathname = usePathname();
   const router = useRouter();
 
@@ -147,16 +148,20 @@ export default function HamburgerMenu() {
     if (activatingNotifications) return;
 
     setActivatingNotifications(true);
+    setNotificationDebugMessage("avvio click");
 
     try {
       if (typeof window === "undefined") {
+        setNotificationDebugMessage("controllo window fallito");
         console.log("[HamburgerMenu] window non disponibile");
         return;
       }
+      setNotificationDebugMessage("controllo window ok");
 
       const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
 
       if (!oneSignalAppId) {
+        setNotificationDebugMessage("app id mancante");
         console.log("[HamburgerMenu] App ID OneSignal mancante");
         window.alert(
           "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
@@ -164,19 +169,30 @@ export default function HamburgerMenu() {
         return;
       }
 
+      setNotificationDebugMessage("app id presente");
       console.log("[HamburgerMenu] avvio attivazione notifiche");
 
       const oneSignal = await getOneSignalInstance(10000);
-      await ensureOneSignalInitialized(oneSignal, oneSignalAppId);
+      setNotificationDebugMessage("OneSignal trovato");
+
+      try {
+        await ensureOneSignalInitialized(oneSignal, oneSignalAppId);
+        setNotificationDebugMessage("OneSignal init ok");
+      } catch (error) {
+        setNotificationDebugMessage("OneSignal init fallito");
+        throw error;
+      }
 
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
       if (!user?.id) {
+        setNotificationDebugMessage("user Supabase non trovato");
         console.log("[HamburgerMenu] utente non autenticato");
         return;
       }
+      setNotificationDebugMessage("user Supabase trovato");
 
       const oneSignalUser = oneSignal.User || oneSignal.user;
       if (oneSignalUser?.addAlias) {
@@ -187,12 +203,14 @@ export default function HamburgerMenu() {
       const permissionBefore = getPermissionFromOneSignal(oneSignal);
       console.log("[HamburgerMenu] permission corrente:", permissionBefore);
 
+      setNotificationDebugMessage("request permission avviata");
       await (oneSignal.Notifications?.requestPermission?.() ||
         oneSignal.notifications?.requestPermission?.() ||
         Promise.resolve());
       console.log("[HamburgerMenu] prompt mostrato/chiuso");
 
       const permissionAfter = getPermissionFromOneSignal(oneSignal);
+      setNotificationDebugMessage(`permission dopo prompt: ${permissionAfter}`);
       console.log("[HamburgerMenu] permission dopo prompt:", permissionAfter);
 
       if (permissionAfter !== "granted") {
@@ -203,6 +221,7 @@ export default function HamburgerMenu() {
       const subscriptionData = await waitForSubscriptionId(oneSignal, 10000);
 
       if (!subscriptionData?.playerId) {
+        setNotificationDebugMessage("subscription non trovata");
         console.log("[HamburgerMenu] subscription id non ottenuto entro timeout");
         window.alert(
           "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
@@ -210,6 +229,7 @@ export default function HamburgerMenu() {
         return;
       }
 
+      setNotificationDebugMessage("subscription trovata");
       console.log("[HamburgerMenu] subscription id recuperato:", subscriptionData.playerId);
 
       const {
@@ -234,6 +254,7 @@ export default function HamburgerMenu() {
         },
       };
 
+      setNotificationDebugMessage("chiamata register avviata");
       console.log("[HamburgerMenu] chiamata register eseguita", payload);
 
       const response = await fetch("/api/notifications/register", {
@@ -246,6 +267,7 @@ export default function HamburgerMenu() {
       });
 
       const responseBody = await response.json().catch(() => null);
+      setNotificationDebugMessage(`risposta register status: ${response.status}`);
       console.log("[HamburgerMenu] risposta register", {
         status: response.status,
         body: responseBody,
@@ -363,6 +385,8 @@ export default function HamburgerMenu() {
           >
             {activatingNotifications ? "Attivazione in corso..." : "Attiva notifiche"}
           </button>
+
+          <p className="px-1 text-[11px] leading-4 text-[#6a6d70]">{notificationDebugMessage}</p>
 
           <button
             type="button"

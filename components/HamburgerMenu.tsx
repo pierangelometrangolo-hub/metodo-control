@@ -21,6 +21,7 @@ type OneSignalSubscription = {
   id?: string | null;
   token?: string | null;
   optedIn?: boolean;
+  optIn?: () => Promise<void>;
 };
 
 type OneSignalNotifications = {
@@ -211,7 +212,18 @@ export default function HamburgerMenu() {
       await (oneSignal.Notifications?.requestPermission?.() ||
         oneSignal.notifications?.requestPermission?.() ||
         Promise.resolve());
+      setNotificationDebugMessage("request permission completata");
       console.log("[HamburgerMenu] prompt mostrato/chiuso");
+
+      const pushSubscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+
+      if (pushSubscription?.optIn) {
+        setNotificationDebugMessage("optIn avviato");
+        await pushSubscription.optIn();
+        setNotificationDebugMessage("optIn completato");
+      } else {
+        setNotificationDebugMessage("optIn non disponibile");
+      }
 
       const permissionAfter = getPermissionFromOneSignal(oneSignal);
       setNotificationDebugMessage(`permission dopo prompt: ${permissionAfter}`);

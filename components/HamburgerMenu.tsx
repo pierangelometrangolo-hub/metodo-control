@@ -383,7 +383,7 @@ export default function HamburgerMenu() {
             disabled={activatingNotifications}
             className="flex h-11 w-full items-center rounded-lg border border-[#dbe8eb] bg-[#f3f8fa] px-3 text-sm font-medium text-[#017A92] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {activatingNotifications ? "Attivazione in corso..." : "Attiva notifiche"}
+            {activatingNotifications ? "Attivazione in corso..." : "Attiva notifiche push"}
           </button>
 
           <p className="px-1 text-[11px] leading-4 text-[#6a6d70]">{notificationDebugMessage}</p>

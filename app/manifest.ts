@@ -1,0 +1,32 @@
+import type { MetadataRoute } from "next";
+
+export default function manifest(): MetadataRoute.Manifest {
+  return {
+    name: "MeToDo Control",
+    short_name: "MeToDo",
+    description: "Piattaforma di controllo operativo MeToDo",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#f5f3ef",
+    theme_color: "#017A92",
+    lang: "it-IT",
+    icons: [
+      {
+        src: "/icons/pwa-192x192.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+      {
+        src: "/icons/pwa-512x512.png",
+        sizes: "512x512",
+        type: "image/png",
+      },
+      {
+        src: "/icons/pwa-512x512.png",
+        sizes: "512x512",
+        type: "image/png",
+        purpose: "maskable",
+      },
+    ],
+  };
+}

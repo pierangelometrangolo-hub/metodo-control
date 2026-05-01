@@ -2,17 +2,6 @@
 
 import { useEffect } from "react";
 
-declare global {
-  interface Window {
-    OneSignalDeferred?: Array<(OneSignal: OneSignalClient) => void>;
-    OneSignal?: OneSignalClient;
-  }
-}
-
-type OneSignalClient = {
-  init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
-};
-
 export default function PushBootstrap() {
   useEffect(() => {
     const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;

@@ -5,6 +5,38 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
+declare global {
+  interface Window {
+    OneSignalDeferred?: Array<(OneSignal: OneSignalClient) => void>;
+    OneSignal?: OneSignalClient;
+  }
+}
+
+type OneSignalUser = {
+  addAlias?: (label: string, id: string) => Promise<void>;
+};
+
+type OneSignalSubscription = {
+  id?: string | null;
+  token?: string | null;
+  optedIn?: boolean;
+};
+
+type OneSignalNotifications = {
+  permission?: "default" | "denied" | "granted";
+  requestPermission?: () => Promise<void>;
+};
+
+type OneSignalClient = {
+  init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
+  User?: OneSignalUser;
+  user?: OneSignalUser;
+  UserPushSubscription?: OneSignalSubscription;
+  userPushSubscription?: OneSignalSubscription;
+  Notifications?: OneSignalNotifications;
+  notifications?: OneSignalNotifications;
+};
+
 const menuItems = [
   { label: "Dashboard", href: "/dashboard" },
   { label: "Operations", href: "/operations" },
@@ -20,9 +52,19 @@ function isActivePath(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+function getPermissionFromOneSignal(oneSignal: OneSignalClient): "default" | "denied" | "granted" {
+  return (
+    oneSignal.Notifications?.permission ||
+    oneSignal.notifications?.permission ||
+    Notification.permission ||
+    "default"
+  );
+}
+
 export default function HamburgerMenu() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [activatingNotifications, setActivatingNotifications] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
 
@@ -41,6 +83,108 @@ export default function HamburgerMenu() {
       document.body.style.overflow = "";
     };
   }, [menuOpen]);
+
+  async function handleEnableNotifications() {
+    try {
+      setActivatingNotifications(true);
+      const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
+
+      if (!oneSignalAppId || typeof window === "undefined") {
+        console.log("[HamburgerMenu] App ID OneSignal mancante");
+        return;
+      }
+
+      console.log("[HamburgerMenu] avvio attivazione notifiche");
+
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+
+      window.OneSignalDeferred.push(async (OneSignal) => {
+        try {
+          await OneSignal.init({ appId: oneSignalAppId });
+          console.log("[HamburgerMenu] OneSignal init ok");
+
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+
+          if (!user?.id) {
+            console.log("[HamburgerMenu] utente non autenticato");
+            return;
+          }
+
+          const oneSignalUser = OneSignal.User || OneSignal.user;
+          if (oneSignalUser?.addAlias) {
+            await oneSignalUser.addAlias("external_id", user.id);
+          }
+
+          const permissionBefore = getPermissionFromOneSignal(OneSignal);
+          console.log("[HamburgerMenu] permission corrente:", permissionBefore);
+
+          await (OneSignal.Notifications?.requestPermission?.() || OneSignal.notifications?.requestPermission?.());
+          console.log("[HamburgerMenu] prompt mostrato");
+
+          const permissionAfter = getPermissionFromOneSignal(OneSignal);
+          console.log("[HamburgerMenu] permission dopo prompt:", permissionAfter);
+
+          const subscription = OneSignal.UserPushSubscription || OneSignal.userPushSubscription;
+          const playerId = subscription?.id || null;
+
+          console.log("[HamburgerMenu] subscription id recuperato:", playerId);
+
+          if (!playerId) {
+            console.log("[HamburgerMenu] subscription id assente: skip register");
+            return;
+          }
+
+          const {
+            data: { session },
+          } = await supabase.auth.getSession();
+
+          if (!session?.access_token) {
+            console.log("[HamburgerMenu] token sessione assente: skip register");
+            return;
+          }
+
+          const payload = {
+            onesignal_player_id: playerId,
+            onesignal_subscription_id: subscription?.token || null,
+            external_user_id: user.id,
+            permission: permissionAfter,
+            is_active: Boolean(subscription?.optedIn),
+            device_info: {
+              userAgent: navigator.userAgent,
+              language: navigator.language,
+              platform: navigator.platform,
+            },
+          };
+
+          console.log("[HamburgerMenu] chiamata register eseguita", payload);
+
+          const response = await fetch("/api/notifications/register", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const responseBody = await response.json().catch(() => null);
+          console.log("[HamburgerMenu] risposta register", {
+            status: response.status,
+            body: responseBody,
+          });
+        } catch (error) {
+          console.error("[HamburgerMenu] errore attivazione notifiche:", error);
+        } finally {
+          setActivatingNotifications(false);
+        }
+      });
+    } catch (error) {
+      console.error("[HamburgerMenu] errore globale attivazione notifiche:", error);
+      setActivatingNotifications(false);
+    }
+  }
 
   async function handleLogout() {
     setLoggingOut(true);
@@ -137,7 +281,16 @@ export default function HamburgerMenu() {
           </ul>
         </nav>
 
-        <div className="border-t border-[#e7dfd8] px-3 py-3">
+        <div className="border-t border-[#e7dfd8] px-3 py-3 space-y-2">
+          <button
+            type="button"
+            onClick={handleEnableNotifications}
+            disabled={activatingNotifications}
+            className="flex h-11 w-full items-center rounded-lg border border-[#dbe8eb] bg-[#f3f8fa] px-3 text-sm font-medium text-[#017A92] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {activatingNotifications ? "Attivazione in corso..." : "Attiva notifiche"}
+          </button>
+
           <button
             type="button"
             onClick={handleLogout}

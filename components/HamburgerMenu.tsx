@@ -71,6 +71,25 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function getErrorMessage(error: unknown) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "object" &&
+          error !== null &&
+          "message" in error &&
+          typeof error.message === "string"
+        ? error.message
+        : null;
+
+  try {
+    const json = JSON.stringify(error);
+    return message || json || String(error);
+  } catch {
+    return message || String(error);
+  }
+}
+
 async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: string) {
   if (window.__oneSignalInitialized) {
     console.log("[HamburgerMenu] OneSignal già inizializzato");
@@ -82,25 +101,34 @@ async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: str
   console.log("[HamburgerMenu] OneSignal init ok");
 }
 
-async function waitForSubscriptionId(oneSignal: OneSignalClient, timeoutMs = 10000) {
+async function waitForSubscriptionId(
+  oneSignal: OneSignalClient,
+  onDebug: (message: string) => void,
+  timeoutMs = 10000
+) {
   const start = Date.now();
+  onDebug("attesa subscription id iniziata");
 
   while (Date.now() - start < timeoutMs) {
     const subscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
     const playerId = subscription?.id || null;
+    const token = subscription?.token || null;
+    const optedIn = subscription?.optedIn;
+
+    onDebug(`retry subscription id=${playerId || "null"} token=${token || "null"} optedIn=${String(optedIn)}`);
 
     if (playerId) {
       return {
         playerId,
-        token: subscription?.token || null,
+        token,
         optedIn: Boolean(subscription?.optedIn),
       };
     }
 
-    console.log("[HamburgerMenu] subscription id non disponibile, retry...");
     await wait(500);
   }
 
+  onDebug("timeout subscription id");
   return null;
 }
 
@@ -188,7 +216,8 @@ export default function HamburgerMenu() {
         await ensureOneSignalInitialized(oneSignal, oneSignalAppId);
         setNotificationDebugMessage("OneSignal init ok");
       } catch (error) {
-        setNotificationDebugMessage("OneSignal init fallito");
+        const errorMessage = getErrorMessage(error);
+        setNotificationDebugMessage(`OneSignal init fallito: ${errorMessage}`);
         throw error;
       }
 
@@ -215,7 +244,8 @@ export default function HamburgerMenu() {
           console.log("[HamburgerMenu] addAlias non disponibile");
         }
       } catch (error) {
-        setNotificationDebugMessage("addAlias fallito, continuo");
+        const errorMessage = getErrorMessage(error);
+        setNotificationDebugMessage(`addAlias fallito, continuo: ${errorMessage}`);
         console.log("[HamburgerMenu] addAlias fallito, continuo", error);
       }
 
@@ -259,10 +289,17 @@ export default function HamburgerMenu() {
       }
 
       setNotificationDebugMessage("subscription finale avviata");
-      const subscriptionData = await waitForSubscriptionId(oneSignal, 10000);
+      const subscriptionData = await waitForSubscriptionId(
+        oneSignal,
+        (message) => {
+          setNotificationDebugMessage(message);
+          console.log("[HamburgerMenu]", message);
+        },
+        10000
+      );
 
       if (!subscriptionData?.playerId) {
-        setNotificationDebugMessage("subscription finale: non trovata");
+        setNotificationDebugMessage("timeout subscription id");
         console.log("[HamburgerMenu] subscription id non ottenuto entro timeout");
         window.alert(
           "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
@@ -295,7 +332,7 @@ export default function HamburgerMenu() {
         },
       };
 
-      setNotificationDebugMessage("chiamata register avviata");
+      setNotificationDebugMessage("register avviato");
       console.log("[HamburgerMenu] chiamata register eseguita", payload);
 
       const response = await fetch("/api/notifications/register", {
@@ -308,12 +345,23 @@ export default function HamburgerMenu() {
       });
 
       const responseBody = await response.json().catch(() => null);
-      setNotificationDebugMessage(`risposta register status: ${response.status}`);
+      setNotificationDebugMessage(`register status: ${response.status}`);
       console.log("[HamburgerMenu] risposta register", {
         status: response.status,
         body: responseBody,
       });
+
+      const registerBodyText =
+        typeof responseBody === "string" ? responseBody : JSON.stringify(responseBody);
+      setNotificationDebugMessage(`register body: ${registerBodyText}`);
+
+      if (!response.ok) {
+        setNotificationDebugMessage(`errore reale: register body: ${registerBodyText}`);
+        return;
+      }
     } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      setNotificationDebugMessage(`errore reale: ${errorMessage}`);
       console.error("[HamburgerMenu] errore globale attivazione notifiche:", error);
       window.alert(
         "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."

@@ -58,9 +58,13 @@ function getPermissionFromOneSignal(oneSignal: OneSignalClient): "default" | "de
   return (
     oneSignal.Notifications?.permission ||
     oneSignal.notifications?.permission ||
-    Notification.permission ||
     "default"
   );
+}
+
+function getNotificationPermission(): "default" | "denied" | "granted" {
+  if (typeof Notification === "undefined") return "default";
+  return Notification.permission;
 }
 
 function wait(ms: number) {
@@ -225,6 +229,25 @@ export default function HamburgerMenu() {
       setNotificationDebugMessage("request permission completata");
       console.log("[HamburgerMenu] prompt mostrato/chiuso");
 
+      await wait(1000);
+
+      const notificationPermission = getNotificationPermission();
+      const oneSignalPermission = getPermissionFromOneSignal(oneSignal);
+      const permissionGranted =
+        notificationPermission === "granted" || oneSignalPermission === "granted";
+
+      setNotificationDebugMessage(`Notification.permission = ${notificationPermission}`);
+      console.log("[HamburgerMenu] Notification.permission =", notificationPermission);
+
+      setNotificationDebugMessage(`OneSignal permission = ${oneSignalPermission}`);
+      console.log("[HamburgerMenu] OneSignal permission =", oneSignalPermission);
+
+      if (!permissionGranted) {
+        setNotificationDebugMessage("subscription finale: permission non granted");
+        console.log("[HamburgerMenu] permesso non granted, skip register");
+        return;
+      }
+
       const pushSubscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
 
       if (pushSubscription?.optIn) {
@@ -233,16 +256,6 @@ export default function HamburgerMenu() {
         setNotificationDebugMessage("optIn completato");
       } else {
         setNotificationDebugMessage("optIn non disponibile");
-      }
-
-      const permissionAfter = getPermissionFromOneSignal(oneSignal);
-      setNotificationDebugMessage(`permission finale: ${permissionAfter}`);
-      console.log("[HamburgerMenu] permission finale:", permissionAfter);
-
-      if (permissionAfter !== "granted") {
-        setNotificationDebugMessage("subscription finale: permission non granted");
-        console.log("[HamburgerMenu] permesso non granted, skip register");
-        return;
       }
 
       setNotificationDebugMessage("subscription finale avviata");
@@ -273,7 +286,7 @@ export default function HamburgerMenu() {
         onesignal_player_id: subscriptionData.playerId,
         onesignal_subscription_id: subscriptionData.token,
         external_user_id: user.id,
-        permission: permissionAfter,
+        permission: notificationPermission === "granted" ? notificationPermission : oneSignalPermission,
         is_active: subscriptionData.optedIn,
         device_info: {
           userAgent: navigator.userAgent,

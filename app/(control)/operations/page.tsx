@@ -924,10 +924,17 @@ function OperationsContent() {
       return;
     }
 
+    console.log("task insert ok", { taskId: data.id, ownerId });
+
     const insertedTask = mapDbTaskToUiTask(data as DbTask, profilesMap, clientsMap);
 
     if (ownerId) {
       try {
+        console.log("assignment notification start", {
+          taskId: insertedTask.id,
+          ownerId,
+        });
+
         const clientName =
           insertedTask.clientName && insertedTask.clientName !== "—"
             ? insertedTask.clientName
@@ -944,7 +951,13 @@ function OperationsContent() {
             : `Ti è stata assegnata la task "${insertedTask.title}".`,
           deepLink: "/operations",
         });
+
+        console.log("assignment notification success", {
+          taskId: insertedTask.id,
+          ownerId,
+        });
       } catch (notificationError) {
+        console.log("assignment notification error", notificationError);
         console.error("Errore notifica creazione task:", notificationError);
       }
     }

@@ -90,6 +90,28 @@ function getErrorMessage(error: unknown) {
   }
 }
 
+function getAvailableMethodNames(value: unknown) {
+  if (!value || typeof value !== "object") return "nessuno";
+
+  const methodNames = new Set<string>();
+  let current: object | null = value;
+
+  while (current && current !== Object.prototype) {
+    for (const key of Object.getOwnPropertyNames(current)) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      const item = descriptor?.value;
+
+      if (typeof item === "function") {
+        methodNames.add(key);
+      }
+    }
+
+    current = Object.getPrototypeOf(current);
+  }
+
+  return Array.from(methodNames).sort().join(", ") || "nessuno";
+}
+
 async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: string) {
   if (window.__oneSignalInitialized) {
     console.log("[HamburgerMenu] OneSignal già inizializzato");
@@ -278,19 +300,34 @@ export default function HamburgerMenu() {
         return;
       }
 
-      const pushSubscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
-      const optInAvailable = Boolean(pushSubscription?.optIn);
+      const subscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+      const subscriptionPresent = Boolean(subscription);
+      const subscriptionMethods = getAvailableMethodNames(subscription);
+      const subscriptionBeforeOptInDebug = `id/token/optedIn prima di optIn id=${
+        subscription?.id || "null"
+      } token=${subscription?.token || "null"} optedIn=${String(subscription?.optedIn)}`;
 
-      setNotificationDebugMessage(`optIn disponibile ${optInAvailable ? "sì" : "no"}`);
-      console.log("[HamburgerMenu] optIn disponibile", optInAvailable ? "sì" : "no");
+      setNotificationDebugMessage(`subscription object presente ${subscriptionPresent ? "sì" : "no"}`);
+      console.log(
+        "[HamburgerMenu] subscription object presente",
+        subscriptionPresent ? "sì" : "no"
+      );
 
-      if (optInAvailable) {
+      setNotificationDebugMessage(`metodi disponibili della subscription: ${subscriptionMethods}`);
+      console.log("[HamburgerMenu] metodi disponibili della subscription:", subscriptionMethods);
+
+      setNotificationDebugMessage(subscriptionBeforeOptInDebug);
+      console.log("[HamburgerMenu]", subscriptionBeforeOptInDebug);
+
+      if (subscription?.optIn) {
         setNotificationDebugMessage("optIn avviato");
-        await pushSubscription?.optIn?.();
+        await subscription.optIn();
         setNotificationDebugMessage("optIn completato");
       } else {
         setNotificationDebugMessage("optIn non disponibile");
       }
+
+      await wait(2000);
 
       const subscriptionAfterOptIn =
         oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
@@ -314,7 +351,7 @@ export default function HamburgerMenu() {
       );
 
       if (!subscriptionData?.playerId) {
-        setNotificationDebugMessage("timeout subscription id");
+        setNotificationDebugMessage("subscription non creata dopo optIn");
         console.log("[HamburgerMenu] subscription id non ottenuto entro timeout");
         window.alert(
           "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."

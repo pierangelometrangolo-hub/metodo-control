@@ -2,44 +2,6 @@
 
 import { useEffect } from "react";
 
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-=======
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-declare global {
-  interface Window {
-    OneSignalDeferred?: Array<(OneSignal: OneSignalClient) => void>;
-    OneSignal?: OneSignalClient;
-  }
-}
-
-type OneSignalClient = {
-  init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
-};
-
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
 export default function PushBootstrap() {
   useEffect(() => {
     const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
@@ -76,24 +38,4 @@ export default function PushBootstrap() {
   }, []);
 
   return null;
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
 }
-=======
-}
->>>>>>> theirs
-=======
-}
->>>>>>> theirs
-=======
-}
->>>>>>> theirs
-=======
-}
->>>>>>> theirs
-=======
-}
->>>>>>> theirs

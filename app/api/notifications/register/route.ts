@@ -1,49 +1,12 @@
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 type RegisterNotificationPayload = {
   onesignal_player_id?: string | null;
-=======
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-type RegisterPayload = {
-  onesignal_player_id: string;
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
   onesignal_subscription_id?: string | null;
   external_user_id?: string | null;
   permission?: "default" | "denied" | "granted";
   is_active?: boolean;
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
   device_info?: unknown;
 };
 
@@ -61,49 +24,10 @@ function errorDetails(error: unknown) {
   }
 
   return error;
-=======
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-  device_info?: Record<string, unknown>;
-};
-
-function getServerSupabaseClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !serviceRoleKey) {
-    throw new Error("Missing Supabase server env vars");
-  }
-
-  return createClient(url, serviceRoleKey);
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
 }
 
 export async function POST(request: Request) {
   try {
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
@@ -186,76 +110,5 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, subscription: data }, { status: 200 });
   } catch (error) {
     return jsonError("Errore inatteso register notifications", errorDetails(error), 500);
-=======
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-    const authHeader = request.headers.get("Authorization") || "";
-    const token = authHeader.replace("Bearer ", "").trim();
-
-    const supabaseServer = getServerSupabaseClient();
-
-    let userId: string | null = null;
-
-    if (token) {
-      const {
-        data: { user },
-      } = await supabaseServer.auth.getUser(token);
-      userId = user?.id || null;
-    }
-
-    if (!userId) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const body = (await request.json()) as RegisterPayload;
-
-    if (!body.onesignal_player_id) {
-      return NextResponse.json({ error: "onesignal_player_id is required" }, { status: 400 });
-    }
-
-    const upsertPayload = {
-      user_id: userId,
-      profile_id: userId,
-      provider: "onesignal",
-      onesignal_player_id: body.onesignal_player_id,
-      onesignal_subscription_id: body.onesignal_subscription_id || null,
-      external_user_id: body.external_user_id || userId,
-      device_info: body.device_info || {},
-      permission: body.permission || "default",
-      is_active: body.is_active ?? true,
-      last_seen_at: new Date().toISOString(),
-    };
-
-    const { error } = await supabaseServer
-      .from("user_push_subscriptions")
-      .upsert(upsertPayload, { onConflict: "onesignal_player_id" });
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ ok: true });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
   }
 }

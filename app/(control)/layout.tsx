@@ -1,5 +1,4 @@
 import HamburgerMenu from "../../components/HamburgerMenu";
-import PushBootstrap from "@/components/notifications/PushBootstrap";
 
 export default function ControlLayout({
   children,
@@ -12,8 +11,6 @@ export default function ControlLayout({
         <div className="flex items-center justify-end">
           <HamburgerMenu />
         </div>
-
-        <PushBootstrap />
 
         {children}
       </div>

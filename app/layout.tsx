@@ -62,11 +62,6 @@ export default function RootLayout({
           src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js"
           strategy="afterInteractive"
         />
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
         <Script id="service-worker-registration" strategy="afterInteractive">
           {`
             if ("serviceWorker" in navigator) {
@@ -78,16 +73,6 @@ export default function RootLayout({
             }
           `}
         </Script>
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
-=======
->>>>>>> theirs
         {children}
       </body>
     </html>

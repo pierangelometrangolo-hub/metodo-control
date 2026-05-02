@@ -62,6 +62,17 @@ export default function RootLayout({
           src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js"
           strategy="afterInteractive"
         />
+        <Script id="service-worker-registration" strategy="afterInteractive">
+          {`
+            if ("serviceWorker" in navigator) {
+              window.addEventListener("load", () => {
+                navigator.serviceWorker.register("/sw.js")
+                  .then(() => console.log("SW registered"))
+                  .catch(err => console.log("SW error", err));
+              });
+            }
+          `}
+        </Script>
         {children}
       </body>
     </html>

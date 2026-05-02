@@ -200,9 +200,19 @@ export default function HamburgerMenu() {
       setNotificationDebugMessage("user Supabase trovato");
 
       const oneSignalUser = oneSignal.User || oneSignal.user;
-      if (oneSignalUser?.addAlias) {
-        await oneSignalUser.addAlias("external_id", user.id);
-        console.log("[HamburgerMenu] alias utente impostato");
+      try {
+        if (oneSignalUser?.addAlias) {
+          setNotificationDebugMessage("addAlias avviato");
+          await oneSignalUser.addAlias("external_id", user.id);
+          setNotificationDebugMessage("addAlias completato");
+          console.log("[HamburgerMenu] alias utente impostato");
+        } else {
+          setNotificationDebugMessage("addAlias non disponibile, continuo");
+          console.log("[HamburgerMenu] addAlias non disponibile");
+        }
+      } catch (error) {
+        setNotificationDebugMessage("addAlias fallito, continuo");
+        console.log("[HamburgerMenu] addAlias fallito, continuo", error);
       }
 
       const permissionBefore = getPermissionFromOneSignal(oneSignal);
@@ -226,18 +236,20 @@ export default function HamburgerMenu() {
       }
 
       const permissionAfter = getPermissionFromOneSignal(oneSignal);
-      setNotificationDebugMessage(`permission dopo prompt: ${permissionAfter}`);
-      console.log("[HamburgerMenu] permission dopo prompt:", permissionAfter);
+      setNotificationDebugMessage(`permission finale: ${permissionAfter}`);
+      console.log("[HamburgerMenu] permission finale:", permissionAfter);
 
       if (permissionAfter !== "granted") {
+        setNotificationDebugMessage("subscription finale: permission non granted");
         console.log("[HamburgerMenu] permesso non granted, skip register");
         return;
       }
 
+      setNotificationDebugMessage("subscription finale avviata");
       const subscriptionData = await waitForSubscriptionId(oneSignal, 10000);
 
       if (!subscriptionData?.playerId) {
-        setNotificationDebugMessage("subscription non trovata");
+        setNotificationDebugMessage("subscription finale: non trovata");
         console.log("[HamburgerMenu] subscription id non ottenuto entro timeout");
         window.alert(
           "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
@@ -245,7 +257,7 @@ export default function HamburgerMenu() {
         return;
       }
 
-      setNotificationDebugMessage("subscription trovata");
+      setNotificationDebugMessage("subscription finale: trovata");
       console.log("[HamburgerMenu] subscription id recuperato:", subscriptionData.playerId);
 
       const {

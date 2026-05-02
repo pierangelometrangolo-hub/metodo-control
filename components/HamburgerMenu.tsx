@@ -429,15 +429,28 @@ export default function HamburgerMenu() {
         setNotificationDebugMessage(
           `register errore status: ${response.status} body: ${registerBodyText}`
         );
+        window.alert(`Errore attivazione notifiche: ${registerBodyText}`);
         return;
       }
+
+      const registerResult =
+        responseBody && typeof responseBody === "object"
+          ? (responseBody as { ok?: unknown })
+          : null;
+
+      if (registerResult?.ok === true) {
+        setNotificationDebugMessage("notifiche attivate correttamente");
+        return;
+      }
+
+      setNotificationDebugMessage(`register errore body: ${registerBodyText}`);
+      window.alert(`Errore attivazione notifiche: ${registerBodyText}`);
+      return;
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       setNotificationDebugMessage(`errore reale: ${errorMessage}`);
       console.error("[HamburgerMenu] errore globale attivazione notifiche:", error);
-      window.alert(
-        "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
-      );
+      return;
     } finally {
       console.log("[HamburgerMenu] fine attivazione notifiche");
       setActivatingNotifications(false);

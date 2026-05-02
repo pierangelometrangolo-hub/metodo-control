@@ -104,7 +104,7 @@ async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: str
 async function waitForSubscriptionId(
   oneSignal: OneSignalClient,
   onDebug: (message: string) => void,
-  timeoutMs = 10000
+  timeoutMs = 20000
 ) {
   const start = Date.now();
   onDebug("attesa subscription id iniziata");
@@ -279,14 +279,29 @@ export default function HamburgerMenu() {
       }
 
       const pushSubscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+      const optInAvailable = Boolean(pushSubscription?.optIn);
 
-      if (pushSubscription?.optIn) {
+      setNotificationDebugMessage(`optIn disponibile ${optInAvailable ? "sì" : "no"}`);
+      console.log("[HamburgerMenu] optIn disponibile", optInAvailable ? "sì" : "no");
+
+      if (optInAvailable) {
         setNotificationDebugMessage("optIn avviato");
-        await pushSubscription.optIn();
+        await pushSubscription?.optIn?.();
         setNotificationDebugMessage("optIn completato");
       } else {
         setNotificationDebugMessage("optIn non disponibile");
       }
+
+      const subscriptionAfterOptIn =
+        oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+      const subscriptionAfterOptInDebug = `stato subscription dopo optIn id=${
+        subscriptionAfterOptIn?.id || "null"
+      } token=${subscriptionAfterOptIn?.token || "null"} optedIn=${String(
+        subscriptionAfterOptIn?.optedIn
+      )}`;
+
+      setNotificationDebugMessage(subscriptionAfterOptInDebug);
+      console.log("[HamburgerMenu]", subscriptionAfterOptInDebug);
 
       setNotificationDebugMessage("subscription finale avviata");
       const subscriptionData = await waitForSubscriptionId(
@@ -295,7 +310,7 @@ export default function HamburgerMenu() {
           setNotificationDebugMessage(message);
           console.log("[HamburgerMenu]", message);
         },
-        10000
+        20000
       );
 
       if (!subscriptionData?.playerId) {

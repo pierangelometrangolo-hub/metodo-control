@@ -233,6 +233,41 @@ function getShortTaskId(id: string) {
   return `#${id.slice(0, 8)}`;
 }
 
+async function sendAssignmentNotification(params: {
+  eventType: "task_assigned" | "subtask_assigned";
+  taskId: string;
+  subtaskId?: string;
+  assignedToUserId: string;
+  assignedByUserId?: string;
+  title: string;
+  message: string;
+  deepLink: string;
+}) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session?.access_token) return;
+
+  await fetch("/api/notifications/send-assignment", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      event_type: params.eventType,
+      task_id: params.taskId,
+      subtask_id: params.subtaskId || null,
+      assigned_to_user_id: params.assignedToUserId,
+      assigned_by_user_id: params.assignedByUserId || null,
+      title: params.title,
+      message: params.message,
+      deep_link: params.deepLink,
+    }),
+  });
+}
+
 function getOwnerDisplayNameById(
   ownerId: string | null | undefined,
   profilesMap: Record<string, Profile>
@@ -890,6 +925,29 @@ function OperationsContent() {
     }
 
     const insertedTask = mapDbTaskToUiTask(data as DbTask, profilesMap, clientsMap);
+
+    if (ownerId) {
+      try {
+        const clientName =
+          insertedTask.clientName && insertedTask.clientName !== "—"
+            ? insertedTask.clientName
+            : null;
+
+        await sendAssignmentNotification({
+          eventType: "task_assigned",
+          taskId: insertedTask.id,
+          assignedToUserId: ownerId,
+          assignedByUserId: currentUserId || undefined,
+          title: "Nuova task assegnata",
+          message: clientName
+            ? `Ti è stata assegnata la task "${insertedTask.title}" per ${clientName}.`
+            : `Ti è stata assegnata la task "${insertedTask.title}".`,
+          deepLink: "/operations",
+        });
+      } catch (notificationError) {
+        console.error("Errore notifica creazione task:", notificationError);
+      }
+    }
 
     setTasks((prev) => [insertedTask, ...prev]);
 

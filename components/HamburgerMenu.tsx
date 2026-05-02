@@ -385,8 +385,9 @@ export default function HamburgerMenu() {
         },
       };
 
-      setNotificationDebugMessage("register avviato");
-      console.log("[HamburgerMenu] chiamata register eseguita", payload);
+      const payloadText = JSON.stringify(payload);
+      setNotificationDebugMessage(`register payload: ${payloadText}`);
+      console.log("[HamburgerMenu] register payload", payload);
 
       const response = await fetch("/api/notifications/register", {
         method: "POST",
@@ -397,19 +398,37 @@ export default function HamburgerMenu() {
         body: JSON.stringify(payload),
       });
 
-      const responseBody = await response.json().catch(() => null);
-      setNotificationDebugMessage(`register status: ${response.status}`);
+      setNotificationDebugMessage(
+        `register response status=${response.status} ok=${response.ok} statusText=${response.statusText}`
+      );
       console.log("[HamburgerMenu] risposta register", {
         status: response.status,
-        body: responseBody,
+        ok: response.ok,
+        statusText: response.statusText,
       });
 
-      const registerBodyText =
-        typeof responseBody === "string" ? responseBody : JSON.stringify(responseBody);
+      const responseText = await response.text();
+      let responseBody: unknown = null;
+
+      if (responseText) {
+        try {
+          responseBody = JSON.parse(responseText);
+        } catch (error) {
+          responseBody = {
+            parseError: error instanceof Error ? error.message : String(error),
+            raw: responseText,
+          };
+        }
+      }
+
+      const registerBodyText = responseText || JSON.stringify(responseBody);
       setNotificationDebugMessage(`register body: ${registerBodyText}`);
+      console.log("[HamburgerMenu] register body", responseBody);
 
       if (!response.ok) {
-        setNotificationDebugMessage(`errore reale: register body: ${registerBodyText}`);
+        setNotificationDebugMessage(
+          `register errore status: ${response.status} body: ${registerBodyText}`
+        );
         return;
       }
     } catch (error) {

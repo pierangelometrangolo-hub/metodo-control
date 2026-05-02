@@ -13,15 +13,16 @@ declare global {
   }
 }
 
-type OneSignalUser = {
-  addAlias?: (label: string, id: string) => Promise<void>;
-};
-
 type OneSignalSubscription = {
   id?: string | null;
   token?: string | null;
   optedIn?: boolean;
   optIn?: () => Promise<void>;
+};
+
+type OneSignalUser = {
+  addAlias?: (label: string, id: string) => Promise<void>;
+  PushSubscription?: OneSignalSubscription;
 };
 
 type OneSignalNotifications = {
@@ -33,8 +34,6 @@ type OneSignalClient = {
   init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
   User?: OneSignalUser;
   user?: OneSignalUser;
-  UserPushSubscription?: OneSignalSubscription;
-  userPushSubscription?: OneSignalSubscription;
   Notifications?: OneSignalNotifications;
   notifications?: OneSignalNotifications;
 };
@@ -132,7 +131,7 @@ async function waitForSubscriptionId(
   onDebug("attesa subscription id iniziata");
 
   while (Date.now() - start < timeoutMs) {
-    const subscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+    const subscription = oneSignal.User?.PushSubscription;
     const playerId = subscription?.id || null;
     const token = subscription?.token || null;
     const optedIn = subscription?.optedIn;
@@ -300,7 +299,7 @@ export default function HamburgerMenu() {
         return;
       }
 
-      const subscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+      const subscription = oneSignal.User?.PushSubscription;
       const subscriptionPresent = Boolean(subscription);
       const subscriptionMethods = getAvailableMethodNames(subscription);
       const subscriptionBeforeOptInDebug = `id/token/optedIn prima di optIn id=${
@@ -319,6 +318,9 @@ export default function HamburgerMenu() {
       setNotificationDebugMessage(subscriptionBeforeOptInDebug);
       console.log("[HamburgerMenu]", subscriptionBeforeOptInDebug);
 
+      setNotificationDebugMessage(`optIn disponibile ${subscription?.optIn ? "sì" : "no"}`);
+      console.log("[HamburgerMenu] optIn disponibile", subscription?.optIn ? "sì" : "no");
+
       if (subscription?.optIn) {
         setNotificationDebugMessage("optIn avviato");
         await subscription.optIn();
@@ -329,8 +331,7 @@ export default function HamburgerMenu() {
 
       await wait(2000);
 
-      const subscriptionAfterOptIn =
-        oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+      const subscriptionAfterOptIn = oneSignal.User?.PushSubscription;
       const subscriptionAfterOptInDebug = `stato subscription dopo optIn id=${
         subscriptionAfterOptIn?.id || "null"
       } token=${subscriptionAfterOptIn?.token || "null"} optedIn=${String(

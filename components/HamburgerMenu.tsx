@@ -13,6 +13,37 @@ declare global {
   }
 }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+type OneSignalUser = {
+  addAlias?: (label: string, id: string) => Promise<void>;
+};
+
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 type OneSignalSubscription = {
   id?: string | null;
   token?: string | null;
@@ -20,11 +51,26 @@ type OneSignalSubscription = {
   optIn?: () => Promise<void>;
 };
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 type OneSignalUser = {
   addAlias?: (label: string, id: string) => Promise<void>;
   PushSubscription?: OneSignalSubscription;
 };
 
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 type OneSignalNotifications = {
   permission?: "default" | "denied" | "granted";
   requestPermission?: () => Promise<void>;
@@ -34,6 +80,31 @@ type OneSignalClient = {
   init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
   User?: OneSignalUser;
   user?: OneSignalUser;
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+=======
+  UserPushSubscription?: OneSignalSubscription;
+  userPushSubscription?: OneSignalSubscription;
+>>>>>>> theirs
+=======
+  UserPushSubscription?: OneSignalSubscription;
+  userPushSubscription?: OneSignalSubscription;
+>>>>>>> theirs
+=======
+  UserPushSubscription?: OneSignalSubscription;
+  userPushSubscription?: OneSignalSubscription;
+>>>>>>> theirs
+=======
+  UserPushSubscription?: OneSignalSubscription;
+  userPushSubscription?: OneSignalSubscription;
+>>>>>>> theirs
+=======
+  UserPushSubscription?: OneSignalSubscription;
+  userPushSubscription?: OneSignalSubscription;
+>>>>>>> theirs
   Notifications?: OneSignalNotifications;
   notifications?: OneSignalNotifications;
 };
@@ -57,19 +128,59 @@ function getPermissionFromOneSignal(oneSignal: OneSignalClient): "default" | "de
   return (
     oneSignal.Notifications?.permission ||
     oneSignal.notifications?.permission ||
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+=======
+    Notification.permission ||
+>>>>>>> theirs
+=======
+    Notification.permission ||
+>>>>>>> theirs
+=======
+    Notification.permission ||
+>>>>>>> theirs
+=======
+    Notification.permission ||
+>>>>>>> theirs
+=======
+    Notification.permission ||
+>>>>>>> theirs
     "default"
   );
 }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 function getNotificationPermission(): "default" | "denied" | "granted" {
   if (typeof Notification === "undefined") return "default";
   return Notification.permission;
 }
 
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 function getErrorMessage(error: unknown) {
   const message =
     error instanceof Error
@@ -111,6 +222,16 @@ function getAvailableMethodNames(value: unknown) {
   return Array.from(methodNames).sort().join(", ") || "nessuno";
 }
 
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: string) {
   if (window.__oneSignalInitialized) {
     console.log("[HamburgerMenu] OneSignal già inizializzato");
@@ -122,6 +243,11 @@ async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: str
   console.log("[HamburgerMenu] OneSignal init ok");
 }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
 async function waitForSubscriptionId(
   oneSignal: OneSignalClient,
   onDebug: (message: string) => void,
@@ -137,19 +263,98 @@ async function waitForSubscriptionId(
     const optedIn = subscription?.optedIn;
 
     onDebug(`retry subscription id=${playerId || "null"} token=${token || "null"} optedIn=${String(optedIn)}`);
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+async function waitForSubscriptionId(oneSignal: OneSignalClient, timeoutMs = 10000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const subscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+    const playerId = subscription?.id || null;
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 
     if (playerId) {
       return {
         playerId,
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
         token,
+=======
+        token: subscription?.token || null,
+>>>>>>> theirs
+=======
+        token: subscription?.token || null,
+>>>>>>> theirs
+=======
+        token: subscription?.token || null,
+>>>>>>> theirs
+=======
+        token: subscription?.token || null,
+>>>>>>> theirs
+=======
+        token: subscription?.token || null,
+>>>>>>> theirs
         optedIn: Boolean(subscription?.optedIn),
       };
     }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
     await wait(500);
   }
 
   onDebug("timeout subscription id");
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+    console.log("[HamburgerMenu] subscription id non disponibile, retry...");
+    await wait(500);
+  }
+
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
   return null;
 }
 
@@ -237,8 +442,28 @@ export default function HamburgerMenu() {
         await ensureOneSignalInitialized(oneSignal, oneSignalAppId);
         setNotificationDebugMessage("OneSignal init ok");
       } catch (error) {
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
         const errorMessage = getErrorMessage(error);
         setNotificationDebugMessage(`OneSignal init fallito: ${errorMessage}`);
+=======
+        setNotificationDebugMessage("OneSignal init fallito");
+>>>>>>> theirs
+=======
+        setNotificationDebugMessage("OneSignal init fallito");
+>>>>>>> theirs
+=======
+        setNotificationDebugMessage("OneSignal init fallito");
+>>>>>>> theirs
+=======
+        setNotificationDebugMessage("OneSignal init fallito");
+>>>>>>> theirs
+=======
+        setNotificationDebugMessage("OneSignal init fallito");
+>>>>>>> theirs
         throw error;
       }
 
@@ -254,6 +479,11 @@ export default function HamburgerMenu() {
       setNotificationDebugMessage("user Supabase trovato");
 
       const oneSignalUser = oneSignal.User || oneSignal.user;
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
       try {
         if (oneSignalUser?.addAlias) {
           setNotificationDebugMessage("addAlias avviato");
@@ -268,6 +498,31 @@ export default function HamburgerMenu() {
         const errorMessage = getErrorMessage(error);
         setNotificationDebugMessage(`addAlias fallito, continuo: ${errorMessage}`);
         console.log("[HamburgerMenu] addAlias fallito, continuo", error);
+=======
+      if (oneSignalUser?.addAlias) {
+        await oneSignalUser.addAlias("external_id", user.id);
+        console.log("[HamburgerMenu] alias utente impostato");
+>>>>>>> theirs
+=======
+      if (oneSignalUser?.addAlias) {
+        await oneSignalUser.addAlias("external_id", user.id);
+        console.log("[HamburgerMenu] alias utente impostato");
+>>>>>>> theirs
+=======
+      if (oneSignalUser?.addAlias) {
+        await oneSignalUser.addAlias("external_id", user.id);
+        console.log("[HamburgerMenu] alias utente impostato");
+>>>>>>> theirs
+=======
+      if (oneSignalUser?.addAlias) {
+        await oneSignalUser.addAlias("external_id", user.id);
+        console.log("[HamburgerMenu] alias utente impostato");
+>>>>>>> theirs
+=======
+      if (oneSignalUser?.addAlias) {
+        await oneSignalUser.addAlias("external_id", user.id);
+        console.log("[HamburgerMenu] alias utente impostato");
+>>>>>>> theirs
       }
 
       const permissionBefore = getPermissionFromOneSignal(oneSignal);
@@ -280,6 +535,11 @@ export default function HamburgerMenu() {
       setNotificationDebugMessage("request permission completata");
       console.log("[HamburgerMenu] prompt mostrato/chiuso");
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
       await wait(1000);
 
       const notificationPermission = getNotificationPermission();
@@ -324,11 +584,43 @@ export default function HamburgerMenu() {
       if (subscription?.optIn) {
         setNotificationDebugMessage("optIn avviato");
         await subscription.optIn();
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+      const pushSubscription = oneSignal.UserPushSubscription || oneSignal.userPushSubscription;
+
+      if (pushSubscription?.optIn) {
+        setNotificationDebugMessage("optIn avviato");
+        await pushSubscription.optIn();
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
         setNotificationDebugMessage("optIn completato");
       } else {
         setNotificationDebugMessage("optIn non disponibile");
       }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
       await wait(2000);
 
       const subscriptionAfterOptIn = oneSignal.User?.PushSubscription;
@@ -353,6 +645,41 @@ export default function HamburgerMenu() {
 
       if (!subscriptionData?.playerId) {
         setNotificationDebugMessage("subscription non creata dopo optIn");
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+      const permissionAfter = getPermissionFromOneSignal(oneSignal);
+      setNotificationDebugMessage(`permission dopo prompt: ${permissionAfter}`);
+      console.log("[HamburgerMenu] permission dopo prompt:", permissionAfter);
+
+      if (permissionAfter !== "granted") {
+        console.log("[HamburgerMenu] permesso non granted, skip register");
+        return;
+      }
+
+      const subscriptionData = await waitForSubscriptionId(oneSignal, 10000);
+
+      if (!subscriptionData?.playerId) {
+        setNotificationDebugMessage("subscription non trovata");
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
         console.log("[HamburgerMenu] subscription id non ottenuto entro timeout");
         window.alert(
           "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
@@ -360,7 +687,27 @@ export default function HamburgerMenu() {
         return;
       }
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
       setNotificationDebugMessage("subscription finale: trovata");
+=======
+      setNotificationDebugMessage("subscription trovata");
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("subscription trovata");
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("subscription trovata");
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("subscription trovata");
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("subscription trovata");
+>>>>>>> theirs
       console.log("[HamburgerMenu] subscription id recuperato:", subscriptionData.playerId);
 
       const {
@@ -376,7 +723,27 @@ export default function HamburgerMenu() {
         onesignal_player_id: subscriptionData.playerId,
         onesignal_subscription_id: subscriptionData.token,
         external_user_id: user.id,
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
         permission: notificationPermission === "granted" ? notificationPermission : oneSignalPermission,
+=======
+        permission: permissionAfter,
+>>>>>>> theirs
+=======
+        permission: permissionAfter,
+>>>>>>> theirs
+=======
+        permission: permissionAfter,
+>>>>>>> theirs
+=======
+        permission: permissionAfter,
+>>>>>>> theirs
+=======
+        permission: permissionAfter,
+>>>>>>> theirs
         is_active: subscriptionData.optedIn,
         device_info: {
           userAgent: navigator.userAgent,
@@ -385,9 +752,34 @@ export default function HamburgerMenu() {
         },
       };
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
       const payloadText = JSON.stringify(payload);
       setNotificationDebugMessage(`register payload: ${payloadText}`);
       console.log("[HamburgerMenu] register payload", payload);
+=======
+      setNotificationDebugMessage("chiamata register avviata");
+      console.log("[HamburgerMenu] chiamata register eseguita", payload);
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("chiamata register avviata");
+      console.log("[HamburgerMenu] chiamata register eseguita", payload);
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("chiamata register avviata");
+      console.log("[HamburgerMenu] chiamata register eseguita", payload);
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("chiamata register avviata");
+      console.log("[HamburgerMenu] chiamata register eseguita", payload);
+>>>>>>> theirs
+=======
+      setNotificationDebugMessage("chiamata register avviata");
+      console.log("[HamburgerMenu] chiamata register eseguita", payload);
+>>>>>>> theirs
 
       const response = await fetch("/api/notifications/register", {
         method: "POST",
@@ -398,6 +790,11 @@ export default function HamburgerMenu() {
         body: JSON.stringify(payload),
       });
 
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
       setNotificationDebugMessage(
         `register response status=${response.status} ok=${response.ok} statusText=${response.statusText}`
       );
@@ -451,6 +848,39 @@ export default function HamburgerMenu() {
       setNotificationDebugMessage(`errore reale: ${errorMessage}`);
       console.error("[HamburgerMenu] errore globale attivazione notifiche:", error);
       return;
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+      const responseBody = await response.json().catch(() => null);
+      setNotificationDebugMessage(`risposta register status: ${response.status}`);
+      console.log("[HamburgerMenu] risposta register", {
+        status: response.status,
+        body: responseBody,
+      });
+    } catch (error) {
+      console.error("[HamburgerMenu] errore globale attivazione notifiche:", error);
+      window.alert(
+        "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
+      );
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
     } finally {
       console.log("[HamburgerMenu] fine attivazione notifiche");
       setActivatingNotifications(false);

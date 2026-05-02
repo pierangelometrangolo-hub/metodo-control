@@ -233,6 +233,42 @@ function getShortTaskId(id: string) {
   return `#${id.slice(0, 8)}`;
 }
 
+
+async function sendAssignmentNotification(params: {
+  eventType: "task_assigned" | "subtask_assigned";
+  taskId: string;
+  subtaskId?: string;
+  assignedToUserId: string;
+  assignedByUserId?: string;
+  title: string;
+  message: string;
+  deepLink: string;
+}) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session?.access_token) return;
+
+  await fetch("/api/notifications/send-assignment", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({
+      event_type: params.eventType,
+      task_id: params.taskId,
+      subtask_id: params.subtaskId || null,
+      assigned_to_user_id: params.assignedToUserId,
+      assigned_by_user_id: params.assignedByUserId || null,
+      title: params.title,
+      message: params.message,
+      deep_link: params.deepLink,
+    }),
+  });
+}
+
 function getOwnerDisplayNameById(
   ownerId: string | null | undefined,
   profilesMap: Record<string, Profile>
@@ -891,6 +927,28 @@ function OperationsContent() {
 
     const insertedTask = mapDbTaskToUiTask(data as DbTask, profilesMap, clientsMap);
 
+    if (ownerId) {
+      try {
+        const clientName = insertedTask.clientName && insertedTask.clientName !== "—"
+          ? insertedTask.clientName
+          : null;
+
+        await sendAssignmentNotification({
+          eventType: "task_assigned",
+          taskId: insertedTask.id,
+          assignedToUserId: ownerId,
+          assignedByUserId: currentUserId || undefined,
+          title: "Nuova task assegnata",
+          message: clientName
+            ? `Ti è stata assegnata la task "${insertedTask.title}" per ${clientName}.`
+            : `Ti è stata assegnata la task "${insertedTask.title}".`,
+          deepLink: "/operations",
+        });
+      } catch (notificationError) {
+        console.error("Errore notifica creazione task:", notificationError);
+      }
+    }
+
     setTasks((prev) => [insertedTask, ...prev]);
 
     setNewTask("");
@@ -977,6 +1035,20 @@ function OperationsContent() {
     }
 
     const historySaved = await persistTaskHistory(localHistoryEntries);
+
+    if (patch.ownerId !== undefined && patch.ownerId && patch.ownerId !== previousTask.ownerId) {
+      const ownerName = getOwnerDisplayNameById(patch.ownerId, profilesMap);
+
+      await sendAssignmentNotification({
+        eventType: "task_assigned",
+        taskId: id,
+        assignedToUserId: patch.ownerId,
+        assignedByUserId: currentUserId || undefined,
+        title: "Nuova task assegnata",
+        message: `${ownerName}, ti è stata assegnata la task: ${nextTask.title}`,
+        deepLink: `/operations?taskId=${id}` ,
+      });
+    }
 
     if (!historySaved) {
       setTasks(previousTasks);
@@ -1125,6 +1197,27 @@ function OperationsContent() {
     if (error) {
       console.error("Errore assegnazione subtask:", error.message);
       setSubtasksByTask(previousSubtasks);
+      return;
+    }
+
+    if (ownerId) {
+      const parentTask = tasks.find((task) => (subtasksByTask[task.id] || []).some((item) => item.subtask_id === subtaskId));
+      const assignedSubtask = (subtasksByTask[parentTask?.id || ""] || []).find((item) => item.subtask_id === subtaskId);
+
+      if (parentTask) {
+        const label = assignedSubtask?.subtask_label || assignedSubtask?.subtask_name || "Subtask";
+
+        await sendAssignmentNotification({
+          eventType: "subtask_assigned",
+          taskId: parentTask.id,
+          subtaskId,
+          assignedToUserId: ownerId,
+          assignedByUserId: currentUserId || undefined,
+          title: "Nuova subtask assegnata",
+          message: `Ti è stata assegnata la subtask: ${label}`,
+          deepLink: `/operations?taskId=${parentTask.id}&subtaskId=${subtaskId}` ,
+        });
+      }
     }
   }
 
@@ -1145,19 +1238,44 @@ function OperationsContent() {
         ? Math.max(...currentSubtasks.map((subtask) => subtask.order_index)) + 1
         : 1;
 
-    const { error } = await supabase.from("subtasks").insert({
-      task_id: taskId,
-      type_id: fallbackTypeId,
-      label: cleanLabel,
-      order_index: nextOrder,
-      completed: false,
-      owner_id: ownerId || null,
-    });
+    const { data: insertedSubtask, error } = await supabase
+      .from("subtasks")
+      .insert({
+        task_id: taskId,
+        type_id: fallbackTypeId,
+        label: cleanLabel,
+        order_index: nextOrder,
+        completed: false,
+        owner_id: ownerId || null,
+      })
+      .select("id")
+      .single();
 
     if (error) {
       console.error("Errore creazione subtask manuale:", error.message);
       window.alert("Errore nella creazione della subtask.");
       return;
+    }
+
+    if (ownerId) {
+      try {
+        const parentTask = tasks.find((task) => task.id === taskId);
+
+        await sendAssignmentNotification({
+          eventType: "subtask_assigned",
+          taskId,
+          subtaskId: insertedSubtask?.id,
+          assignedToUserId: ownerId,
+          assignedByUserId: currentUserId || undefined,
+          title: "Nuova subtask assegnata",
+          message: parentTask
+            ? `Ti è stata assegnata la subtask "${cleanLabel}" nella task "${parentTask.title}".`
+            : `Ti è stata assegnata la subtask "${cleanLabel}".`,
+          deepLink: "/operations",
+        });
+      } catch (notificationError) {
+        console.error("Errore notifica creazione subtask:", notificationError);
+      }
     }
 
     const { data, error: refreshError } = await supabase

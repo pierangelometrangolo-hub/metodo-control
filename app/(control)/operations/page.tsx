@@ -326,7 +326,7 @@ function mapDbTaskToUiTask(
     ownerId: task.owner_id || undefined,
     clientId: task.client_id || undefined,
     clientName: getClientNameById(task.client_id, clientsMap),
-    dueDate: task.due_date || undefined,
+    dueDate: task.due_date ? task.due_date.split("T")[0] : undefined,
     openedAt: task.opened_at?.split("T")[0] || "",
     closedAt: task.closed_at ? task.closed_at.split("T")[0] : undefined,
     archived: task.archived,

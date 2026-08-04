@@ -228,7 +228,7 @@ export default function TimeTrackingPage() {
             : (fallbackOperator as TrackingEntry["operator"]),
         operatorId: row.operatore_id || undefined,
         clientId: row.client_id || undefined,
-        date: row.data,
+        date: row.data ? row.data.split("T")[0] : row.data,
         activity: row.attivita as TrackingEntry["activity"],
         minutes: row.minuti,
         notes: row.notes || undefined,

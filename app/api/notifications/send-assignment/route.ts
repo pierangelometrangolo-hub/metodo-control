@@ -209,7 +209,7 @@ export async function POST(request: Request) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Basic ${oneSignalRestApiKey}`,
+        Authorization: `Key ${oneSignalRestApiKey}`,
       },
       body: JSON.stringify({
         app_id: oneSignalAppId,

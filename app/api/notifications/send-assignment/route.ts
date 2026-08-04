@@ -81,6 +81,7 @@ export async function POST(request: Request) {
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
     const oneSignalRestApiKey = process.env.ONESIGNAL_REST_API_KEY;
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
 
     if (!supabaseUrl || !supabaseAnonKey) {
       return jsonError(
@@ -216,7 +217,7 @@ export async function POST(request: Request) {
         include_subscription_ids: subscriptionIds,
         headings: { it: payload.title, en: payload.title },
         contents: { it: payload.message, en: payload.message },
-        url: payload.deepLink,
+        url: appUrl ? new URL(payload.deepLink, appUrl).toString() : payload.deepLink,
         data: {
           eventType: payload.eventType,
           taskId: payload.taskId,

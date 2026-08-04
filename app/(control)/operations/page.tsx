@@ -1361,6 +1361,24 @@ function OperationsContent() {
   return (
     <main className={openSans.className} style={mainStyle}>
       <div style={{ maxWidth: "1280px", margin: "0 auto" }}>
+        {targetUnavailable && (
+          <section style={targetUnavailableBannerStyle}>
+            <span style={{ fontWeight: 600 }}>
+              {targetUnavailable === "task"
+                ? "L'elemento a cui si riferiva la notifica non è più disponibile (chiusa o archiviata)."
+                : "La subtask a cui si riferiva la notifica non è più disponibile."}
+            </span>
+            <button
+              type="button"
+              onClick={() => setTargetUnavailable(null)}
+              style={targetUnavailableDismissStyle}
+              aria-label="Chiudi"
+            >
+              ✕
+            </button>
+          </section>
+        )}
+
         <section style={heroCardStyle}>
 <div style={{ display: "grid", gridTemplateColumns: "1fr", minHeight: "240px" }}>            <div style={heroLogoAreaStyle}>
               <div style={logoBoxStyle}>
@@ -1402,24 +1420,6 @@ function OperationsContent() {
             </div>
           </div>
         </section>
-
-        {targetUnavailable && (
-          <section style={targetUnavailableBannerStyle}>
-            <span style={{ fontWeight: 600 }}>
-              {targetUnavailable === "task"
-                ? "L'elemento a cui si riferiva la notifica non è più disponibile (chiusa o archiviata)."
-                : "La subtask a cui si riferiva la notifica non è più disponibile."}
-            </span>
-            <button
-              type="button"
-              onClick={() => setTargetUnavailable(null)}
-              style={targetUnavailableDismissStyle}
-              aria-label="Chiudi"
-            >
-              ✕
-            </button>
-          </section>
-        )}
 
         <section style={kpiGridStyle}>
           {kpis.map((item) => {

@@ -4,39 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
-
-declare global {
-  interface Window {
-    OneSignalDeferred?: Array<(OneSignal: OneSignalClient) => void>;
-    OneSignal?: OneSignalClient;
-    __oneSignalInitialized?: boolean;
-  }
-}
-
-type OneSignalSubscription = {
-  id?: string | null;
-  token?: string | null;
-  optedIn?: boolean;
-  optIn?: () => Promise<void>;
-};
-
-type OneSignalUser = {
-  addAlias?: (label: string, id: string) => Promise<void>;
-  PushSubscription?: OneSignalSubscription;
-};
-
-type OneSignalNotifications = {
-  permission?: "default" | "denied" | "granted";
-  requestPermission?: () => Promise<void>;
-};
-
-type OneSignalClient = {
-  init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
-  User?: OneSignalUser;
-  user?: OneSignalUser;
-  Notifications?: OneSignalNotifications;
-  notifications?: OneSignalNotifications;
-};
+import { activatePushNotifications } from "@/lib/pushNotifications";
 
 const menuItems = [
   { label: "Dashboard", href: "/dashboard" },
@@ -51,106 +19,6 @@ const menuItems = [
 function isActivePath(pathname: string, href: string) {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
-}
-
-function getPermissionFromOneSignal(oneSignal: OneSignalClient): "default" | "denied" | "granted" {
-  return (
-    oneSignal.Notifications?.permission ||
-    oneSignal.notifications?.permission ||
-    "default"
-  );
-}
-
-function getNotificationPermission(): "default" | "denied" | "granted" {
-  if (typeof Notification === "undefined") return "default";
-  return Notification.permission;
-}
-
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function getErrorMessage(error: unknown) {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "object" &&
-          error !== null &&
-          "message" in error &&
-          typeof error.message === "string"
-        ? error.message
-        : null;
-
-  try {
-    const json = JSON.stringify(error);
-    return message || json || String(error);
-  } catch {
-    return message || String(error);
-  }
-}
-
-function getAvailableMethodNames(value: unknown) {
-  if (!value || typeof value !== "object") return "nessuno";
-
-  const methodNames = new Set<string>();
-  let current: object | null = value;
-
-  while (current && current !== Object.prototype) {
-    for (const key of Object.getOwnPropertyNames(current)) {
-      const descriptor = Object.getOwnPropertyDescriptor(current, key);
-      const item = descriptor?.value;
-
-      if (typeof item === "function") {
-        methodNames.add(key);
-      }
-    }
-
-    current = Object.getPrototypeOf(current);
-  }
-
-  return Array.from(methodNames).sort().join(", ") || "nessuno";
-}
-
-async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: string) {
-  if (window.__oneSignalInitialized) {
-    console.log("[HamburgerMenu] OneSignal già inizializzato");
-    return;
-  }
-
-  await oneSignal.init({ appId });
-  window.__oneSignalInitialized = true;
-  console.log("[HamburgerMenu] OneSignal init ok");
-}
-
-async function waitForSubscriptionId(
-  oneSignal: OneSignalClient,
-  onDebug: (message: string) => void,
-  timeoutMs = 20000
-) {
-  const start = Date.now();
-  onDebug("attesa subscription id iniziata");
-
-  while (Date.now() - start < timeoutMs) {
-    const subscription = oneSignal.User?.PushSubscription;
-    const playerId = subscription?.id || null;
-    const token = subscription?.token || null;
-    const optedIn = subscription?.optedIn;
-
-    onDebug(`retry subscription id=${playerId || "null"} token=${token || "null"} optedIn=${String(optedIn)}`);
-
-    if (playerId) {
-      return {
-        playerId,
-        token,
-        optedIn: Boolean(subscription?.optedIn),
-      };
-    }
-
-    await wait(500);
-  }
-
-  onDebug("timeout subscription id");
-  return null;
 }
 
 export default function HamburgerMenu() {
@@ -177,283 +45,32 @@ export default function HamburgerMenu() {
     };
   }, [menuOpen]);
 
-  async function getOneSignalInstance(timeoutMs = 10000): Promise<OneSignalClient> {
-    if (window.OneSignal) {
-      setNotificationDebugMessage("OneSignal già presente su window");
-      console.log("[HamburgerMenu] OneSignal disponibile su window");
-      return window.OneSignal;
-    }
-
-    setNotificationDebugMessage("OneSignal assente, uso deferred");
-    console.log("[HamburgerMenu] OneSignal non ancora su window, uso OneSignalDeferred fallback");
-
-    return new Promise<OneSignalClient>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        setNotificationDebugMessage("timeout attesa OneSignal SDK");
-        reject(new Error("Timeout attesa OneSignal SDK"));
-      }, timeoutMs);
-
-      window.OneSignalDeferred = window.OneSignalDeferred || [];
-      window.OneSignalDeferred.push((oneSignal) => {
-        window.clearTimeout(timer);
-        setNotificationDebugMessage("OneSignal deferred risolto");
-        resolve(oneSignal);
-      });
-    });
-  }
-
   async function handleEnableNotifications() {
     if (activatingNotifications) return;
 
     setActivatingNotifications(true);
     setNotificationDebugMessage("avvio click");
 
-    try {
-      if (typeof window === "undefined") {
-        setNotificationDebugMessage("controllo window fallito");
-        console.log("[HamburgerMenu] window non disponibile");
-        return;
-      }
-      setNotificationDebugMessage("controllo window ok");
+    const result = await activatePushNotifications({
+      requestPermission: true,
+      onDebug: setNotificationDebugMessage,
+    });
 
-      const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
+    setActivatingNotifications(false);
 
-      if (!oneSignalAppId) {
-        setNotificationDebugMessage("app id mancante");
-        console.log("[HamburgerMenu] App ID OneSignal mancante");
-        window.alert(
-          "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
-        );
-        return;
-      }
-
-      setNotificationDebugMessage("app id presente");
-      console.log("[HamburgerMenu] avvio attivazione notifiche");
-
-      const oneSignal = await getOneSignalInstance(10000);
-      setNotificationDebugMessage("OneSignal trovato");
-
-      try {
-        await ensureOneSignalInitialized(oneSignal, oneSignalAppId);
-        setNotificationDebugMessage("OneSignal init ok");
-      } catch (error) {
-        const errorMessage = getErrorMessage(error);
-        setNotificationDebugMessage(`OneSignal init fallito: ${errorMessage}`);
-        throw error;
-      }
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user?.id) {
-        setNotificationDebugMessage("user Supabase non trovato");
-        console.log("[HamburgerMenu] utente non autenticato");
-        return;
-      }
-      setNotificationDebugMessage("user Supabase trovato");
-
-      const oneSignalUser = oneSignal.User || oneSignal.user;
-      try {
-        if (oneSignalUser?.addAlias) {
-          setNotificationDebugMessage("addAlias avviato");
-          await oneSignalUser.addAlias("external_id", user.id);
-          setNotificationDebugMessage("addAlias completato");
-          console.log("[HamburgerMenu] alias utente impostato");
-        } else {
-          setNotificationDebugMessage("addAlias non disponibile, continuo");
-          console.log("[HamburgerMenu] addAlias non disponibile");
-        }
-      } catch (error) {
-        const errorMessage = getErrorMessage(error);
-        setNotificationDebugMessage(`addAlias fallito, continuo: ${errorMessage}`);
-        console.log("[HamburgerMenu] addAlias fallito, continuo", error);
-      }
-
-      const permissionBefore = getPermissionFromOneSignal(oneSignal);
-      console.log("[HamburgerMenu] permission corrente:", permissionBefore);
-
-      setNotificationDebugMessage("request permission avviata");
-      await (oneSignal.Notifications?.requestPermission?.() ||
-        oneSignal.notifications?.requestPermission?.() ||
-        Promise.resolve());
-      setNotificationDebugMessage("request permission completata");
-      console.log("[HamburgerMenu] prompt mostrato/chiuso");
-
-      await wait(1000);
-
-      const notificationPermission = getNotificationPermission();
-      const oneSignalPermission = getPermissionFromOneSignal(oneSignal);
-      const permissionGranted =
-        notificationPermission === "granted" || oneSignalPermission === "granted";
-
-      setNotificationDebugMessage(`Notification.permission = ${notificationPermission}`);
-      console.log("[HamburgerMenu] Notification.permission =", notificationPermission);
-
-      setNotificationDebugMessage(`OneSignal permission = ${oneSignalPermission}`);
-      console.log("[HamburgerMenu] OneSignal permission =", oneSignalPermission);
-
-      if (!permissionGranted) {
-        setNotificationDebugMessage("subscription finale: permission non granted");
-        console.log("[HamburgerMenu] permesso non granted, skip register");
-        return;
-      }
-
-      const subscription = oneSignal.User?.PushSubscription;
-      const subscriptionPresent = Boolean(subscription);
-      const subscriptionMethods = getAvailableMethodNames(subscription);
-      const subscriptionBeforeOptInDebug = `id/token/optedIn prima di optIn id=${
-        subscription?.id || "null"
-      } token=${subscription?.token || "null"} optedIn=${String(subscription?.optedIn)}`;
-
-      setNotificationDebugMessage(`subscription object presente ${subscriptionPresent ? "sì" : "no"}`);
-      console.log(
-        "[HamburgerMenu] subscription object presente",
-        subscriptionPresent ? "sì" : "no"
-      );
-
-      setNotificationDebugMessage(`metodi disponibili della subscription: ${subscriptionMethods}`);
-      console.log("[HamburgerMenu] metodi disponibili della subscription:", subscriptionMethods);
-
-      setNotificationDebugMessage(subscriptionBeforeOptInDebug);
-      console.log("[HamburgerMenu]", subscriptionBeforeOptInDebug);
-
-      setNotificationDebugMessage(`optIn disponibile ${subscription?.optIn ? "sì" : "no"}`);
-      console.log("[HamburgerMenu] optIn disponibile", subscription?.optIn ? "sì" : "no");
-
-      if (subscription?.optIn) {
-        setNotificationDebugMessage("optIn avviato");
-        await subscription.optIn();
-        setNotificationDebugMessage("optIn completato");
-      } else {
-        setNotificationDebugMessage("optIn non disponibile");
-      }
-
-      await wait(2000);
-
-      const subscriptionAfterOptIn = oneSignal.User?.PushSubscription;
-      const subscriptionAfterOptInDebug = `stato subscription dopo optIn id=${
-        subscriptionAfterOptIn?.id || "null"
-      } token=${subscriptionAfterOptIn?.token || "null"} optedIn=${String(
-        subscriptionAfterOptIn?.optedIn
-      )}`;
-
-      setNotificationDebugMessage(subscriptionAfterOptInDebug);
-      console.log("[HamburgerMenu]", subscriptionAfterOptInDebug);
-
-      setNotificationDebugMessage("subscription finale avviata");
-      const subscriptionData = await waitForSubscriptionId(
-        oneSignal,
-        (message) => {
-          setNotificationDebugMessage(message);
-          console.log("[HamburgerMenu]", message);
-        },
-        20000
-      );
-
-      if (!subscriptionData?.playerId) {
-        setNotificationDebugMessage("subscription non creata dopo optIn");
-        console.log("[HamburgerMenu] subscription id non ottenuto entro timeout");
-        window.alert(
-          "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
-        );
-        return;
-      }
-
-      setNotificationDebugMessage("subscription finale: trovata");
-      console.log("[HamburgerMenu] subscription id recuperato:", subscriptionData.playerId);
-
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      if (!session?.access_token) {
-        console.log("[HamburgerMenu] token sessione assente: skip register");
-        return;
-      }
-
-      const payload = {
-        onesignal_player_id: subscriptionData.playerId,
-        onesignal_subscription_id: subscriptionData.token,
-        external_user_id: user.id,
-        permission: notificationPermission === "granted" ? notificationPermission : oneSignalPermission,
-        is_active: subscriptionData.optedIn,
-        device_info: {
-          userAgent: navigator.userAgent,
-          language: navigator.language,
-          platform: navigator.platform,
-        },
-      };
-
-      const payloadText = JSON.stringify(payload);
-      setNotificationDebugMessage(`register payload: ${payloadText}`);
-      console.log("[HamburgerMenu] register payload", payload);
-
-      const response = await fetch("/api/notifications/register", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      setNotificationDebugMessage(
-        `register response status=${response.status} ok=${response.ok} statusText=${response.statusText}`
-      );
-      console.log("[HamburgerMenu] risposta register", {
-        status: response.status,
-        ok: response.ok,
-        statusText: response.statusText,
-      });
-
-      const responseText = await response.text();
-      let responseBody: unknown = null;
-
-      if (responseText) {
-        try {
-          responseBody = JSON.parse(responseText);
-        } catch (error) {
-          responseBody = {
-            parseError: error instanceof Error ? error.message : String(error),
-            raw: responseText,
-          };
-        }
-      }
-
-      const registerBodyText = responseText || JSON.stringify(responseBody);
-      setNotificationDebugMessage(`register body: ${registerBodyText}`);
-      console.log("[HamburgerMenu] register body", responseBody);
-
-      if (!response.ok) {
-        setNotificationDebugMessage(
-          `register errore status: ${response.status} body: ${registerBodyText}`
-        );
-        window.alert(`Errore attivazione notifiche: ${registerBodyText}`);
-        return;
-      }
-
-      const registerResult =
-        responseBody && typeof responseBody === "object"
-          ? (responseBody as { ok?: unknown })
-          : null;
-
-      if (registerResult?.ok === true) {
-        setNotificationDebugMessage("notifiche attivate correttamente");
-        return;
-      }
-
-      setNotificationDebugMessage(`register errore body: ${registerBodyText}`);
-      window.alert(`Errore attivazione notifiche: ${registerBodyText}`);
+    if (result.ok) {
       return;
-    } catch (error) {
-      const errorMessage = getErrorMessage(error);
-      setNotificationDebugMessage(`errore reale: ${errorMessage}`);
-      console.error("[HamburgerMenu] errore globale attivazione notifiche:", error);
+    }
+
+    if (result.reason === "no-app-id" || result.reason === "no-subscription") {
+      window.alert(
+        "Non è stato possibile attivare le notifiche. Riprova dal browser o verifica le impostazioni iPhone."
+      );
       return;
-    } finally {
-      console.log("[HamburgerMenu] fine attivazione notifiche");
-      setActivatingNotifications(false);
+    }
+
+    if (result.reason === "register-error") {
+      window.alert(`Errore attivazione notifiche: ${result.detail ?? ""}`);
     }
   }
 

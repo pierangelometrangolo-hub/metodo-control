@@ -12,8 +12,6 @@ type AssignmentNotificationPayload = {
   assigned_to_user_id?: string | null;
   title?: string | null;
   message?: string | null;
-  deepLink?: string | null;
-  deep_link?: string | null;
 };
 
 type PushSubscriptionRow = {
@@ -45,8 +43,17 @@ function normalizePayload(payload: AssignmentNotificationPayload) {
     assignedToUserId: payload.assignedToUserId || payload.assigned_to_user_id,
     title: payload.title,
     message: payload.message,
-    deepLink: payload.deepLink || payload.deep_link,
   };
+}
+
+function buildDeepLinkPath(taskId: string, subtaskId: string | null) {
+  const params = new URLSearchParams({ taskId });
+
+  if (subtaskId) {
+    params.set("subtaskId", subtaskId);
+  }
+
+  return `/operations?${params.toString()}`;
 }
 
 function buildEventRow(params: {
@@ -133,11 +140,12 @@ export async function POST(request: Request) {
       !payload.taskId ||
       !payload.assignedToUserId ||
       !payload.title ||
-      !payload.message ||
-      !payload.deepLink
+      !payload.message
     ) {
       return jsonError("Payload notifica assignment incompleto", rawPayload, 400);
     }
+
+    const deepLink = buildDeepLinkPath(payload.taskId, payload.subtaskId);
 
     const { data: subscriptions, error: subscriptionsError } = await supabase
       .from("user_push_subscriptions")
@@ -165,7 +173,7 @@ export async function POST(request: Request) {
           assignedByUserId: user.id,
           title: payload.title,
           message: payload.message,
-          deepLink: payload.deepLink,
+          deepLink,
           status: "skipped",
           details: skippedDetails,
         })
@@ -197,7 +205,7 @@ export async function POST(request: Request) {
           assignedByUserId: user.id,
           title: payload.title,
           message: payload.message,
-          deepLink: payload.deepLink,
+          deepLink,
           status: "failed",
           details: failedDetails,
         })
@@ -217,7 +225,7 @@ export async function POST(request: Request) {
         include_subscription_ids: subscriptionIds,
         headings: { it: payload.title, en: payload.title },
         contents: { it: payload.message, en: payload.message },
-        url: appUrl ? new URL(payload.deepLink, appUrl).toString() : payload.deepLink,
+        url: appUrl ? new URL(deepLink, appUrl).toString() : deepLink,
         data: {
           eventType: payload.eventType,
           taskId: payload.taskId,
@@ -254,7 +262,7 @@ export async function POST(request: Request) {
         assignedByUserId: user.id,
         title: payload.title,
         message: payload.message,
-        deepLink: payload.deepLink,
+        deepLink,
         status: eventStatus,
         details: eventDetails,
       })

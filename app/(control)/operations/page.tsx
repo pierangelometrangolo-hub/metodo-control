@@ -242,7 +242,6 @@ async function sendAssignmentNotification(params: {
   assignedByUserId?: string;
   title: string;
   message: string;
-  deepLink: string;
 }) {
   const {
     data: { session },
@@ -264,7 +263,6 @@ async function sendAssignmentNotification(params: {
       assigned_by_user_id: params.assignedByUserId || null,
       title: params.title,
       message: params.message,
-      deep_link: params.deepLink,
     }),
   });
 
@@ -530,16 +528,44 @@ function OperationsContent() {
     void loadOperationsData();
   }, []);
 
-    useEffect(() => {
+  const targetTask = useMemo(
+    () => (targetTaskId ? tasks.find((task) => task.id === targetTaskId) : undefined),
+    [targetTaskId, tasks]
+  );
+
+  const targetTaskAvailable = Boolean(targetTask && !targetTask.archived);
+
+  const [targetUnavailable, setTargetUnavailable] = useState<"task" | "subtask" | null>(null);
+
+  useEffect(() => {
     if (!targetTaskId || loading) return;
+
+    if (!targetTaskAvailable) {
+      setTargetUnavailable("task");
+      return;
+    }
+
+    if (
+      targetSubtaskId &&
+      !(subtasksByTask[targetTaskId] || []).some((item) => item.subtask_id === targetSubtaskId)
+    ) {
+      setTargetUnavailable("subtask");
+      return;
+    }
+
+    setTargetUnavailable(null);
+  }, [targetTaskId, targetSubtaskId, loading, targetTaskAvailable, subtasksByTask]);
+
+  useEffect(() => {
+    if (!targetTaskId || loading || !targetTaskAvailable) return;
 
     setExpandedTaskIds((prev) =>
       prev.includes(targetTaskId) ? prev : [...prev, targetTaskId]
     );
-  }, [targetTaskId, loading]);
+  }, [targetTaskId, loading, targetTaskAvailable]);
 
   useEffect(() => {
-    if (!targetTaskId || loading) return;
+    if (!targetTaskId || loading || !targetTaskAvailable) return;
 
     const timer = window.setTimeout(() => {
       const subtaskTarget = targetSubtaskId
@@ -559,7 +585,7 @@ function OperationsContent() {
     }, 900);
 
     return () => window.clearTimeout(timer);
-  }, [targetTaskId, targetSubtaskId, loading, expandedTaskIds, subtasksByTask]);
+  }, [targetTaskId, targetSubtaskId, loading, targetTaskAvailable, expandedTaskIds, subtasksByTask]);
 
   function getClientIdFromRiferimento(riferimento: string) {
     const match = clients.find(
@@ -954,7 +980,6 @@ function OperationsContent() {
           message: clientName
             ? `Ti è stata assegnata la task "${insertedTask.title}" per ${clientName}.`
             : `Ti è stata assegnata la task "${insertedTask.title}".`,
-          deepLink: "/operations",
         });
       } catch (notificationError) {
         console.error("Errore notifica creazione task:", notificationError);
@@ -1061,7 +1086,6 @@ function OperationsContent() {
           message: clientName
             ? `Ti è stata assegnata la task "${nextTask.title}" per ${clientName}.`
             : `Ti è stata assegnata la task "${nextTask.title}".`,
-          deepLink: "/operations",
         });
       } catch (notificationError) {
         console.error("Errore notifica aggiornamento task:", notificationError);
@@ -1213,7 +1237,6 @@ function OperationsContent() {
           message: clientName
             ? `Ti è stata assegnata la subtask "${subtaskLabel}" della task "${taskTitle}" per ${clientName}.`
             : `Ti è stata assegnata la subtask "${subtaskLabel}" della task "${taskTitle}".`,
-          deepLink: "/operations",
         });
       } catch (notificationError) {
         console.error("Errore notifica assegnazione subtask:", notificationError);
@@ -1238,14 +1261,18 @@ function OperationsContent() {
         ? Math.max(...currentSubtasks.map((subtask) => subtask.order_index)) + 1
         : 1;
 
-    const { error } = await supabase.from("subtasks").insert({
-      task_id: taskId,
-      type_id: fallbackTypeId,
-      label: cleanLabel,
-      order_index: nextOrder,
-      completed: false,
-      owner_id: ownerId || null,
-    });
+    const { data: insertedSubtask, error } = await supabase
+      .from("subtasks")
+      .insert({
+        task_id: taskId,
+        type_id: fallbackTypeId,
+        label: cleanLabel,
+        order_index: nextOrder,
+        completed: false,
+        owner_id: ownerId || null,
+      })
+      .select("id")
+      .single();
 
     if (error) {
       console.error("Errore creazione subtask manuale:", error.message);
@@ -1263,13 +1290,13 @@ function OperationsContent() {
         await sendAssignmentNotification({
           eventType: "subtask_assigned",
           taskId,
+          subtaskId: insertedSubtask?.id,
           assignedToUserId: ownerId,
           assignedByUserId: currentUserId || undefined,
           title: "Nuova subtask assegnata",
           message: clientName
             ? `Ti è stata assegnata la subtask "${cleanLabel}" della task "${taskTitle}" per ${clientName}.`
             : `Ti è stata assegnata la subtask "${cleanLabel}" della task "${taskTitle}".`,
-          deepLink: "/operations",
         });
       } catch (notificationError) {
         console.error("Errore notifica creazione subtask manuale:", notificationError);
@@ -1375,6 +1402,24 @@ function OperationsContent() {
             </div>
           </div>
         </section>
+
+        {targetUnavailable && (
+          <section style={targetUnavailableBannerStyle}>
+            <span style={{ fontWeight: 600 }}>
+              {targetUnavailable === "task"
+                ? "L'elemento a cui si riferiva la notifica non è più disponibile (chiusa o archiviata)."
+                : "La subtask a cui si riferiva la notifica non è più disponibile."}
+            </span>
+            <button
+              type="button"
+              onClick={() => setTargetUnavailable(null)}
+              style={targetUnavailableDismissStyle}
+              aria-label="Chiudi"
+            >
+              ✕
+            </button>
+          </section>
+        )}
 
         <section style={kpiGridStyle}>
           {kpis.map((item) => {
@@ -2179,6 +2224,34 @@ const sectionCardStyle: CSSProperties = {
   borderRadius: "24px",
   padding: "20px",
   boxShadow: "0 12px 30px rgba(43,45,47,0.05)",
+};
+
+const targetUnavailableBannerStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "12px",
+  background: "#fdf3e7",
+  border: "1px solid #eecb9a",
+  borderRadius: "16px",
+  padding: "14px 18px",
+  marginBottom: "20px",
+  color: "#7a4f18",
+  fontSize: "14px",
+};
+
+const targetUnavailableDismissStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "28px",
+  height: "28px",
+  borderRadius: "8px",
+  border: "1px solid #eecb9a",
+  background: "#ffffff",
+  color: "#7a4f18",
+  cursor: "pointer",
+  flexShrink: 0,
 };
 
 const sectionTitleStyle: CSSProperties = {

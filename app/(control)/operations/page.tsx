@@ -249,7 +249,7 @@ async function sendAssignmentNotification(params: {
 
   if (!session?.access_token) return;
 
-  await fetch("/api/notifications/send-assignment", {
+  const response = await fetch("/api/notifications/send-assignment", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -266,6 +266,16 @@ async function sendAssignmentNotification(params: {
       deep_link: params.deepLink,
     }),
   });
+
+  const responseBody = await response.text();
+
+  if (!response.ok) {
+    console.error("Errore invio notifica assignment:", {
+      status: response.status,
+      body: responseBody,
+    });
+    throw new Error(`Errore invio notifica assignment: ${response.status}`);
+  }
 }
 
 function getOwnerDisplayNameById(
@@ -1045,6 +1055,38 @@ function OperationsContent() {
       setHistoryByTask(previousHistory);
       setSavingTaskId(null);
       return;
+    }
+
+    if (nextOwnerId && nextOwnerId !== previousTask.ownerId) {
+      try {
+        console.log("assignment notification start", {
+          taskId: id,
+          ownerId: nextOwnerId,
+        });
+
+        const clientName =
+          nextTask.clientName && nextTask.clientName !== "—" ? nextTask.clientName : null;
+
+        await sendAssignmentNotification({
+          eventType: "task_assigned",
+          taskId: id,
+          assignedToUserId: nextOwnerId,
+          assignedByUserId: currentUserId || undefined,
+          title: "Nuova task assegnata",
+          message: clientName
+            ? `Ti è stata assegnata la task "${nextTask.title}" per ${clientName}.`
+            : `Ti è stata assegnata la task "${nextTask.title}".`,
+          deepLink: "/operations",
+        });
+
+        console.log("assignment notification success", {
+          taskId: id,
+          ownerId: nextOwnerId,
+        });
+      } catch (notificationError) {
+        console.log("assignment notification error", notificationError);
+        console.error("Errore notifica aggiornamento task:", notificationError);
+      }
     }
 
     const historySaved = await persistTaskHistory(localHistoryEntries);

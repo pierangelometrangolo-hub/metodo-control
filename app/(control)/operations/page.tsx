@@ -1057,6 +1057,7 @@ function OperationsContent() {
       return;
     }
 
+    console.log({ nextOwnerId, previousOwnerId: previousTask.ownerId });
     if (nextOwnerId && nextOwnerId !== previousTask.ownerId) {
       try {
         console.log("assignment notification start", {

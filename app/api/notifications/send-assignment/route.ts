@@ -71,7 +71,7 @@ function buildEventRow(params: {
     message: params.message,
     deep_link: params.deepLink,
     status: params.status,
-    details: params.details,
+    payload: params.details ?? {},
   };
 }
 

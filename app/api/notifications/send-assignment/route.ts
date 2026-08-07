@@ -86,16 +86,18 @@ export async function POST(request: Request) {
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const oneSignalAppId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID;
     const oneSignalRestApiKey = process.env.ONESIGNAL_REST_API_KEY;
     const appUrl = process.env.NEXT_PUBLIC_APP_URL;
 
-    if (!supabaseUrl || !supabaseAnonKey) {
+    if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
       return jsonError(
         "Configurazione Supabase mancante",
         {
           hasUrl: Boolean(supabaseUrl),
           hasAnonKey: Boolean(supabaseAnonKey),
+          hasServiceRoleKey: Boolean(supabaseServiceRoleKey),
         },
         500
       );
@@ -115,6 +117,13 @@ export async function POST(request: Request) {
         },
       },
     });
+
+    // Client con service role: serve solo per leggere le subscription push
+    // del destinatario, che possono appartenere a un utente diverso da chi
+    // esegue l'azione. La policy RLS "ups_select_own" permetterebbe al
+    // client sopra (anon key + token utente) di leggere solo le proprie
+    // subscription, quindi qui va bypassata deliberatamente.
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
     const {
       data: { user },
@@ -147,7 +156,7 @@ export async function POST(request: Request) {
 
     const deepLink = buildDeepLinkPath(payload.taskId, payload.subtaskId);
 
-    const { data: subscriptions, error: subscriptionsError } = await supabase
+    const { data: subscriptions, error: subscriptionsError } = await supabaseAdmin
       .from("user_push_subscriptions")
       .select("onesignal_player_id, onesignal_subscription_id")
       .eq("user_id", payload.assignedToUserId)

@@ -36,6 +36,7 @@ type Task = {
   openedAt: string;
   closedAt?: string;
   closedBy?: string;
+  assignedBy?: string;
   archived: boolean;
   notes: string;
 };
@@ -75,6 +76,7 @@ type DbTask = {
   due_date: string | null;
   closed_at: string | null;
   closed_by: string | null;
+  assigned_by: string | null;
   note: string | null;
   archived: boolean;
 };
@@ -235,7 +237,7 @@ function getShortTaskId(id: string) {
 }
 
 async function sendAssignmentNotification(params: {
-  eventType: "task_assigned" | "subtask_assigned";
+  eventType: "task_assigned" | "subtask_assigned" | "task_closed";
   taskId: string;
   subtaskId?: string;
   assignedToUserId: string;
@@ -329,6 +331,7 @@ function mapDbTaskToUiTask(
     openedAt: task.opened_at?.split("T")[0] || "",
     closedAt: task.closed_at ? task.closed_at.split("T")[0] : undefined,
     closedBy: task.closed_by || undefined,
+    assignedBy: task.assigned_by || undefined,
     archived: task.archived,
     notes: task.note || "",
   };
@@ -465,6 +468,7 @@ function OperationsContent() {
   const [clients, setClients] = useState<Client[]>([]);
   const [subtaskTypes, setSubtaskTypes] = useState<SubtaskType[]>([]);
   const [subtasksByTask, setSubtasksByTask] = useState<Record<string, SubtaskDetailedRow[]>>({});
+  const [subtaskAssignedByMap, setSubtaskAssignedByMap] = useState<Record<string, string>>({});
   const [currentUserId, setCurrentUserId] = useState<string>("");
   const [historyByTask, setHistoryByTask] = useState<Record<string, TaskHistoryRow[]>>({});
   const [expandedTaskIds, setExpandedTaskIds] = useState<string[]>([]);
@@ -751,6 +755,27 @@ function OperationsContent() {
 
         setSubtasksByTask(groupedSubtasks);
       }
+
+      // v_subtasks_detailed non espone assigned_by (vista pre-esistente, non
+      // toccata per non rischiare di romperla senza averne la definizione
+      // esatta) — recuperato con una query separata sulla tabella grezza.
+      const { data: subtaskAssignedByData, error: subtaskAssignedByError } = await supabase
+        .from("subtasks")
+        .select("id, assigned_by");
+
+      if (subtaskAssignedByError) {
+        console.error("Errore recupero assegnatore subtask:", subtaskAssignedByError.message);
+        setSubtaskAssignedByMap({});
+      } else {
+        const nextMap = ((subtaskAssignedByData as { id: string; assigned_by: string | null }[]) || []).reduce<
+          Record<string, string>
+        >((acc, row) => {
+          if (row.assigned_by) acc[row.id] = row.assigned_by;
+          return acc;
+        }, {});
+
+        setSubtaskAssignedByMap(nextMap);
+      }
     } finally {
       setLoading(false);
     }
@@ -945,6 +970,7 @@ function OperationsContent() {
         stato: "todo",
         priorita: "medium",
         owner_id: ownerId,
+        assigned_by: ownerId ? currentUserId : null,
         client_id: clientId,
         created_by: currentUserId,
         opened_at: new Date().toISOString(),
@@ -970,6 +996,7 @@ function OperationsContent() {
           insertedTask.clientName && insertedTask.clientName !== "—"
             ? insertedTask.clientName
             : null;
+        const assignerName = getOwnerDisplayNameById(currentUserId, profilesMap);
 
         await sendAssignmentNotification({
           eventType: "task_assigned",
@@ -978,8 +1005,8 @@ function OperationsContent() {
           assignedByUserId: currentUserId || undefined,
           title: "Nuova task assegnata",
           message: clientName
-            ? `Ti è stata assegnata la task "${insertedTask.title}" per ${clientName}.`
-            : `Ti è stata assegnata la task "${insertedTask.title}".`,
+            ? `${assignerName} ti ha assegnato la task "${insertedTask.title}" per ${clientName}.`
+            : `${assignerName} ti ha assegnato la task "${insertedTask.title}".`,
         });
       } catch (notificationError) {
         console.error("Errore notifica creazione task:", notificationError);
@@ -1052,7 +1079,10 @@ function OperationsContent() {
     if (patch.attivita !== undefined) dbPatch.attivita = patch.attivita;
     if (patch.status !== undefined) dbPatch.stato = mapUiStatusToDb(patch.status);
     if (patch.priority !== undefined) dbPatch.priorita = mapUiPriorityToDb(patch.priority);
-    if (patch.ownerId !== undefined) dbPatch.owner_id = patch.ownerId || null;
+    if (patch.ownerId !== undefined) {
+      dbPatch.owner_id = patch.ownerId || null;
+      dbPatch.assigned_by = patch.ownerId ? currentUserId || null : null;
+    }
     if (patch.clientId !== undefined) dbPatch.client_id = patch.clientId || null;
     if (patch.dueDate !== undefined) dbPatch.due_date = patch.dueDate || null;
     if (patch.closedAt !== undefined) {
@@ -1076,6 +1106,7 @@ function OperationsContent() {
       try {
         const clientName =
           nextTask.clientName && nextTask.clientName !== "—" ? nextTask.clientName : null;
+        const assignerName = getOwnerDisplayNameById(currentUserId, profilesMap);
 
         await sendAssignmentNotification({
           eventType: "task_assigned",
@@ -1084,8 +1115,8 @@ function OperationsContent() {
           assignedByUserId: currentUserId || undefined,
           title: "Nuova task assegnata",
           message: clientName
-            ? `Ti è stata assegnata la task "${nextTask.title}" per ${clientName}.`
-            : `Ti è stata assegnata la task "${nextTask.title}".`,
+            ? `${assignerName} ti ha assegnato la task "${nextTask.title}" per ${clientName}.`
+            : `${assignerName} ti ha assegnato la task "${nextTask.title}".`,
         });
       } catch (notificationError) {
         console.error("Errore notifica aggiornamento task:", notificationError);
@@ -1116,6 +1147,23 @@ function OperationsContent() {
       closedAt: new Date().toISOString().split("T")[0],
       closedBy: currentUserId,
     });
+
+    if (task.assignedBy && task.assignedBy !== currentUserId) {
+      try {
+        const closerName = getOwnerDisplayNameById(currentUserId, profilesMap);
+
+        await sendAssignmentNotification({
+          eventType: "task_closed",
+          taskId: task.id,
+          assignedToUserId: task.assignedBy,
+          assignedByUserId: currentUserId || undefined,
+          title: "Task completata",
+          message: `${closerName} ha completato la task "${task.title}" che avevi assegnato.`,
+        });
+      } catch (notificationError) {
+        console.error("Errore notifica chiusura task:", notificationError);
+      }
+    }
   }
 
   async function reopenTask(task: Task) {
@@ -1208,14 +1256,28 @@ function OperationsContent() {
       return next;
     });
 
+    const previousAssignedByMap = subtaskAssignedByMap;
+    const nextAssignedBy = ownerId ? currentUserId || null : null;
+
+    setSubtaskAssignedByMap((prev) => {
+      const next = { ...prev };
+      if (nextAssignedBy) {
+        next[subtaskId] = nextAssignedBy;
+      } else {
+        delete next[subtaskId];
+      }
+      return next;
+    });
+
     const { error } = await supabase
       .from("subtasks")
-      .update({ owner_id: ownerId || null })
+      .update({ owner_id: ownerId || null, assigned_by: nextAssignedBy })
       .eq("id", subtaskId);
 
     if (error) {
       console.error("Errore assegnazione subtask:", error.message);
       setSubtasksByTask(previousSubtasks);
+      setSubtaskAssignedByMap(previousAssignedByMap);
       return;
     }
 
@@ -1226,6 +1288,7 @@ function OperationsContent() {
           parentTask?.clientName && parentTask.clientName !== "—" ? parentTask.clientName : null;
         const subtaskLabel = subtask.subtask_label || subtask.subtask_name;
         const taskTitle = subtask.task_title || parentTask?.title || "";
+        const assignerName = getOwnerDisplayNameById(currentUserId, profilesMap);
 
         await sendAssignmentNotification({
           eventType: "subtask_assigned",
@@ -1235,8 +1298,8 @@ function OperationsContent() {
           assignedByUserId: currentUserId || undefined,
           title: "Nuova subtask assegnata",
           message: clientName
-            ? `Ti è stata assegnata la subtask "${subtaskLabel}" della task "${taskTitle}" per ${clientName}.`
-            : `Ti è stata assegnata la subtask "${subtaskLabel}" della task "${taskTitle}".`,
+            ? `${assignerName} ti ha assegnato la subtask "${subtaskLabel}" della task "${taskTitle}" per ${clientName}.`
+            : `${assignerName} ti ha assegnato la subtask "${subtaskLabel}" della task "${taskTitle}".`,
         });
       } catch (notificationError) {
         console.error("Errore notifica assegnazione subtask:", notificationError);
@@ -1261,6 +1324,8 @@ function OperationsContent() {
         ? Math.max(...currentSubtasks.map((subtask) => subtask.order_index)) + 1
         : 1;
 
+    const assignedBy = ownerId ? currentUserId || null : null;
+
     const { data: insertedSubtask, error } = await supabase
       .from("subtasks")
       .insert({
@@ -1270,6 +1335,7 @@ function OperationsContent() {
         order_index: nextOrder,
         completed: false,
         owner_id: ownerId || null,
+        assigned_by: assignedBy,
       })
       .select("id")
       .single();
@@ -1280,12 +1346,17 @@ function OperationsContent() {
       return;
     }
 
+    if (assignedBy && insertedSubtask?.id) {
+      setSubtaskAssignedByMap((prev) => ({ ...prev, [insertedSubtask.id]: assignedBy }));
+    }
+
     if (ownerId) {
       try {
         const parentTask = tasks.find((task) => task.id === taskId);
         const clientName =
           parentTask?.clientName && parentTask.clientName !== "—" ? parentTask.clientName : null;
         const taskTitle = parentTask?.title || "";
+        const assignerName = getOwnerDisplayNameById(currentUserId, profilesMap);
 
         await sendAssignmentNotification({
           eventType: "subtask_assigned",
@@ -1295,8 +1366,8 @@ function OperationsContent() {
           assignedByUserId: currentUserId || undefined,
           title: "Nuova subtask assegnata",
           message: clientName
-            ? `Ti è stata assegnata la subtask "${cleanLabel}" della task "${taskTitle}" per ${clientName}.`
-            : `Ti è stata assegnata la subtask "${cleanLabel}" della task "${taskTitle}".`,
+            ? `${assignerName} ti ha assegnato la subtask "${cleanLabel}" della task "${taskTitle}" per ${clientName}.`
+            : `${assignerName} ti ha assegnato la subtask "${cleanLabel}" della task "${taskTitle}".`,
         });
       } catch (notificationError) {
         console.error("Errore notifica creazione subtask manuale:", notificationError);
@@ -1617,6 +1688,7 @@ function OperationsContent() {
                   isSaving={savingTaskId === task.id}
                   history={historyByTask[task.id] || []}
                   profilesMap={profilesMap}
+                  subtaskAssignedByMap={subtaskAssignedByMap}
                   clientsMap={clientsMap}
                   targetTaskId={targetTaskId}
                   targetSubtaskId={targetSubtaskId}
@@ -1721,6 +1793,7 @@ function CompactTaskRow({
   isSaving,
   history,
   profilesMap,
+  subtaskAssignedByMap,
   clientsMap,
   targetTaskId,
   targetSubtaskId,
@@ -1744,6 +1817,7 @@ function CompactTaskRow({
   isSaving: boolean;
   history: TaskHistoryRow[];
   profilesMap: Record<string, Profile>;
+  subtaskAssignedByMap: Record<string, string>;
   clientsMap: Record<string, Client>;
   targetTaskId: string | null;
   targetSubtaskId: string | null;
@@ -1833,6 +1907,10 @@ function CompactTaskRow({
             <InfoItem label="Riferimento" value={task.riferimento} />
             <InfoItem label="Attività" value={task.attivita} />
             <InfoItem label="Owner" value={task.owner} />
+            <InfoItem
+              label="Assegnata da"
+              value={task.assignedBy ? getOwnerDisplayNameById(task.assignedBy, profilesMap) : "—"}
+            />
             <InfoItem label="Scadenza" value={formatDate(task.dueDate)} />
             <InfoItem label="Aperta" value={formatDate(task.openedAt)} />
           </div>
@@ -1982,6 +2060,8 @@ function CompactTaskRow({
               task={task}
               subtasks={subtasks}
               users={userOptions}
+              profilesMap={profilesMap}
+              subtaskAssignedByMap={subtaskAssignedByMap}
               targetSubtaskId={targetSubtaskId}
               onToggle={(id, completed) => void onToggleSubtask(id, completed)}
               onAssign={(id, ownerId) => void onAssignSubtask(id, ownerId)}
@@ -2054,6 +2134,8 @@ function SubtaskList({
   task,
   subtasks,
   users,
+  profilesMap,
+  subtaskAssignedByMap,
   targetSubtaskId,
   onToggle,
   onAssign,
@@ -2062,6 +2144,8 @@ function SubtaskList({
   task: Task;
   subtasks: SubtaskDetailedRow[];
   users: UserOption[];
+  profilesMap: Record<string, Profile>;
+  subtaskAssignedByMap: Record<string, string>;
   targetSubtaskId: string | null;
   onToggle: (id: string, completed: boolean) => void;
   onAssign: (id: string, ownerId: string) => void;
@@ -2077,6 +2161,10 @@ function SubtaskList({
         const subtaskId = subtask.subtask_id;
         const ownerName = subtask.owner_display_name || notoOwnerFallback;
         const isTargetSubtask = targetSubtaskId === subtaskId;
+        const assignedByUserId = subtaskAssignedByMap[subtaskId];
+        const assignedByName = assignedByUserId
+          ? getOwnerDisplayNameById(assignedByUserId, profilesMap)
+          : null;
 
         return (
           <div
@@ -2103,6 +2191,12 @@ function SubtaskList({
                     </span>
                   ) : null}
                 </div>
+
+                {assignedByName ? (
+                  <div style={{ fontSize: "11px", color: "#8a8178" }}>
+                    Assegnata da: {assignedByName}
+                  </div>
+                ) : null}
               </div>
             </div>
 

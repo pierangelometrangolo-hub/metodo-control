@@ -2,8 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 type AssignmentNotificationPayload = {
-  eventType?: "task_assigned" | "subtask_assigned";
-  event_type?: "task_assigned" | "subtask_assigned";
+  eventType?: "task_assigned" | "subtask_assigned" | "task_closed";
+  event_type?: "task_assigned" | "subtask_assigned" | "task_closed";
   taskId?: string | null;
   task_id?: string | null;
   subtaskId?: string | null;

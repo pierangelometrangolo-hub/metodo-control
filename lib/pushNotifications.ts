@@ -20,13 +20,37 @@ export type OneSignalUser = {
   PushSubscription?: OneSignalSubscription;
 };
 
+export type OneSignalNotificationClickEvent = {
+  notification?: {
+    launchURL?: string | null;
+    url?: string | null;
+    additionalData?: Record<string, unknown> | null;
+  };
+  result?: {
+    url?: string | null;
+  };
+};
+
 export type OneSignalNotifications = {
   permission?: "default" | "denied" | "granted";
   requestPermission?: () => Promise<void>;
+  addEventListener?: (
+    event: "click",
+    listener: (event: OneSignalNotificationClickEvent) => void
+  ) => void;
+  removeEventListener?: (
+    event: "click",
+    listener: (event: OneSignalNotificationClickEvent) => void
+  ) => void;
 };
 
 export type OneSignalClient = {
-  init: (params: { appId: string; allowLocalhostAsSecureOrigin?: boolean }) => Promise<void>;
+  init: (params: {
+    appId: string;
+    allowLocalhostAsSecureOrigin?: boolean;
+    notificationClickHandlerMatch?: "exact" | "origin";
+    notificationClickHandlerAction?: "navigate" | "focus";
+  }) => Promise<void>;
   User?: OneSignalUser;
   user?: OneSignalUser;
   Notifications?: OneSignalNotifications;
@@ -138,9 +162,84 @@ async function ensureOneSignalInitialized(oneSignal: OneSignalClient, appId: str
     return;
   }
 
-  await oneSignal.init({ appId });
+  // match "origin" invece del default "exact": l'URL della notifica ha
+  // sempre una query string diversa (taskId/subtaskId), quindi con "exact"
+  // il match contro una tab già aperta fallisce quasi sempre. action
+  // "focus" lascia al service worker solo il compito di portare la finestra
+  // in primo piano — la navigazione vera e propria la fa il click handler
+  // client-side (vedi registerNotificationClickHandler), per evitare che
+  // le due navigazioni corrano in parallelo.
+  await oneSignal.init({
+    appId,
+    notificationClickHandlerMatch: "origin",
+    notificationClickHandlerAction: "focus",
+  });
   window.__oneSignalInitialized = true;
   console.log("[pushNotifications] OneSignal init ok");
+}
+
+function resolveNotificationClickUrl(event: OneSignalNotificationClickEvent): string | null {
+  return event.notification?.launchURL || event.notification?.url || event.result?.url || null;
+}
+
+function toRelativePath(url: string): string {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Registra il listener per il click su una notifica mentre l'app è già
+ * aperta in foreground (il service worker, con action "focus", non naviga
+ * la finestra da solo). onNavigate riceve il path relativo (es.
+ * "/operations?taskId=...") da passare a router.push(). Restituisce una
+ * funzione di cleanup da chiamare all'unmount.
+ */
+export function registerNotificationClickHandler(onNavigate: (path: string) => void): () => void {
+  let cancelled = false;
+  let attachedOneSignal: OneSignalClient | null = null;
+
+  const listener = (event: OneSignalNotificationClickEvent) => {
+    console.log("[pushNotifications] notification click event", event);
+
+    const rawUrl = resolveNotificationClickUrl(event);
+
+    if (!rawUrl) {
+      console.log("[pushNotifications] notification click senza url utilizzabile");
+      return;
+    }
+
+    onNavigate(toRelativePath(rawUrl));
+  };
+
+  getOneSignalInstance(() => {}, 10000)
+    .then((oneSignal) => {
+      if (cancelled) return;
+
+      const notifications = oneSignal.Notifications || oneSignal.notifications;
+
+      if (!notifications?.addEventListener) {
+        console.log(
+          "[pushNotifications] addEventListener('click') non disponibile su questo SDK"
+        );
+        return;
+      }
+
+      attachedOneSignal = oneSignal;
+      notifications.addEventListener("click", listener);
+    })
+    .catch((error) => {
+      console.error("[pushNotifications] impossibile registrare il click handler:", error);
+    });
+
+  return () => {
+    cancelled = true;
+    const notifications = attachedOneSignal?.Notifications || attachedOneSignal?.notifications;
+    notifications?.removeEventListener?.("click", listener);
+  };
 }
 
 async function waitForSubscriptionId(

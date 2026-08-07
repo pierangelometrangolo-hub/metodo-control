@@ -1,5 +1,6 @@
 import HamburgerMenu from "../../components/HamburgerMenu";
 import PushNotificationBanner from "../../components/notifications/PushNotificationBanner";
+import PushNotificationClickHandler from "../../components/notifications/PushNotificationClickHandler";
 
 export default function ControlLayout({
   children,
@@ -14,6 +15,7 @@ export default function ControlLayout({
         </div>
 
         <PushNotificationBanner />
+        <PushNotificationClickHandler />
 
         {children}
       </div>

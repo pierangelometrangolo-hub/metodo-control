@@ -25,6 +25,7 @@ export const consulenzaReferences = [
   "Palazzo Rollo",
   "San Giorgio Resort",
   "Montecallini",
+  "Dimora De Belli",
 ];
 
 export const projectReferences = [

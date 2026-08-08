@@ -36,6 +36,31 @@ type SelectOption = {
   label: string;
 };
 
+type TaskOption = {
+  id: string;
+  title: string;
+  macroarea: string;
+  riferimento: string | null;
+};
+
+type SubtaskOption = {
+  id: string;
+  label: string;
+};
+
+type TaskRow = {
+  id: string;
+  titolo: string;
+  macroarea: string | null;
+  riferimento: string | null;
+};
+
+type SubtaskRow = {
+  id: string;
+  task_id: string;
+  label: string | null;
+};
+
 type ProfileRow = {
   id: string;
   nome: string | null;
@@ -124,6 +149,9 @@ export default function TimeTrackingPage() {
     }))
   );
 
+  const [taskOptions, setTaskOptions] = useState<TaskOption[]>([]);
+  const [subtasksByTaskId, setSubtasksByTaskId] = useState<Record<string, SubtaskOption[]>>({});
+
   const [analysisFilters, setAnalysisFilters] = useState<AnalysisFiltersState>({
     macroArea: "all",
     referenceName: "",
@@ -145,6 +173,8 @@ export default function TimeTrackingPage() {
       { data: profilesData, error: profilesError },
       { data: clientsData, error: clientsError },
       { data: trackingData, error: trackingError },
+      { data: tasksData, error: tasksError },
+      { data: subtasksData, error: subtasksError },
     ] = await Promise.all([
       supabase
         .from("profiles")
@@ -173,7 +203,45 @@ export default function TimeTrackingPage() {
           )
         `)
         .order("created_at", { ascending: false }),
+      supabase
+        .from("tasks")
+        .select("id, titolo, macroarea, riferimento")
+        .order("titolo", { ascending: true }),
+      supabase
+        .from("subtasks")
+        .select("id, task_id, label")
+        .order("order_index", { ascending: true }),
     ]);
+
+    if (tasksError) {
+      console.error("Errore recupero task per tracking:", tasksError.message);
+      setTaskOptions([]);
+    } else {
+      setTaskOptions(
+        ((tasksData as TaskRow[]) || []).map((task) => ({
+          id: task.id,
+          title: task.titolo,
+          macroarea: task.macroarea || "",
+          riferimento: task.riferimento,
+        }))
+      );
+    }
+
+    if (subtasksError) {
+      console.error("Errore recupero subtask per tracking:", subtasksError.message);
+      setSubtasksByTaskId({});
+    } else {
+      setSubtasksByTaskId(
+        ((subtasksData as SubtaskRow[]) || []).reduce<Record<string, SubtaskOption[]>>(
+          (acc, subtask) => {
+            if (!acc[subtask.task_id]) acc[subtask.task_id] = [];
+            acc[subtask.task_id].push({ id: subtask.id, label: subtask.label || "" });
+            return acc;
+          },
+          {}
+        )
+      );
+    }
 
     let nextOperatorOptions: SelectOption[] = trackingOperators.map((operator) => ({
       id: operator,
@@ -343,6 +411,8 @@ export default function TimeTrackingPage() {
         onAddEntry={handleAddEntry}
         operators={operatorOptions}
         clientReferences={clientOptions}
+        tasks={taskOptions}
+        subtasksByTaskId={subtasksByTaskId}
       />
 
       <TrackingList
@@ -350,6 +420,8 @@ export default function TimeTrackingPage() {
         onUpdateEntry={handleUpdateEntry}
         operators={operatorOptions}
         clientReferences={clientOptions}
+        tasks={taskOptions}
+        subtasksByTaskId={subtasksByTaskId}
       />
     </div>
   );

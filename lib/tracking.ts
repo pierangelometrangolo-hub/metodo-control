@@ -30,18 +30,17 @@ export const consulenzaReferences = [
 export const projectReferences = [
   "Puglia Destination Off",
   "Formazione",
-  "Sviluppo piattaforma",
 ];
 
 export const commercialeReferences = [
   "Sviluppo commerciale",
   "Nuovi contatti",
   "Partnership",
+  "Tour operator",
+  "Agenzie viaggio",
 ];
 
 export const salesMarketingReferences = [
-  "Tour operator",
-  "Agenzie viaggio",
   "Social media",
   "Contenuti",
   "PR & Networking",

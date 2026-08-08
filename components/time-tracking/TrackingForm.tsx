@@ -19,10 +19,24 @@ type SelectOption = {
   label: string;
 };
 
+type TaskOption = {
+  id: string;
+  title: string;
+  macroarea: string;
+  riferimento: string | null;
+};
+
+type SubtaskOption = {
+  id: string;
+  label: string;
+};
+
 type TrackingFormProps = {
   onAddEntry: (entry: TrackingEntry) => void;
   operators: SelectOption[];
   clientReferences: SelectOption[];
+  tasks: TaskOption[];
+  subtasksByTaskId: Record<string, SubtaskOption[]>;
 };
 
 type FormState = {
@@ -44,6 +58,8 @@ export default function TrackingForm({
   onAddEntry,
   operators,
   clientReferences,
+  tasks,
+  subtasksByTaskId,
 }: TrackingFormProps) {
   const [form, setForm] = useState<FormState>({
     macroArea: "consulenza",
@@ -73,6 +89,20 @@ export default function TrackingForm({
     return activityMap[form.macroArea] ?? [];
   }, [form.macroArea]);
 
+  const availableTasks = useMemo(() => {
+    const macroareaLabel = formatMacroArea(form.macroArea);
+
+    return tasks.filter((task) => {
+      const matchesMacroarea = task.macroarea === macroareaLabel;
+      const matchesRiferimento =
+        !form.referenceName || task.riferimento === form.referenceName;
+
+      return matchesMacroarea && matchesRiferimento;
+    });
+  }, [tasks, form.macroArea, form.referenceName]);
+
+  const availableSubtasks = subtasksByTaskId[form.taskId] || [];
+
   useEffect(() => {
     setForm((prev) => ({
       ...prev,
@@ -80,6 +110,21 @@ export default function TrackingForm({
       activity: "",
     }));
   }, [form.macroArea]);
+
+  useEffect(() => {
+    setForm((prev) => ({
+      ...prev,
+      taskId: "",
+      subtaskId: "",
+    }));
+  }, [form.macroArea, form.referenceName]);
+
+  useEffect(() => {
+    setForm((prev) => ({
+      ...prev,
+      subtaskId: "",
+    }));
+  }, [form.taskId]);
 
   function handleChange<K extends keyof FormState>(
     field: K,
@@ -309,24 +354,39 @@ export default function TrackingForm({
 
           <div>
             <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-              Task ID
+              Task collegata
             </label>
-            <AppInput
-              placeholder="Facoltativo"
+            <select
               value={form.taskId}
               onChange={(e) => handleChange("taskId", e.target.value)}
-            />
+              className={selectClassName}
+            >
+              <option value="">Nessuna task collegata</option>
+              {availableTasks.map((task) => (
+                <option key={task.id} value={task.id}>
+                  {task.title}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
             <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-              Subtask ID
+              Subtask collegata
             </label>
-            <AppInput
-              placeholder="Facoltativo"
+            <select
               value={form.subtaskId}
               onChange={(e) => handleChange("subtaskId", e.target.value)}
-            />
+              className={selectClassName}
+              disabled={availableSubtasks.length === 0}
+            >
+              <option value="">Nessuna subtask collegata</option>
+              {availableSubtasks.map((subtask) => (
+                <option key={subtask.id} value={subtask.id}>
+                  {subtask.label}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       </form>

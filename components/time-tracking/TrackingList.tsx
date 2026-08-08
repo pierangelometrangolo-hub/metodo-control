@@ -21,11 +21,25 @@ type SelectOption = {
   label: string;
 };
 
+type TaskOption = {
+  id: string;
+  title: string;
+  macroarea: string;
+  riferimento: string | null;
+};
+
+type SubtaskOption = {
+  id: string;
+  label: string;
+};
+
 type TrackingListProps = {
   entries: TrackingEntry[];
   onUpdateEntry: (entryId: string, patch: Partial<TrackingEntry>) => void;
   operators: SelectOption[];
   clientReferences: SelectOption[];
+  tasks: TaskOption[];
+  subtasksByTaskId: Record<string, SubtaskOption[]>;
 };
 
 type FiltersState = {
@@ -61,6 +75,8 @@ export default function TrackingList({
   onUpdateEntry,
   operators,
   clientReferences,
+  tasks,
+  subtasksByTaskId,
 }: TrackingListProps) {
   const router = useRouter();
 
@@ -223,6 +239,17 @@ export default function TrackingList({
       if (field === "macroArea") {
         next.referenceName = "";
         next.activity = "";
+        next.taskId = "";
+        next.subtaskId = "";
+      }
+
+      if (field === "referenceName") {
+        next.taskId = "";
+        next.subtaskId = "";
+      }
+
+      if (field === "taskId") {
+        next.subtaskId = "";
       }
 
       return next;
@@ -542,6 +569,21 @@ export default function TrackingList({
                 ? activityMap[editForm.macroArea] ?? []
                 : activityMap[entry.macroArea] ?? [];
 
+            const editAvailableTasks =
+              editForm && isEditing
+                ? tasks.filter((task) => {
+                    const macroareaLabel = formatMacroArea(editForm.macroArea);
+                    const matchesMacroarea = task.macroarea === macroareaLabel;
+                    const matchesRiferimento =
+                      !editForm.referenceName || task.riferimento === editForm.referenceName;
+
+                    return matchesMacroarea && matchesRiferimento;
+                  })
+                : [];
+
+            const editAvailableSubtasks =
+              editForm && isEditing ? subtasksByTaskId[editForm.taskId] || [] : [];
+
             return (
               <article
                 key={entry.id}
@@ -819,24 +861,39 @@ export default function TrackingList({
 
                           <div>
                             <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                              Task ID
+                              Task collegata
                             </label>
-                            <AppInput
+                            <select
                               value={editForm.taskId}
                               onChange={(e) => updateEditField("taskId", e.target.value)}
-                              placeholder="Facoltativo"
-                            />
+                              className={selectClassName}
+                            >
+                              <option value="">Nessuna task collegata</option>
+                              {editAvailableTasks.map((task) => (
+                                <option key={task.id} value={task.id}>
+                                  {task.title}
+                                </option>
+                              ))}
+                            </select>
                           </div>
 
                           <div>
                             <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                              Subtask ID
+                              Subtask collegata
                             </label>
-                            <AppInput
+                            <select
                               value={editForm.subtaskId}
                               onChange={(e) => updateEditField("subtaskId", e.target.value)}
-                              placeholder="Facoltativo"
-                            />
+                              className={selectClassName}
+                              disabled={editAvailableSubtasks.length === 0}
+                            >
+                              <option value="">Nessuna subtask collegata</option>
+                              {editAvailableSubtasks.map((subtask) => (
+                                <option key={subtask.id} value={subtask.id}>
+                                  {subtask.label}
+                                </option>
+                              ))}
+                            </select>
                           </div>
                         </div>
 

@@ -203,6 +203,16 @@ function toRelativePath(url: string): string {
 // sintomo si ripresenta.
 let activeClickUnsubscribe: (() => void) | null = null;
 let clickHandlerRegistrationCount = 0;
+let clickEventCount = 0;
+
+// Log diagnostico temporaneo: id univoco per questo caricamento di pagina
+// (tab/finestra). Se in due righe di log consecutive questo id è uguale,
+// è lo STESSO listener nella STESSA tab a essere invocato più volte; se è
+// diverso, sono due tab/finestre separate (ognuna con il proprio stato di
+// modulo, la guardia sopra non le vede a vicenda) a ricevere entrambe
+// l'evento. Da rimuovere una volta chiarita la causa del doppio firing.
+const pageInstanceId =
+  typeof window === "undefined" ? "ssr" : Math.random().toString(36).slice(2, 8);
 
 /**
  * Registra il listener per il click su una notifica mentre l'app è già
@@ -215,36 +225,55 @@ export function registerNotificationClickHandler(onNavigate: (path: string) => v
   clickHandlerRegistrationCount += 1;
   const registrationId = clickHandlerRegistrationCount;
 
+  console.log(
+    `[pushNotifications][${pageInstanceId}] registerNotificationClickHandler chiamata, registrazione #${registrationId}`
+  );
+
   if (activeClickUnsubscribe) {
     console.log(
-      `[pushNotifications] registrazione #${registrationId}: trovata una registrazione precedente ancora attiva, la rimuovo prima di procedere`
+      `[pushNotifications][${pageInstanceId}] registrazione #${registrationId}: trovata una registrazione precedente ancora attiva, la rimuovo prima di procedere`
     );
     activeClickUnsubscribe();
   }
 
-  console.log(`[pushNotifications] registrazione click handler #${registrationId} avviata`);
+  console.log(
+    `[pushNotifications][${pageInstanceId}] registrazione click handler #${registrationId} avviata`
+  );
 
   let cancelled = false;
   let attachedOneSignal: OneSignalClient | null = null;
 
   const listener = (event: OneSignalNotificationClickEvent) => {
-    console.log(`[pushNotifications] notification click event (registrazione #${registrationId})`, event);
+    clickEventCount += 1;
+    const clickId = clickEventCount;
+
+    console.log(
+      `[pushNotifications][${pageInstanceId}] notification click event #${clickId} (registrazione #${registrationId}) — visibilityState=${typeof document !== "undefined" ? document.visibilityState : "n/a"} hasFocus=${typeof document !== "undefined" ? document.hasFocus() : "n/a"}`,
+      event
+    );
 
     const rawUrl = resolveNotificationClickUrl(event);
 
     if (!rawUrl) {
-      console.log("[pushNotifications] notification click senza url utilizzabile");
+      console.log(
+        `[pushNotifications][${pageInstanceId}] click event #${clickId} senza url utilizzabile`
+      );
       return;
     }
 
-    onNavigate(toRelativePath(rawUrl));
+    const path = toRelativePath(rawUrl);
+    console.log(
+      `[pushNotifications][${pageInstanceId}] click event #${clickId}: chiamo onNavigate con path="${path}" (rawUrl="${rawUrl}")`
+    );
+
+    onNavigate(path);
   };
 
   getOneSignalInstance(() => {}, 10000)
     .then((oneSignal) => {
       if (cancelled) {
         console.log(
-          `[pushNotifications] registrazione #${registrationId} annullata prima della risoluzione, listener non attaccato`
+          `[pushNotifications][${pageInstanceId}] registrazione #${registrationId} annullata prima della risoluzione, listener non attaccato`
         );
         return;
       }
@@ -253,14 +282,16 @@ export function registerNotificationClickHandler(onNavigate: (path: string) => v
 
       if (!notifications?.addEventListener) {
         console.log(
-          "[pushNotifications] addEventListener('click') non disponibile su questo SDK"
+          `[pushNotifications][${pageInstanceId}] addEventListener('click') non disponibile su questo SDK`
         );
         return;
       }
 
       attachedOneSignal = oneSignal;
       notifications.addEventListener("click", listener);
-      console.log(`[pushNotifications] listener click attaccato (registrazione #${registrationId})`);
+      console.log(
+        `[pushNotifications][${pageInstanceId}] listener click attaccato (registrazione #${registrationId})`
+      );
     })
     .catch((error) => {
       console.error("[pushNotifications] impossibile registrare il click handler:", error);
@@ -272,7 +303,9 @@ export function registerNotificationClickHandler(onNavigate: (path: string) => v
 
     if (notifications?.removeEventListener) {
       notifications.removeEventListener("click", listener);
-      console.log(`[pushNotifications] listener click rimosso (registrazione #${registrationId})`);
+      console.log(
+        `[pushNotifications][${pageInstanceId}] listener click rimosso (registrazione #${registrationId})`
+      );
     }
 
     if (activeClickUnsubscribe === unsubscribe) {

@@ -16,11 +16,19 @@ export default function PushNotificationClickHandler() {
   const router = useRouter();
 
   useEffect(() => {
+    // Log diagnostico temporaneo, da rimuovere una volta chiarita la causa
+    // del doppio firing del click event.
+    console.log("[PushNotificationClickHandler] effect montato, registro il click handler");
+
     const unregister = registerNotificationClickHandler((path) => {
+      console.log("[PushNotificationClickHandler] onNavigate ricevuto, chiamo router.push:", path);
       router.push(path);
     });
 
-    return unregister;
+    return () => {
+      console.log("[PushNotificationClickHandler] effect in cleanup, deregistro il click handler");
+      unregister();
+    };
   }, [router]);
 
   return null;

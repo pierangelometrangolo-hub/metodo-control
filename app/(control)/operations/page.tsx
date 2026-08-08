@@ -549,11 +549,17 @@ function OperationsContent() {
   // una volta e riproviamo. Solo se resta assente/archiviata dopo un
   // controllo con dati freschi la mostriamo come davvero non disponibile.
   async function refetchTargetTask(taskId: string) {
+    console.log(`[deepLinkDebug] refetchTargetTask: inizio, taskId=${taskId}`);
+
     const { data: taskData, error: taskError } = await supabase
       .from("tasks")
       .select("*")
       .eq("id", taskId)
       .maybeSingle();
+
+    console.log(
+      `[deepLinkDebug] refetchTargetTask: query tasks completata, taskId=${taskId}, trovata=${Boolean(taskData)}, error=${taskError ? taskError.message : "nessuno"}`
+    );
 
     if (!taskError && taskData) {
       const refreshedTask = mapDbTaskToUiTask(taskData as DbTask, profilesMap, clientsMap);
@@ -570,6 +576,10 @@ function OperationsContent() {
       .eq("task_id", taskId)
       .order("order_index", { ascending: true });
 
+    console.log(
+      `[deepLinkDebug] refetchTargetTask: query subtasks completata, taskId=${taskId}, count=${subtasksData ? (subtasksData as unknown[]).length : 0}, error=${subtasksError ? subtasksError.message : "nessuno"}`
+    );
+
     if (!subtasksError) {
       setSubtasksByTask((prev) => ({
         ...prev,
@@ -578,18 +588,30 @@ function OperationsContent() {
         ),
       }));
     }
+
+    console.log(`[deepLinkDebug] refetchTargetTask: fine, taskId=${taskId}`);
   }
 
   useEffect(() => {
+    console.log(
+      `[deepLinkDebug] effect targetUnavailable: targetTaskId=${targetTaskId}, loading=${loading}, targetTaskAvailable=${targetTaskAvailable}, targetRefetchedFor=${targetRefetchedFor}`
+    );
+
     if (!targetTaskId || loading) return;
 
     if (!targetTaskAvailable) {
       if (targetRefetchedFor !== targetTaskId) {
+        console.log(
+          `[deepLinkDebug] effect targetUnavailable: task ${targetTaskId} non nello snapshot, avvio refetchTargetTask`
+        );
         setTargetRefetchedFor(targetTaskId);
         void refetchTargetTask(targetTaskId);
         return;
       }
 
+      console.log(
+        `[deepLinkDebug] effect targetUnavailable: task ${targetTaskId} già ricontrollata e ancora non disponibile, mostro il banner`
+      );
       setTargetUnavailable("task");
       return;
     }

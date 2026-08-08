@@ -191,6 +191,19 @@ function toRelativePath(url: string): string {
   }
 }
 
+// Guardia a livello di modulo: se una registrazione precedente è ancora
+// attiva (attaccata o in attesa di attaccarsi) quando ne arriva una nuova,
+// la disattiva esplicitamente prima di procedere. I test di questa sessione
+// non hanno mostrato registrazioni multiple nell'uso normale (nessun
+// remount del layout tra navigazioni SPA, cleanup corretta anche sotto
+// React Strict Mode in dev), ma questa guardia rende la garanzia esplicita
+// invece di dipendere solo dalla correttezza per-chiamata del pattern
+// "cancelled". clickHandlerRegistrationCount serve solo per il logging
+// diagnostico, per capire dai log del dispositivo reale se/quando il
+// sintomo si ripresenta.
+let activeClickUnsubscribe: (() => void) | null = null;
+let clickHandlerRegistrationCount = 0;
+
 /**
  * Registra il listener per il click su una notifica mentre l'app è già
  * aperta in foreground (il service worker, con action "focus", non naviga
@@ -199,11 +212,23 @@ function toRelativePath(url: string): string {
  * funzione di cleanup da chiamare all'unmount.
  */
 export function registerNotificationClickHandler(onNavigate: (path: string) => void): () => void {
+  clickHandlerRegistrationCount += 1;
+  const registrationId = clickHandlerRegistrationCount;
+
+  if (activeClickUnsubscribe) {
+    console.log(
+      `[pushNotifications] registrazione #${registrationId}: trovata una registrazione precedente ancora attiva, la rimuovo prima di procedere`
+    );
+    activeClickUnsubscribe();
+  }
+
+  console.log(`[pushNotifications] registrazione click handler #${registrationId} avviata`);
+
   let cancelled = false;
   let attachedOneSignal: OneSignalClient | null = null;
 
   const listener = (event: OneSignalNotificationClickEvent) => {
-    console.log("[pushNotifications] notification click event", event);
+    console.log(`[pushNotifications] notification click event (registrazione #${registrationId})`, event);
 
     const rawUrl = resolveNotificationClickUrl(event);
 
@@ -217,7 +242,12 @@ export function registerNotificationClickHandler(onNavigate: (path: string) => v
 
   getOneSignalInstance(() => {}, 10000)
     .then((oneSignal) => {
-      if (cancelled) return;
+      if (cancelled) {
+        console.log(
+          `[pushNotifications] registrazione #${registrationId} annullata prima della risoluzione, listener non attaccato`
+        );
+        return;
+      }
 
       const notifications = oneSignal.Notifications || oneSignal.notifications;
 
@@ -230,16 +260,29 @@ export function registerNotificationClickHandler(onNavigate: (path: string) => v
 
       attachedOneSignal = oneSignal;
       notifications.addEventListener("click", listener);
+      console.log(`[pushNotifications] listener click attaccato (registrazione #${registrationId})`);
     })
     .catch((error) => {
       console.error("[pushNotifications] impossibile registrare il click handler:", error);
     });
 
-  return () => {
+  const unsubscribe = () => {
     cancelled = true;
     const notifications = attachedOneSignal?.Notifications || attachedOneSignal?.notifications;
-    notifications?.removeEventListener?.("click", listener);
+
+    if (notifications?.removeEventListener) {
+      notifications.removeEventListener("click", listener);
+      console.log(`[pushNotifications] listener click rimosso (registrazione #${registrationId})`);
+    }
+
+    if (activeClickUnsubscribe === unsubscribe) {
+      activeClickUnsubscribe = null;
+    }
   };
+
+  activeClickUnsubscribe = unsubscribe;
+
+  return unsubscribe;
 }
 
 async function waitForSubscriptionId(

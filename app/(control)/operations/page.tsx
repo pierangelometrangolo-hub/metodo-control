@@ -540,11 +540,56 @@ function OperationsContent() {
   const targetTaskAvailable = Boolean(targetTask && !targetTask.archived);
 
   const [targetUnavailable, setTargetUnavailable] = useState<"task" | "subtask" | null>(null);
+  const [targetRefetchedFor, setTargetRefetchedFor] = useState<string | null>(null);
+
+  // Se la task collegata al deep link non è nello snapshot già caricato
+  // (es. creata o riassegnata dopo che Operations era già aperta — il
+  // caso tipico di una notifica push che arriva ad app in foreground),
+  // prima di dichiararla "non disponibile" la ricarichiamo puntualmente
+  // una volta e riproviamo. Solo se resta assente/archiviata dopo un
+  // controllo con dati freschi la mostriamo come davvero non disponibile.
+  async function refetchTargetTask(taskId: string) {
+    const { data: taskData, error: taskError } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("id", taskId)
+      .maybeSingle();
+
+    if (!taskError && taskData) {
+      const refreshedTask = mapDbTaskToUiTask(taskData as DbTask, profilesMap, clientsMap);
+      setTasks((prev) =>
+        prev.some((task) => task.id === taskId)
+          ? prev.map((task) => (task.id === taskId ? refreshedTask : task))
+          : [refreshedTask, ...prev]
+      );
+    }
+
+    const { data: subtasksData, error: subtasksError } = await supabase
+      .from("v_subtasks_detailed")
+      .select("*")
+      .eq("task_id", taskId)
+      .order("order_index", { ascending: true });
+
+    if (!subtasksError) {
+      setSubtasksByTask((prev) => ({
+        ...prev,
+        [taskId]: ((subtasksData as SubtaskDetailedRow[]) || []).sort(
+          (a, b) => a.order_index - b.order_index
+        ),
+      }));
+    }
+  }
 
   useEffect(() => {
     if (!targetTaskId || loading) return;
 
     if (!targetTaskAvailable) {
+      if (targetRefetchedFor !== targetTaskId) {
+        setTargetRefetchedFor(targetTaskId);
+        void refetchTargetTask(targetTaskId);
+        return;
+      }
+
       setTargetUnavailable("task");
       return;
     }
@@ -558,7 +603,7 @@ function OperationsContent() {
     }
 
     setTargetUnavailable(null);
-  }, [targetTaskId, targetSubtaskId, loading, targetTaskAvailable, subtasksByTask]);
+  }, [targetTaskId, targetSubtaskId, loading, targetTaskAvailable, subtasksByTask, targetRefetchedFor]);
 
   useEffect(() => {
     if (!targetTaskId || loading || !targetTaskAvailable) return;

@@ -5,6 +5,9 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { activatePushNotifications } from "@/lib/pushNotifications";
+import { getUserLevelRank } from "@/lib/permissions";
+
+const MASTER_RANK = 3;
 
 const menuItems = [
   { label: "Dashboard", href: "/dashboard" },
@@ -16,6 +19,8 @@ const menuItems = [
   { label: "Projects", href: "/projects" },
 ];
 
+const adminMenuItem = { label: "Gestione Utenti", href: "/admin/utenti" };
+
 function isActivePath(pathname: string, href: string) {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
@@ -26,8 +31,15 @@ export default function HamburgerMenu() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [activatingNotifications, setActivatingNotifications] = useState(false);
   const [notificationDebugMessage, setNotificationDebugMessage] = useState("");
+  const [isMasterUser, setIsMasterUser] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
+
+  useEffect(() => {
+    void getUserLevelRank().then((rank) => setIsMasterUser(rank !== null && rank >= MASTER_RANK));
+  }, []);
+
+  const visibleMenuItems = isMasterUser ? [...menuItems, adminMenuItem] : menuItems;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -136,7 +148,7 @@ export default function HamburgerMenu() {
 
         <nav className="flex-1 px-3 py-4">
           <ul className="space-y-1">
-            {menuItems.map((item) => {
+            {visibleMenuItems.map((item) => {
               const isActive = isActivePath(pathname, item.href);
 
               return (

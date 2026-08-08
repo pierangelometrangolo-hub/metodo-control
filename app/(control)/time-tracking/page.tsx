@@ -7,6 +7,7 @@ import TrackingAnalysis from "@/components/time-tracking/TrackingAnalysis";
 import TrackingForm from "@/components/time-tracking/TrackingForm";
 import TrackingList from "@/components/time-tracking/TrackingList";
 import { supabase } from "@/lib/supabaseClient";
+import { canViewModule } from "@/lib/permissions";
 import {
   trackingOperators,
   consulenzaReferences,
@@ -138,6 +139,8 @@ export default function TimeTrackingPage() {
   const [taskOptions, setTaskOptions] = useState<TaskOption[]>([]);
   const [subtasksByTaskId, setSubtasksByTaskId] = useState<Record<string, SubtaskOption[]>>({});
 
+  const [canViewTrackingAnalysis, setCanViewTrackingAnalysis] = useState(false);
+
   const [analysisFilters, setAnalysisFilters] = useState<AnalysisFiltersState>({
     macroArea: "all",
     referenceName: "",
@@ -152,6 +155,7 @@ export default function TimeTrackingPage() {
 
   useEffect(() => {
     void loadTrackingPageData();
+    void canViewModule("tracking_analisi").then(setCanViewTrackingAnalysis);
   }, []);
 
   async function loadTrackingPageData() {
@@ -380,14 +384,16 @@ export default function TimeTrackingPage() {
 
       <TrackingStats entries={entries} onOpenAnalysis={handleOpenAnalysis} />
 
-      <TrackingAnalysis
-        entries={entries}
-        operators={operatorOptions}
-        clientReferences={clientOptions}
-        focus={analysisFocus}
-        filters={analysisFilters}
-        onFiltersChange={setAnalysisFilters}
-      />
+      {canViewTrackingAnalysis && (
+        <TrackingAnalysis
+          entries={entries}
+          operators={operatorOptions}
+          clientReferences={clientOptions}
+          focus={analysisFocus}
+          filters={analysisFilters}
+          onFiltersChange={setAnalysisFilters}
+        />
+      )}
 
       <TrackingForm
         onAddEntry={handleAddEntry}

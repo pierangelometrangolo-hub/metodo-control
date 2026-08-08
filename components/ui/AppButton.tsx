@@ -4,6 +4,8 @@ type AppButtonProps = {
   href?: string;
   onClick?: () => void;
   className?: string;
+  type?: "button" | "submit";
+  disabled?: boolean;
 };
 
 export function AppButton({
@@ -12,9 +14,11 @@ export function AppButton({
   href,
   onClick,
   className = "",
+  type,
+  disabled = false,
 }: AppButtonProps) {
   const base =
-    "inline-flex items-center justify-center rounded-[14px] px-4 py-2 text-sm font-semibold transition";
+    "inline-flex items-center justify-center rounded-[14px] px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60";
 
   const variants = {
     primary:
@@ -36,7 +40,7 @@ export function AppButton({
   }
 
   return (
-    <button onClick={onClick} className={classes}>
+    <button type={type} onClick={onClick} disabled={disabled} className={classes}>
       {children}
     </button>
   );

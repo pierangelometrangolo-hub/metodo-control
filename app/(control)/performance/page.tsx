@@ -1,112 +1,60 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
-import { AppInput } from "@/components/ui/AppInput";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
+import {
+  ND,
+  SnapshotRow,
+  BudgetRow,
+  todayString,
+  shiftDate,
+  monthRange,
+  formatCurrency,
+  formatPercent,
+  formatDelta,
+  occupancy,
+  adr,
+  revPar,
+  los,
+  computePacingStatus,
+  pacingLabels,
+  pacingDotClasses,
+  sumSnapshots,
+} from "@/lib/performanceMetrics";
 
 type StructureOption = {
   id: string;
   name: string;
 };
 
-type SnapshotRow = {
-  stay_date: string;
-  revenue_total: number;
-  rooms_sold: number;
-  rooms_available: number;
-  arrivals: number;
-  presences: number;
-  status: "otb" | "in_corso" | "consuntivo" | string;
+type StructureRowData = {
+  structure: StructureOption;
+  today: SnapshotRow | null;
+  weekAgo: SnapshotRow | null;
+  monthRevenue: number | null;
+  pacing: ReturnType<typeof computePacingStatus>;
 };
 
-type BudgetRow = {
-  level: "minimo" | "realistico" | "sfidante";
-  adr: number;
-  revenue_target: number;
-  room_nights_sold_target: number;
-  room_nights_available: number;
-  occupancy_pct_target: number;
-};
-
-const ND = "ND";
-
-function todayString() {
-  return new Date().toISOString().split("T")[0];
-}
-
-function pad(n: number) {
-  return String(n).padStart(2, "0");
-}
-
-function sdlyDate(dateStr: string) {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const dt = new Date(Date.UTC(y - 1, m - 1, d));
-  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
-}
-
-function monthRange(dateStr: string) {
-  const [y, m] = dateStr.split("-").map(Number);
-  const start = `${y}-${pad(m)}-01`;
-  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const end = `${y}-${pad(m)}-${pad(lastDay)}`;
-  return { start, end, year: y, month: m, daysInMonth: lastDay };
-}
-
-function formatCurrency(value: number | null) {
-  if (value === null) return ND;
-  return value.toLocaleString("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
-}
-
-function formatNumber(value: number | null, digits = 0) {
-  if (value === null) return ND;
-  return value.toLocaleString("it-IT", { maximumFractionDigits: digits });
-}
-
-function formatPercent(value: number | null) {
-  if (value === null) return ND;
-  return `${(value * 100).toLocaleString("it-IT", { maximumFractionDigits: 1 })}%`;
-}
-
-function occupancy(soldOrNull: number | null, available: number | null) {
-  if (soldOrNull === null || available === null || available === 0) return null;
-  return soldOrNull / available;
-}
-
-const budgetLevelLabels: Record<string, string> = {
-  minimo: "Minimo",
-  realistico: "Realistico",
-  sfidante: "Sfidante",
-};
-
-export default function PerformanceDashboardPage() {
+export default function PerformanceOverviewPage() {
   const router = useRouter();
 
   const [accessState, setAccessState] = useState<"checking" | "granted" | "denied">(
     "checking"
   );
-
-  const [structures, setStructures] = useState<StructureOption[]>([]);
-  const [structureId, setStructureId] = useState<string>("");
-  const [selectedDate, setSelectedDate] = useState(todayString());
-
-  const [daySnapshot, setDaySnapshot] = useState<SnapshotRow | null>(null);
-  const [sdlySnapshot, setSdlySnapshot] = useState<SnapshotRow | null>(null);
-  const [monthSnapshots, setMonthSnapshots] = useState<SnapshotRow[]>([]);
-  const [budgets, setBudgets] = useState<BudgetRow[]>([]);
-
-  const [loadingMetrics, setLoadingMetrics] = useState(false);
+  const [rows, setRows] = useState<StructureRowData[]>([]);
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
-    void checkAccessAndLoadStructures();
+    void checkAccessAndLoad();
   }, []);
 
-  async function checkAccessAndLoadStructures() {
+  async function checkAccessAndLoad() {
     const canView = await canViewModule("performance");
 
     if (!canView) {
@@ -116,96 +64,95 @@ export default function PerformanceDashboardPage() {
     }
 
     setAccessState("granted");
+    await loadOverview();
+  }
 
-    const { data, error } = await supabase
+  async function loadOverview() {
+    setLoading(true);
+    setLoadError("");
+
+    const { data: structuresData, error: structuresError } = await supabase
       .from("structures")
       .select("id, name")
       .order("name", { ascending: true });
 
-    if (error) {
-      setLoadError(`Errore caricamento strutture: ${error.message}`);
+    if (structuresError) {
+      setLoadError(`Errore caricamento strutture: ${structuresError.message}`);
+      setLoading(false);
       return;
     }
 
-    setStructures((data as StructureOption[]) || []);
-    if (data && data.length > 0) {
-      setStructureId(data[0].id);
-    }
-  }
+    const structures = (structuresData as StructureOption[]) || [];
+    const ids = structures.map((s) => s.id);
 
-  useEffect(() => {
-    if (structureId) void loadMetrics();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structureId, selectedDate]);
+    const today = todayString();
+    const weekAgo = shiftDate(today, -7);
+    const { start, end, year, month } = monthRange(today);
 
-  async function loadMetrics() {
-    setLoadingMetrics(true);
-    setLoadError("");
-
-    const sdly = sdlyDate(selectedDate);
-    const { start, end, year, month } = monthRange(selectedDate);
-
-    const [dayRes, sdlyRes, monthRes, budgetsRes] = await Promise.all([
+    const [dayRes, weekAgoRes, monthRes, budgetsRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
-        .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
-        .eq("structure_id", structureId)
-        .eq("stay_date", selectedDate)
-        .maybeSingle(),
+        .select("structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
+        .eq("stay_date", today)
+        .in("structure_id", ids),
       supabase
         .from("v_snapshot_latest")
-        .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
-        .eq("structure_id", structureId)
-        .eq("stay_date", sdly)
-        .maybeSingle(),
+        .select("structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
+        .eq("stay_date", weekAgo)
+        .in("structure_id", ids),
       supabase
         .from("v_snapshot_latest")
-        .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
-        .eq("structure_id", structureId)
+        .select("structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
         .gte("stay_date", start)
-        .lte("stay_date", end),
+        .lte("stay_date", end)
+        .in("structure_id", ids),
       supabase
         .from("budgets")
-        .select("level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
-        .eq("structure_id", structureId)
+        .select("structure_id, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
         .eq("season_year", year)
-        .eq("month", month),
+        .eq("month", month)
+        .in("structure_id", ids),
     ]);
 
     if (dayRes.error) setLoadError(dayRes.error.message);
-    if (sdlyRes.error) setLoadError(sdlyRes.error.message);
+    if (weekAgoRes.error) setLoadError(weekAgoRes.error.message);
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
 
-    setDaySnapshot((dayRes.data as SnapshotRow) || null);
-    setSdlySnapshot((sdlyRes.data as SnapshotRow) || null);
-    setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
-    setBudgets((budgetsRes.data as BudgetRow[]) || []);
+    const dayByStructure = new Map((dayRes.data || []).map((r) => [r.structure_id, r as SnapshotRow]));
+    const weekAgoByStructure = new Map((weekAgoRes.data || []).map((r) => [r.structure_id, r as SnapshotRow]));
 
-    setLoadingMetrics(false);
+    const monthByStructure = new Map<string, SnapshotRow[]>();
+    (monthRes.data || []).forEach((r) => {
+      const list = monthByStructure.get(r.structure_id) || [];
+      list.push(r as SnapshotRow);
+      monthByStructure.set(r.structure_id, list);
+    });
+
+    const budgetsByStructure = new Map<string, BudgetRow[]>();
+    (budgetsRes.data || []).forEach((r) => {
+      const list = budgetsByStructure.get(r.structure_id) || [];
+      list.push(r as BudgetRow);
+      budgetsByStructure.set(r.structure_id, list);
+    });
+
+    const nextRows: StructureRowData[] = structures.map((structure) => {
+      const monthSnapshots = monthByStructure.get(structure.id) || [];
+      const monthToDate = sumSnapshots(monthSnapshots);
+      const budgetsForMonth = budgetsByStructure.get(structure.id) || [];
+
+      return {
+        structure,
+        today: dayByStructure.get(structure.id) || null,
+        weekAgo: weekAgoByStructure.get(structure.id) || null,
+        monthRevenue: monthToDate.revenue,
+        pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
+      };
+    });
+
+    setRows(nextRows);
+    setLoading(false);
   }
-
-  const monthToDate = useMemo(() => {
-    if (monthSnapshots.length === 0) {
-      return { revenue: null, roomsSold: null, roomsAvailable: null, arrivals: null, presences: null, daysWithData: 0 };
-    }
-
-    const totals = monthSnapshots.reduce(
-      (acc, row) => ({
-        revenue: acc.revenue + Number(row.revenue_total),
-        roomsSold: acc.roomsSold + Number(row.rooms_sold),
-        roomsAvailable: acc.roomsAvailable + Number(row.rooms_available),
-        arrivals: acc.arrivals + Number(row.arrivals),
-        presences: acc.presences + Number(row.presences),
-      }),
-      { revenue: 0, roomsSold: 0, roomsAvailable: 0, arrivals: 0, presences: 0 }
-    );
-
-    return { ...totals, daysWithData: monthSnapshots.length };
-  }, [monthSnapshots]);
-
-  const selectedStructureName = structures.find((s) => s.id === structureId)?.name || "";
-  const { daysInMonth } = monthRange(selectedDate);
 
   if (accessState !== "granted") {
     return null;
@@ -215,14 +162,11 @@ export default function PerformanceDashboardPage() {
     <div className="space-y-6">
       <PageHeader
         eyebrow="Performance"
-        title="Dashboard"
-        description="Confronto giornaliero vs stesso giorno anno precedente (SDLY) e mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato per quella struttura/data — mai un valore pari a zero."
+        title="Vista d'insieme"
+        description="Snapshot di oggi per tutte le strutture, confronto vs la stessa data di 7 giorni fa, ritmo del mese in corso rispetto al budget. 'ND' indica che manca un dato — mai un valore pari a zero."
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
-          <Link
-            href="/performance/import"
-            className="text-sm font-medium text-[#017A92] hover:underline"
-          >
+          <Link href="/performance/import" className="text-sm font-medium text-[#017A92] hover:underline">
             Vai a Import (storico / actual) →
           </Link>
           <Link
@@ -234,161 +178,91 @@ export default function PerformanceDashboardPage() {
         </div>
       </PageHeader>
 
-      <AppCard title="Struttura e data">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-              Struttura
-            </label>
-            <select
-              value={structureId}
-              onChange={(e) => setStructureId(e.target.value)}
-              className="h-11 w-full rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
-            >
-              {structures.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
+      <AppCard title="Strutture" subtitle="Clicca una riga per il dettaglio giornaliero e il pickup">
+        {loadError && <p className="mb-3 text-sm text-[#8a3a3a]">{loadError}</p>}
 
-          <div>
-            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-              Giorno di riferimento
-            </label>
-            <AppInput
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-            />
-          </div>
-        </div>
-
-        {loadError && <p className="mt-3 text-sm text-[#8a3a3a]">{loadError}</p>}
-      </AppCard>
-
-      <AppCard
-        title={`${selectedStructureName} — ${selectedDate}`}
-        subtitle={
-          daySnapshot
-            ? `Dato ${daySnapshot.status === "consuntivo" ? "consuntivo" : daySnapshot.status === "otb" ? "on-the-books" : "in corso"} · confronto con ${sdlyDate(selectedDate)} (SDLY)`
-            : `Nessun dato importato per questo giorno · confronto con ${sdlyDate(selectedDate)} (SDLY)`
-        }
-      >
-        {loadingMetrics ? (
+        {loading ? (
           <p className="text-sm text-[#6a6d70]">Caricamento...</p>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <KpiCard
-              label="Revenue"
-              current={formatCurrency(daySnapshot ? Number(daySnapshot.revenue_total) : null)}
-              sdly={formatCurrency(sdlySnapshot ? Number(sdlySnapshot.revenue_total) : null)}
-            />
-            <KpiCard
-              label="Occupazione"
-              current={formatPercent(
-                occupancy(
-                  daySnapshot ? Number(daySnapshot.rooms_sold) : null,
-                  daySnapshot ? Number(daySnapshot.rooms_available) : null
-                )
-              )}
-              sdly={formatPercent(
-                occupancy(
-                  sdlySnapshot ? Number(sdlySnapshot.rooms_sold) : null,
-                  sdlySnapshot ? Number(sdlySnapshot.rooms_available) : null
-                )
-              )}
-            />
-            <KpiCard
-              label="Arrivi"
-              current={formatNumber(daySnapshot ? Number(daySnapshot.arrivals) : null)}
-              sdly={formatNumber(sdlySnapshot ? Number(sdlySnapshot.arrivals) : null)}
-            />
-            <KpiCard
-              label="Presenze"
-              current={formatNumber(daySnapshot ? Number(daySnapshot.presences) : null)}
-              sdly={formatNumber(sdlySnapshot ? Number(sdlySnapshot.presences) : null)}
-            />
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  <th className="pb-3 pr-4">Struttura</th>
+                  <th className="pb-3 pr-4">ADR</th>
+                  <th className="pb-3 pr-4">RevPAR</th>
+                  <th className="pb-3 pr-4">Occupazione</th>
+                  <th className="pb-3 pr-4">LOS</th>
+                  <th className="pb-3">Ritmo mese vs budget</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => {
+                  const todayAdr = row.today ? adr(Number(row.today.revenue_total), Number(row.today.rooms_sold)) : null;
+                  const weekAgoAdr = row.weekAgo
+                    ? adr(Number(row.weekAgo.revenue_total), Number(row.weekAgo.rooms_sold))
+                    : null;
+
+                  const todayRevPar = row.today
+                    ? revPar(Number(row.today.revenue_total), Number(row.today.rooms_available))
+                    : null;
+                  const weekAgoRevPar = row.weekAgo
+                    ? revPar(Number(row.weekAgo.revenue_total), Number(row.weekAgo.rooms_available))
+                    : null;
+
+                  const todayOcc = row.today
+                    ? occupancy(Number(row.today.rooms_sold), Number(row.today.rooms_available))
+                    : null;
+                  const weekAgoOcc = row.weekAgo
+                    ? occupancy(Number(row.weekAgo.rooms_sold), Number(row.weekAgo.rooms_available))
+                    : null;
+
+                  const todayLos = row.today ? los(Number(row.today.rooms_sold), Number(row.today.arrivals)) : null;
+                  const weekAgoLos = row.weekAgo
+                    ? los(Number(row.weekAgo.rooms_sold), Number(row.weekAgo.arrivals))
+                    : null;
+
+                  return (
+                    <tr
+                      key={row.structure.id}
+                      onClick={() => router.push(`/performance/${row.structure.id}`)}
+                      className="cursor-pointer border-b border-[#f0ece6] transition last:border-0 hover:bg-[#f8f6f2]"
+                    >
+                      <td className="py-3 pr-4 font-semibold text-[#2B2D2F]">{row.structure.name}</td>
+                      <MetricCell current={formatCurrency(todayAdr)} delta={formatDelta(todayAdr, weekAgoAdr)} />
+                      <MetricCell current={formatCurrency(todayRevPar)} delta={formatDelta(todayRevPar, weekAgoRevPar)} />
+                      <MetricCell current={formatPercent(todayOcc)} delta={formatDelta(todayOcc, weekAgoOcc)} />
+                      <MetricCell
+                        current={todayLos !== null ? todayLos.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND}
+                        delta={formatDelta(todayLos, weekAgoLos)}
+                      />
+                      <td className="py-3">
+                        {row.pacing ? (
+                          <div className="flex items-center gap-2">
+                            <span className={`h-2.5 w-2.5 rounded-full ${pacingDotClasses[row.pacing]}`} />
+                            <span className="text-[#2B2D2F]">{pacingLabels[row.pacing]}</span>
+                          </div>
+                        ) : (
+                          <span className="text-[#6a6d70]">{ND}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
-      </AppCard>
-
-      <AppCard
-        title="Mese in corso vs budget"
-        subtitle={
-          monthToDate.daysWithData > 0
-            ? `Somma di ${monthToDate.daysWithData} giorni con dati su ${daysInMonth} del mese (dato parziale se il mese non è concluso o mancano import)`
-            : "Nessun dato importato per questo mese"
-        }
-      >
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[560px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                <th className="pb-3 pr-4">Scenario</th>
-                <th className="pb-3 pr-4">Revenue target</th>
-                <th className="pb-3 pr-4">Revenue reale (mese)</th>
-                <th className="pb-3 pr-4">Occupazione target</th>
-                <th className="pb-3">Occupazione reale (mese)</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="border-b border-[#f0ece6]">
-                <td className="py-2 pr-4 font-semibold text-[#2B2D2F]">Reale</td>
-                <td className="py-2 pr-4 text-[#6a6d70]">—</td>
-                <td className="py-2 pr-4 text-[#2B2D2F]">
-                  {monthToDate.daysWithData > 0 ? formatCurrency(monthToDate.revenue) : ND}
-                </td>
-                <td className="py-2 pr-4 text-[#6a6d70]">—</td>
-                <td className="py-2 text-[#2B2D2F]">
-                  {monthToDate.daysWithData > 0
-                    ? formatPercent(occupancy(monthToDate.roomsSold, monthToDate.roomsAvailable))
-                    : ND}
-                </td>
-              </tr>
-
-              {["minimo", "realistico", "sfidante"].map((level) => {
-                const budget = budgets.find((b) => b.level === level);
-
-                return (
-                  <tr key={level} className="border-b border-[#f0ece6] last:border-0">
-                    <td className="py-2 pr-4 text-[#2B2D2F]">{budgetLevelLabels[level]}</td>
-                    <td className="py-2 pr-4 text-[#2B2D2F]">
-                      {budget ? formatCurrency(Number(budget.revenue_target)) : ND}
-                    </td>
-                    <td className="py-2 pr-4 text-[#6a6d70]">—</td>
-                    <td className="py-2 pr-4 text-[#2B2D2F]">
-                      {budget ? formatPercent(Number(budget.occupancy_pct_target)) : ND}
-                    </td>
-                    <td className="py-2 text-[#6a6d70]">—</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
       </AppCard>
     </div>
   );
 }
 
-function KpiCard({
-  label,
-  current,
-  sdly,
-}: {
-  label: string;
-  current: string;
-  sdly: string;
-}) {
+function MetricCell({ current, delta }: { current: string; delta: { text: string; colorClass: string } }) {
   return (
-    <div className="rounded-[16px] border border-[#e7dfd8] bg-[#fcfbf9] p-4">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-        {label}
-      </p>
-      <p className="mt-2 text-[22px] font-semibold leading-none text-[#2B2D2F]">{current}</p>
-      <p className="mt-2 text-[12px] text-[#6a6d70]">SDLY: {sdly}</p>
-    </div>
+    <td className="py-3 pr-4">
+      <p className="text-[#2B2D2F]">{current}</p>
+      <p className={`text-[11px] ${delta.colorClass}`}>{delta.text} vs 7gg fa</p>
+    </td>
   );
 }

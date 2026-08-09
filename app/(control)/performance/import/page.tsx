@@ -169,7 +169,7 @@ export default function PerformanceImportPage() {
   return (
     <div className="space-y-6">
       <Link href="/performance" className="text-sm font-medium text-[#017A92] hover:underline">
-        ← Torna alla Dashboard Performance
+        ← Torna alla vista d'insieme Performance
       </Link>
 
       <PageHeader

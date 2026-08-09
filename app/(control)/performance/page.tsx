@@ -218,12 +218,20 @@ export default function PerformanceDashboardPage() {
         title="Dashboard"
         description="Confronto giornaliero vs stesso giorno anno precedente (SDLY) e mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato per quella struttura/data — mai un valore pari a zero."
       >
-        <Link
-          href="/performance/inserimento-manuale"
-          className="text-sm font-medium text-[#017A92] hover:underline"
-        >
-          Vai all'inserimento manuale (Montecallini) →
-        </Link>
+        <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+          <Link
+            href="/performance/import"
+            className="text-sm font-medium text-[#017A92] hover:underline"
+          >
+            Vai a Import (storico / actual) →
+          </Link>
+          <Link
+            href="/performance/inserimento-manuale"
+            className="text-sm font-medium text-[#017A92] hover:underline"
+          >
+            Vai all'inserimento manuale (Montecallini) →
+          </Link>
+        </div>
       </PageHeader>
 
       <AppCard title="Struttura e data">

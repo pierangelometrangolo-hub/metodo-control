@@ -51,12 +51,20 @@ export function monthRange(dateStr: string) {
 
 export function formatCurrency(value: number | null): string {
   if (value === null) return ND;
-  return value.toLocaleString("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+  // useGrouping esplicito: senza, alcuni browser (Chromium con questa
+  // versione di dati it-IT) non raggruppano le migliaia sotto 10.000
+  // ma lo fanno sopra - risultato incoerente tipo "4936 €" vs "12.355 €".
+  return value.toLocaleString("it-IT", {
+    style: "currency",
+    currency: "EUR",
+    maximumFractionDigits: 0,
+    useGrouping: "always",
+  });
 }
 
 export function formatNumber(value: number | null, digits = 0): string {
   if (value === null) return ND;
-  return value.toLocaleString("it-IT", { maximumFractionDigits: digits });
+  return value.toLocaleString("it-IT", { maximumFractionDigits: digits, useGrouping: "always" });
 }
 
 export function formatPercent(value: number | null): string {

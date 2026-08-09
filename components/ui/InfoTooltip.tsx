@@ -36,7 +36,7 @@ export function InfoTooltip({ text }: InfoTooltipProps) {
 
       <span
         role="tooltip"
-        className={`absolute bottom-full left-1/2 z-10 mb-2 w-56 -translate-x-1/2 rounded-[10px] border border-[#e7dfd8] bg-white p-3 text-[11px] font-normal normal-case leading-4 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
+        className={`absolute top-full left-1/2 z-10 mt-2 w-56 -translate-x-1/2 rounded-[10px] border border-[#e7dfd8] bg-white p-3 text-[11px] font-normal normal-case leading-4 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
           open ? "opacity-100" : "pointer-events-none opacity-0 group-hover:opacity-100"
         }`}
       >

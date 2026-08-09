@@ -21,6 +21,7 @@ import {
   formatNumber,
   formatPercent,
   occupancy,
+  los,
   sumSnapshots,
 } from "@/lib/performanceMetrics";
 
@@ -141,7 +142,7 @@ export default function PerformanceStructureDrilldownPage({
         .gte("stay_date", start)
         .lte("stay_date", end),
       supabase
-        .from("budgets")
+        .from("v_budgets_current")
         .select("level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
         .eq("structure_id", structureId)
         .eq("season_year", year)
@@ -225,7 +226,7 @@ export default function PerformanceStructureDrilldownPage({
                   </p>
                 )}
 
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
                 <KpiCard
                   label="Revenue"
                   current={formatCurrency(daySnapshot ? Number(daySnapshot.revenue_total) : null)}
@@ -255,6 +256,21 @@ export default function PerformanceStructureDrilldownPage({
                   label="Presenze"
                   current={formatNumber(daySnapshot ? Number(daySnapshot.presences) : null)}
                   sdly={formatNumber(sdlySnapshot ? Number(sdlySnapshot.presences) : null)}
+                />
+                <KpiCard
+                  label="LOS"
+                  current={(() => {
+                    const value = daySnapshot
+                      ? los(Number(daySnapshot.rooms_sold), Number(daySnapshot.arrivals))
+                      : null;
+                    return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
+                  })()}
+                  sdly={(() => {
+                    const value = sdlySnapshot
+                      ? los(Number(sdlySnapshot.rooms_sold), Number(sdlySnapshot.arrivals))
+                      : null;
+                    return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
+                  })()}
                 />
                 </div>
               </>

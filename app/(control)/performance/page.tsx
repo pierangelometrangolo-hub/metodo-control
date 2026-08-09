@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
+import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
 import {
@@ -162,8 +163,8 @@ export default function PerformanceOverviewPage() {
     <div className="space-y-6">
       <PageHeader
         eyebrow="Performance"
-        title="Vista d'insieme"
-        description="Snapshot di oggi per tutte le strutture, confronto vs la stessa data di 7 giorni fa, ritmo del mese in corso rispetto al budget. 'ND' indica che manca un dato — mai un valore pari a zero."
+        title="Dashboard Performance"
+        description="Stato commerciale di tutte le strutture aggiornato a oggi, con ritmo verso il budget del mese e confronto sulla stessa data della settimana precedente."
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
           <Link href="/performance/import" className="text-sm font-medium text-[#017A92] hover:underline">
@@ -189,11 +190,30 @@ export default function PerformanceOverviewPage() {
               <thead>
                 <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                   <th className="pb-3 pr-4">Struttura</th>
-                  <th className="pb-3 pr-4">ADR</th>
-                  <th className="pb-3 pr-4">RevPAR</th>
-                  <th className="pb-3 pr-4">Occupazione</th>
-                  <th className="pb-3 pr-4">LOS</th>
-                  <th className="pb-3">Ritmo mese vs budget</th>
+                  <th className="pb-3 pr-4">
+                    ADR
+                    <InfoTooltip text="Tariffa media giornaliera (Average Daily Rate): revenue di oggi diviso camere vendute oggi. Calcolato sul singolo giorno, non sul mese." />
+                  </th>
+                  <th className="pb-3 pr-4">
+                    RevPAR
+                    <InfoTooltip text="Revenue per camera disponibile: revenue di oggi diviso camere disponibili oggi. Calcolato sul singolo giorno, non sul mese." />
+                  </th>
+                  <th className="pb-3 pr-4">
+                    Occupazione
+                    <InfoTooltip text="Camere vendute diviso camere disponibili, nello stesso giorno (oggi) e sulla stessa riga dati — numeratore e denominatore coprono sempre lo stesso periodo." />
+                  </th>
+                  <th className="pb-3 pr-4">
+                    LOS
+                    <InfoTooltip text="Durata media del soggiorno (Length of Stay): camere vendute oggi diviso arrivi oggi. 'ND' quando non ci sono arrivi registrati quel giorno." />
+                  </th>
+                  <th className="pb-3 pr-4">
+                    Revenue OTB (mese)
+                    <InfoTooltip text="Somma del revenue on-the-books di tutti i giorni del mese corrente per cui esiste un dato importato. Valore parziale se il mese non è concluso o mancano import." />
+                  </th>
+                  <th className="pb-3">
+                    Ritmo mese vs budget
+                    <InfoTooltip text="Confronta il Revenue OTB del mese corrente con i tre livelli di budget dello stesso mese: rosso sotto Minimo, giallo tra Minimo e Realistico, verde sopra Realistico." />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -236,6 +256,9 @@ export default function PerformanceOverviewPage() {
                         current={todayLos !== null ? todayLos.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND}
                         delta={formatDelta(todayLos, weekAgoLos)}
                       />
+                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                        {row.monthRevenue !== null ? formatCurrency(row.monthRevenue) : ND}
+                      </td>
                       <td className="py-3">
                         {row.pacing ? (
                           <div className="flex items-center gap-2">

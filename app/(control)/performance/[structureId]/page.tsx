@@ -10,6 +10,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
 import { Calendar } from "@/components/performance/Calendar";
 import { PickupChart, PickupPoint } from "@/components/performance/PickupChart";
+import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
 import {
   ND,
   SnapshotRow,
@@ -52,6 +53,8 @@ export default function PerformanceStructureDrilldownPage({
   const [monthSnapshots, setMonthSnapshots] = useState<SnapshotRow[]>([]);
   const [budgets, setBudgets] = useState<BudgetRow[]>([]);
   const [pickupPoints, setPickupPoints] = useState<PickupPoint[]>([]);
+  const [hasChannelData, setHasChannelData] = useState(false);
+  const [channelRevenue, setChannelRevenue] = useState<ChannelRevenueDatum[]>([]);
 
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -108,12 +111,24 @@ export default function PerformanceStructureDrilldownPage({
         .map((r) => r.stay_date as string);
       setAnomalyDates(new Set(anomalies));
     }
+
+    // Struttura mai popolata (es. Montecallini): la sezione va nascosta
+    // del tutto, non solo mostrata con "ND" - controllo una volta sola,
+    // non ad ogni cambio di mese.
+    const { count: channelCount, error: channelCountError } = await supabase
+      .from("channel_revenue")
+      .select("*", { count: "exact", head: true })
+      .eq("structure_id", structureId);
+
+    if (!channelCountError) {
+      setHasChannelData((channelCount || 0) > 0);
+    }
   }
 
   useEffect(() => {
     if (accessState === "granted") void loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessState, selectedDate]);
+  }, [accessState, selectedDate, hasChannelData]);
 
   async function loadMetrics() {
     setLoadingMetrics(true);
@@ -122,7 +137,7 @@ export default function PerformanceStructureDrilldownPage({
     const sdly = sdlyDate(selectedDate);
     const { start, end, year, month } = monthRange(selectedDate);
 
-    const [dayRes, sdlyRes, monthRes, budgetsRes, pickupRes] = await Promise.all([
+    const [dayRes, sdlyRes, monthRes, budgetsRes, pickupRes, channelRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
@@ -153,6 +168,14 @@ export default function PerformanceStructureDrilldownPage({
         .eq("structure_id", structureId)
         .eq("stay_date", selectedDate)
         .order("extraction_date", { ascending: true }),
+      hasChannelData
+        ? supabase
+            .from("channel_revenue")
+            .select("channel, revenue_gross")
+            .eq("structure_id", structureId)
+            .gte("period_start", start)
+            .lte("period_start", end)
+        : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (dayRes.error) setLoadError(dayRes.error.message);
@@ -160,6 +183,7 @@ export default function PerformanceStructureDrilldownPage({
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (pickupRes.error) setLoadError(pickupRes.error.message);
+    if (channelRes.error) setLoadError(channelRes.error.message);
 
     setDaySnapshot((dayRes.data as SnapshotRow) || null);
     setSdlySnapshot((sdlyRes.data as SnapshotRow) || null);
@@ -171,6 +195,13 @@ export default function PerformanceStructureDrilldownPage({
         revenue: Number(r.revenue_total),
       }))
     );
+
+    const channelTotals = new Map<string, number>();
+    (channelRes.data || []).forEach((r) => {
+      const key = r.channel as string;
+      channelTotals.set(key, (channelTotals.get(key) || 0) + Number(r.revenue_gross));
+    });
+    setChannelRevenue(Array.from(channelTotals, ([channel, revenue]) => ({ channel, revenue })));
 
     setLoadingMetrics(false);
   }
@@ -341,6 +372,15 @@ export default function PerformanceStructureDrilldownPage({
           </table>
         </div>
       </AppCard>
+
+      {hasChannelData && (
+        <AppCard
+          title="Revenue per canale"
+          subtitle={`Fatturato aggregato per canale sul mese visualizzato (${selectedDate.slice(0, 7)}) — la riga Totale deve coincidere con la somma delle barre`}
+        >
+          <ChannelRevenueBars data={channelRevenue} />
+        </AppCard>
+      )}
     </div>
   );
 }

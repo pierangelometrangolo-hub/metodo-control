@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { pad } from "@/lib/performanceMetrics";
 
 type CalendarProps = {
@@ -8,10 +8,11 @@ type CalendarProps = {
   onChange: (date: string) => void;
   highlightedDates: Set<string>;
   anomalyDates?: Set<string>;
+  legendLabel?: string;
 };
 
 const WEEKDAY_LABELS = ["L", "M", "M", "G", "V", "S", "D"];
-const MONTH_LABELS = [
+export const MONTH_LABELS = [
   "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
   "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre",
 ];
@@ -20,10 +21,25 @@ function toDateString(y: number, m: number, d: number) {
   return `${y}-${pad(m + 1)}-${pad(d)}`;
 }
 
-export function Calendar({ value, onChange, highlightedDates, anomalyDates = new Set() }: CalendarProps) {
+export function Calendar({
+  value,
+  onChange,
+  highlightedDates,
+  anomalyDates = new Set(),
+  legendLabel = "giorni con un import reale registrato per questa struttura",
+}: CalendarProps) {
   const [y, m] = value.split("-").map(Number);
   const [viewYear, setViewYear] = useState(y);
   const [viewMonth, setViewMonth] = useState(m - 1);
+
+  // Il valore "value" puo' cambiare anche da un controllo esterno al
+  // calendario (es. un filtro mese/anno altrove nella pagina), non solo
+  // cliccando un giorno qui dentro: la vista deve seguirlo.
+  useEffect(() => {
+    const [nextYear, nextMonth] = value.split("-").map(Number);
+    setViewYear(nextYear);
+    setViewMonth(nextMonth - 1);
+  }, [value]);
 
   const firstOfMonth = new Date(Date.UTC(viewYear, viewMonth, 1));
   const startWeekday = (firstOfMonth.getUTCDay() + 6) % 7;
@@ -126,7 +142,7 @@ export function Calendar({ value, onChange, highlightedDates, anomalyDates = new
 
       <p className="mt-3 text-[11px] leading-4 text-[#6a6d70]">
         <span className="mr-1 inline-block h-[4px] w-[4px] rounded-full bg-[#017A92] align-middle" />
-        giorni con un import reale registrato per questa struttura
+        {legendLabel}
       </p>
       <p className="mt-1 text-[11px] leading-4 text-[#6a6d70]">
         <span className="mr-1 inline-flex h-[10px] w-[10px] items-center justify-center rounded-full bg-[#b6423f] align-middle text-[7px] font-bold leading-none text-white">

@@ -44,6 +44,7 @@ export default function PerformanceStructureDrilldownPage({
   const [structureName, setStructureName] = useState("");
   const [selectedDate, setSelectedDate] = useState(todayString());
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
+  const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
 
   const [daySnapshot, setDaySnapshot] = useState<SnapshotRow | null>(null);
   const [sdlySnapshot, setSdlySnapshot] = useState<SnapshotRow | null>(null);
@@ -90,6 +91,21 @@ export default function PerformanceStructureDrilldownPage({
 
     if (!importsRes.error) {
       setHighlightedDates(new Set((importsRes.data || []).map((r) => r.extraction_date as string)));
+    }
+
+    // Calcolo dinamico, non una lista fissa: rilegge sempre lo stato attuale
+    // di v_snapshot_latest, quindi nuove estrazioni con lo stesso problema
+    // vengono segnalate automaticamente senza bisogno di aggiornare codice.
+    const anomalyRes = await supabase
+      .from("v_snapshot_latest")
+      .select("stay_date, rooms_sold, rooms_available")
+      .eq("structure_id", structureId);
+
+    if (!anomalyRes.error) {
+      const anomalies = (anomalyRes.data || [])
+        .filter((r) => Number(r.rooms_sold) > Number(r.rooms_available))
+        .map((r) => r.stay_date as string);
+      setAnomalyDates(new Set(anomalies));
     }
   }
 
@@ -179,7 +195,12 @@ export default function PerformanceStructureDrilldownPage({
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <AppCard title="Giorno di riferimento">
-          <Calendar value={selectedDate} onChange={setSelectedDate} highlightedDates={highlightedDates} />
+          <Calendar
+            value={selectedDate}
+            onChange={setSelectedDate}
+            highlightedDates={highlightedDates}
+            anomalyDates={anomalyDates}
+          />
           {loadError && <p className="mt-3 text-sm text-[#8a3a3a]">{loadError}</p>}
         </AppCard>
 
@@ -195,7 +216,16 @@ export default function PerformanceStructureDrilldownPage({
             {loadingMetrics ? (
               <p className="text-sm text-[#6a6d70]">Caricamento...</p>
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <>
+                {daySnapshot && Number(daySnapshot.rooms_sold) > Number(daySnapshot.rooms_available) && (
+                  <p className="mb-4 rounded-[12px] border border-[#e9c9c9] bg-[#fbf1f1] px-4 py-3 text-sm text-[#8a3a3a]">
+                    Attenzione: Booking Designer riporta {Number(daySnapshot.rooms_sold)} camere vendute su{" "}
+                    {Number(daySnapshot.rooms_available)} disponibili per questo giorno — inconsistenza nella fonte,
+                    non un errore di calcolo nostro. Dato mostrato così com'è arrivato da BD.
+                  </p>
+                )}
+
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <KpiCard
                   label="Revenue"
                   current={formatCurrency(daySnapshot ? Number(daySnapshot.revenue_total) : null)}
@@ -226,7 +256,8 @@ export default function PerformanceStructureDrilldownPage({
                   current={formatNumber(daySnapshot ? Number(daySnapshot.presences) : null)}
                   sdly={formatNumber(sdlySnapshot ? Number(sdlySnapshot.presences) : null)}
                 />
-              </div>
+                </div>
+              </>
             )}
           </AppCard>
 

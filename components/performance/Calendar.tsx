@@ -7,6 +7,7 @@ type CalendarProps = {
   value: string;
   onChange: (date: string) => void;
   highlightedDates: Set<string>;
+  anomalyDates?: Set<string>;
 };
 
 const WEEKDAY_LABELS = ["L", "M", "M", "G", "V", "S", "D"];
@@ -19,7 +20,7 @@ function toDateString(y: number, m: number, d: number) {
   return `${y}-${pad(m + 1)}-${pad(d)}`;
 }
 
-export function Calendar({ value, onChange, highlightedDates }: CalendarProps) {
+export function Calendar({ value, onChange, highlightedDates, anomalyDates = new Set() }: CalendarProps) {
   const [y, m] = value.split("-").map(Number);
   const [viewYear, setViewYear] = useState(y);
   const [viewMonth, setViewMonth] = useState(m - 1);
@@ -86,6 +87,12 @@ export function Calendar({ value, onChange, highlightedDates }: CalendarProps) {
           const dateStr = toDateString(viewYear, viewMonth, day);
           const isSelected = dateStr === value;
           const isHighlighted = highlightedDates.has(dateStr);
+          const hasAnomaly = anomalyDates.has(dateStr);
+
+          const titleParts = [
+            isHighlighted ? "Estrazione BD presente per questa data" : null,
+            hasAnomaly ? "Attenzione: camere vendute superiori alle disponibili (dato sorgente BD)" : null,
+          ].filter(Boolean);
 
           return (
             <button
@@ -97,7 +104,7 @@ export function Calendar({ value, onChange, highlightedDates }: CalendarProps) {
                   ? "bg-[#017A92] font-semibold text-white"
                   : "text-[#2B2D2F] hover:bg-[#f3f8fa]"
               }`}
-              title={isHighlighted ? "Estrazione BD presente per questa data" : undefined}
+              title={titleParts.length > 0 ? titleParts.join(" · ") : undefined}
             >
               {day}
               {isHighlighted && (
@@ -107,6 +114,11 @@ export function Calendar({ value, onChange, highlightedDates }: CalendarProps) {
                   }`}
                 />
               )}
+              {hasAnomaly && (
+                <span className="absolute right-[1px] top-[1px] flex h-[10px] w-[10px] items-center justify-center rounded-full bg-[#b6423f] text-[7px] font-bold leading-none text-white">
+                  !
+                </span>
+              )}
             </button>
           );
         })}
@@ -115,6 +127,12 @@ export function Calendar({ value, onChange, highlightedDates }: CalendarProps) {
       <p className="mt-3 text-[11px] leading-4 text-[#6a6d70]">
         <span className="mr-1 inline-block h-[4px] w-[4px] rounded-full bg-[#017A92] align-middle" />
         giorni con un import reale registrato per questa struttura
+      </p>
+      <p className="mt-1 text-[11px] leading-4 text-[#6a6d70]">
+        <span className="mr-1 inline-flex h-[10px] w-[10px] items-center justify-center rounded-full bg-[#b6423f] align-middle text-[7px] font-bold leading-none text-white">
+          !
+        </span>
+        camere vendute superiori alle disponibili (dato così come arriva da BD)
       </p>
     </div>
   );

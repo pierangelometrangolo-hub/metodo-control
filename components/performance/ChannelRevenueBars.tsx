@@ -15,25 +15,22 @@ type ChannelRevenueBarsProps = {
 const POSITIVE_COLOR = "#017A92";
 const NEGATIVE_COLOR = "#b6423f";
 
-// Non abbiamo i file dei loghi reali (Booking.com/Expedia sono marchi
-// registrati, non recuperabili/indovinabili da qui) - per esplicita
-// indicazione, dove il logo non è disponibile si usa un colore pieno
-// riconoscibile invece di lasciare il pallino vuoto. CRM e le due
-// varianti di Booking Engine condividono colore perché gestiti dallo
-// stesso strumento (Booking Designer).
-const CHANNEL_COLORS: Record<string, string> = {
-  "Booking.com": "#003580",
-  Expedia: "#f9a721",
-  CRM: "#6b625c",
-  "Booking Engine": "#6b625c",
-  "Booking Engine - Advance": "#6b625c",
+// Loghi reali forniti in public/images/logos/. CRM e le due varianti di
+// Booking Engine condividono booking-designer.png perché gestiti dallo
+// stesso strumento (Booking Designer), non da un canale di vendita proprio.
+const CHANNEL_LOGOS: Record<string, string> = {
+  "Booking.com": "/images/logos/booking-com.png",
+  Expedia: "/images/logos/expedia.png",
+  CRM: "/images/logos/booking-designer.png",
+  "Booking Engine": "/images/logos/booking-designer.png",
+  "Booking Engine - Advance": "/images/logos/booking-designer.png",
 };
 
+// Fallback per canali senza logo disponibile (es. "Imperatore Travel"):
+// colore pieno deterministico invece di uno spazio vuoto.
 const FALLBACK_PALETTE = ["#8a6a1f", "#2f7d43", "#5c6bc0", "#8a3a3a", "#5f6368"];
 
 function colorForChannel(channel: string): string {
-  if (CHANNEL_COLORS[channel]) return CHANNEL_COLORS[channel];
-
   let hash = 0;
   for (let i = 0; i < channel.length; i++) {
     hash = (hash * 31 + channel.charCodeAt(i)) >>> 0;
@@ -56,22 +53,49 @@ function ChannelLabel({ channel }: { channel: string }) {
   }, [open]);
 
   return (
+    // "relative" e la dimensione stanno sul contenitore ESTERNO, senza
+    // overflow-hidden: il troncamento (truncate) sta solo sullo span
+    // interno. Prima erano sullo stesso elemento, quindi l'overflow:hidden
+    // di "truncate" tagliava via anche il tooltip assoluto al suo interno
+    // - stesso tipo di bug già risolto per InfoTooltip.
     <span
-      className="group relative w-36 shrink-0 cursor-default truncate text-sm text-[#2B2D2F]"
+      className="group relative w-36 shrink-0 cursor-default"
       onClick={(e) => {
         e.stopPropagation();
         setOpen((prev) => !prev);
       }}
     >
-      {channel}
+      <span className="block truncate text-sm text-[#2B2D2F]">{channel}</span>
       <span
         role="tooltip"
-        className={`absolute left-0 top-full z-10 mt-1 w-max max-w-[220px] rounded-[8px] border border-[#e7dfd8] bg-white px-2 py-1 text-[11px] normal-case leading-4 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
+        className={`absolute left-0 top-full z-20 mt-1 w-max max-w-[220px] rounded-[8px] border border-[#e7dfd8] bg-white px-2 py-1 text-[11px] normal-case leading-4 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
           open ? "opacity-100" : "pointer-events-none opacity-0 group-hover:opacity-100"
         }`}
       >
         {channel}
       </span>
+    </span>
+  );
+}
+
+function ChannelBadge({ channel, leftPct }: { channel: string; leftPct: number }) {
+  const logoSrc = CHANNEL_LOGOS[channel];
+
+  return (
+    <span
+      className="absolute top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-full border-2 border-white bg-white shadow-[0_0_0_1px_rgba(43,45,47,0.12)]"
+      style={{ left: `${leftPct}%` }}
+      title={channel}
+    >
+      {logoSrc ? (
+        // Loghi di marchi terzi (Booking.com/Expedia) o dello strumento
+        // interno (Booking Designer): immagini statiche in public/, non
+        // serve next/image per un'icona 24px a dimensione fissa.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={logoSrc} alt={channel} className="h-full w-full object-cover" />
+      ) : (
+        <span className="block h-full w-full" style={{ backgroundColor: colorForChannel(channel) }} />
+      )}
     </span>
   );
 }
@@ -98,25 +122,24 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
         const barWidthPct =
           isNegative || total <= 0 ? 0 : Math.min(100, Math.max(2, (row.revenue / total) * 100));
         const percentOfTotal = total !== 0 ? (row.revenue / total) * 100 : 0;
+        // Il badge segue la punta della barra, ma resta a un margine dai
+        // bordi della corsia (che non ha overflow-hidden) cosi' il
+        // cerchio da 24px non viene mai tagliato via a inizio/fine corsia.
+        const badgeLeftPct = isNegative ? 4 : Math.min(Math.max(barWidthPct, 6), 94);
 
         return (
           <div key={row.channel} className="flex items-center gap-3">
             <ChannelLabel channel={row.channel} />
 
-            <div className="h-6 flex-1 overflow-hidden rounded-full bg-[#f0ece6]">
+            <div className="relative h-6 flex-1 rounded-full bg-[#f0ece6]">
               {!isNegative && (
                 <div
                   className="h-6 rounded-full"
                   style={{ width: `${barWidthPct}%`, backgroundColor: POSITIVE_COLOR }}
                 />
               )}
+              <ChannelBadge channel={row.channel} leftPct={badgeLeftPct} />
             </div>
-
-            <span
-              className="h-5 w-5 shrink-0 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(43,45,47,0.08)]"
-              style={{ backgroundColor: colorForChannel(row.channel) }}
-              title={row.channel}
-            />
 
             <span
               className={`w-24 shrink-0 text-right text-sm font-semibold tabular-nums ${
@@ -137,7 +160,6 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
       <div className="flex items-center gap-3 border-t border-[#e7dfd8] pt-2">
         <span className="w-36 shrink-0 text-sm font-semibold text-[#2B2D2F]">Totale</span>
         <div className="flex-1" />
-        <span className="h-5 w-5 shrink-0" />
         <span className="w-24 shrink-0 text-right text-sm font-semibold tabular-nums text-[#2B2D2F]">
           {formatCurrency(total)}
         </span>

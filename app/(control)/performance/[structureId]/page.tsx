@@ -8,7 +8,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
-import { Calendar } from "@/components/performance/Calendar";
+import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
 import { PickupChart, PickupPoint } from "@/components/performance/PickupChart";
 import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
 import {
@@ -35,6 +35,22 @@ const budgetLevelLabels: Record<string, string> = {
   sfidante: "Sfidante",
 };
 
+const DEFAULT_MONTH = monthRange(todayString());
+
+function isFullMonth(start: string, end: string): boolean {
+  const { start: monthStart, end: monthEnd } = monthRange(start);
+  return start === monthStart && end === monthEnd;
+}
+
+function formatPeriodLabel(start: string, end: string): string {
+  if (isFullMonth(start, end)) {
+    const [y, m] = start.split("-").map(Number);
+    return `${MONTH_LABELS[m - 1]} ${y}`;
+  }
+  if (start === end) return start;
+  return `${start} → ${end}`;
+}
+
 export default function PerformanceStructureDrilldownPage({
   params,
 }: {
@@ -47,13 +63,30 @@ export default function PerformanceStructureDrilldownPage({
     "checking"
   );
   const [structureName, setStructureName] = useState("");
-  const [selectedDate, setSelectedDate] = useState(todayString());
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
 
-  const [rangeMode, setRangeMode] = useState(false);
-  const [rangeStart, setRangeStart] = useState<string | null>(null);
-  const [rangeEnd, setRangeEnd] = useState<string | null>(null);
+  // Stato "grezzo" del calendario: durante la selezione di un intervallo
+  // rangeEnd puo' essere null (primo click gia' fatto, in attesa del
+  // secondo). Nessuna modalita'/toggle esplicita: il calendario e' sempre
+  // in questo comportamento, un giorno singolo e' semplicemente un
+  // intervallo con inizio e fine coincidenti (due click sulla stessa data).
+  const [rangeStart, setRangeStart] = useState<string>(DEFAULT_MONTH.start);
+  const [rangeEnd, setRangeEnd] = useState<string | null>(DEFAULT_MONTH.end);
+
+  // Periodo "confermato": si aggiorna solo quando la selezione e'
+  // completa (rangeEnd non nullo), cosi' il primo click di un nuovo
+  // intervallo non fa sparire i dati del periodo precedente mentre si
+  // attende il secondo click.
+  const [confirmedStart, setConfirmedStart] = useState(DEFAULT_MONTH.start);
+  const [confirmedEnd, setConfirmedEnd] = useState(DEFAULT_MONTH.end);
+
+  useEffect(() => {
+    if (rangeEnd) {
+      setConfirmedStart(rangeStart);
+      setConfirmedEnd(rangeEnd);
+    }
+  }, [rangeStart, rangeEnd]);
 
   const [periodSnapshots, setPeriodSnapshots] = useState<SnapshotRow[]>([]);
   const [sdlySnapshots, setSdlySnapshots] = useState<SnapshotRow[]>([]);
@@ -66,12 +99,12 @@ export default function PerformanceStructureDrilldownPage({
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
 
-  const isRangeActive = rangeMode && !!rangeStart && !!rangeEnd;
-  const periodStart = isRangeActive ? rangeStart! : selectedDate;
-  const periodEnd = isRangeActive ? rangeEnd! : selectedDate;
-  // "Mese in corso vs budget" resta un concetto mensile: se e' attivo un
-  // intervallo, usa il mese del primo giorno dell'intervallo come ancora.
-  const budgetAnchorDate = isRangeActive ? rangeStart! : selectedDate;
+  const periodStart = confirmedStart;
+  const periodEnd = confirmedEnd;
+  // "Mese in corso vs budget" resta un concetto mensile: usa il mese del
+  // primo giorno del periodo attivo come ancora (di default e' gia' il
+  // mese corrente, dato che il periodo di default e' il mese intero).
+  const budgetAnchorDate = periodStart;
 
   useEffect(() => {
     void checkAccessAndLoadStructure();
@@ -128,7 +161,7 @@ export default function PerformanceStructureDrilldownPage({
 
     // Struttura mai popolata (es. Montecallini): la sezione va nascosta
     // del tutto, non solo mostrata con "ND" - controllo una volta sola,
-    // non ad ogni cambio di mese.
+    // non ad ogni cambio di periodo.
     const { count: channelCount, error: channelCountError } = await supabase
       .from("channel_revenue")
       .select("*", { count: "exact", head: true })
@@ -142,7 +175,7 @@ export default function PerformanceStructureDrilldownPage({
   useEffect(() => {
     if (accessState === "granted") void loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessState, selectedDate, rangeStart, rangeEnd, hasChannelData]);
+  }, [accessState, periodStart, periodEnd, hasChannelData]);
 
   async function loadMetrics() {
     setLoadingMetrics(true);
@@ -191,12 +224,8 @@ export default function PerformanceStructureDrilldownPage({
             .from("channel_revenue")
             .select("channel, revenue_gross")
             .eq("structure_id", structureId)
-            // Di default (nessun intervallo attivo) resta mensile, come
-            // prima di introdurre il range - non giornaliero: sarebbe un
-            // cambio di comportamento non richiesto. Solo con un
-            // intervallo attivo si passa al range esatto.
-            .gte("period_start", isRangeActive ? periodStart : monthStart)
-            .lte("period_start", isRangeActive ? periodEnd : monthEnd)
+            .gte("period_start", periodStart)
+            .lte("period_start", periodEnd)
         : Promise.resolve({ data: [], error: null }),
     ]);
 
@@ -213,8 +242,9 @@ export default function PerformanceStructureDrilldownPage({
     setBudgets((budgetsRes.data as BudgetRow[]) || []);
 
     // Un punto per extraction_date: per un giorno singolo coincide con le
-    // righe stesse, per un intervallo somma il revenue di tutti i giorni
-    // che condividono la stessa estrazione (stessa logica, generalizzata).
+    // righe stesse, per un intervallo/mese somma il revenue di tutti i
+    // giorni che condividono la stessa estrazione (stessa logica,
+    // generalizzata).
     const pickupMap = new Map<string, number>();
     (pickupRes.data || []).forEach((r) => {
       const key = r.extraction_date as string;
@@ -256,24 +286,13 @@ export default function PerformanceStructureDrilldownPage({
     periodAgg.roomsAvailable !== null &&
     periodAgg.roomsSold > periodAgg.roomsAvailable;
 
-  function handleRangeToggle() {
-    if (rangeMode) {
-      setRangeMode(false);
-      setRangeStart(null);
-      setRangeEnd(null);
-    } else {
-      setRangeMode(true);
-      setRangeStart(null);
-      setRangeEnd(null);
-    }
-  }
-
   if (accessState !== "granted") {
     return null;
   }
 
-  const periodLabel = isRangeActive ? `${periodStart} → ${periodEnd}` : selectedDate;
-  const sdlyLabel = isRangeActive ? `${sdlyDate(periodStart)} → ${sdlyDate(periodEnd)}` : sdlyDate(selectedDate);
+  const isSingleDay = periodStart === periodEnd;
+  const periodLabel = formatPeriodLabel(periodStart, periodEnd);
+  const sdlyLabel = formatPeriodLabel(sdlyDate(periodStart), sdlyDate(periodEnd));
 
   return (
     <div className="space-y-6">
@@ -288,31 +307,20 @@ export default function PerformanceStructureDrilldownPage({
       />
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        <AppCard title="Giorno di riferimento">
-          <div className="mb-3">
-            <button
-              type="button"
-              onClick={handleRangeToggle}
-              className={`h-9 rounded-[12px] border px-3 text-[12px] font-medium transition ${
-                rangeMode
-                  ? "border-[#017A92] bg-[#f3f8fa] text-[#017A92]"
-                  : "border-[#e7dfd8] bg-white text-[#6a6d70] hover:bg-[#f8f6f2]"
-              }`}
-            >
-              {rangeMode ? "Annulla intervallo — torna a giorno singolo" : "Seleziona un intervallo"}
-            </button>
-          </div>
-
+        <AppCard
+          title="Periodo di riferimento"
+          subtitle="Clicca una data per l'inizio, un'altra per la fine. Clicca due volte la stessa data per un giorno singolo."
+        >
           <Calendar
-            value={selectedDate}
-            onChange={setSelectedDate}
+            value={rangeStart}
+            onChange={() => {}}
             highlightedDates={highlightedDates}
             anomalyDates={anomalyDates}
-            rangeMode={rangeMode}
+            rangeMode
             rangeStart={rangeStart}
             rangeEnd={rangeEnd}
             onRangeChange={(start, end) => {
-              setRangeStart(start);
+              setRangeStart(start ?? DEFAULT_MONTH.start);
               setRangeEnd(end);
             }}
           />
@@ -323,11 +331,11 @@ export default function PerformanceStructureDrilldownPage({
           <AppCard
             title={periodLabel}
             subtitle={
-              isRangeActive
-                ? `Somma di ${periodAgg.daysWithData} giorni con dati nell'intervallo · confronto con ${sdlyLabel} (SDLY)`
-                : periodAgg.daysWithData > 0
+              isSingleDay
+                ? periodAgg.daysWithData > 0
                   ? `Dato importato per questo giorno · confronto con ${sdlyLabel} (SDLY)`
                   : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel} (SDLY)`
+                : `Somma di ${periodAgg.daysWithData} giorni con dati nel periodo · confronto con ${sdlyLabel} (SDLY)`
             }
           >
             {loadingMetrics ? (
@@ -337,7 +345,7 @@ export default function PerformanceStructureDrilldownPage({
                 {hasPeriodAnomaly && (
                   <p className="mb-4 rounded-[12px] border border-[#e9c9c9] bg-[#fbf1f1] px-4 py-3 text-sm text-[#8a3a3a]">
                     Attenzione: Booking Designer riporta {periodAgg.roomsSold} camere vendute su{" "}
-                    {periodAgg.roomsAvailable} disponibili{isRangeActive ? " nel periodo selezionato" : " per questo giorno"}{" "}
+                    {periodAgg.roomsAvailable} disponibili{isSingleDay ? " per questo giorno" : " nel periodo selezionato"}{" "}
                     — inconsistenza nella fonte, non un errore di calcolo nostro. Dato mostrato così com'è arrivato da BD.
                   </p>
                 )}
@@ -376,7 +384,7 @@ export default function PerformanceStructureDrilldownPage({
           </AppCard>
 
           <AppCard
-            title={isRangeActive ? "Pickup revenue per il periodo selezionato" : "Pickup revenue per questo giorno"}
+            title={isSingleDay ? "Pickup revenue per questo giorno" : "Pickup revenue per il periodo selezionato"}
             subtitle="Come è cresciuto il revenue on-the-books nelle ultime estrazioni disponibili"
           >
             <PickupChart points={pickupPoints} />
@@ -453,9 +461,7 @@ export default function PerformanceStructureDrilldownPage({
       {hasChannelData && (
         <AppCard
           title="Revenue per canale"
-          subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${
-            isRangeActive ? periodLabel : selectedDate.slice(0, 7)
-          }) — la riga Totale deve coincidere con la somma delle barre`}
+          subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
         >
           <ChannelRevenueBars data={channelRevenue} />
         </AppCard>

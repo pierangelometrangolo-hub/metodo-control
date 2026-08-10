@@ -341,7 +341,7 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Revenue on-the-books del giorno di riferimento (oggi per il mese corrente, ultimo giorno del mese per gli altri) confrontato con l'OTB alla stessa data dell'anno scorso. 'ND' quando manca lo storico per quella data." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Consuntivo anno prec.
+                    Consuntivo anno prec. vs OTB
                     <InfoTooltip text="Revenue totale chiuso dello stesso mese dell'anno precedente rispetto al mese selezionato, confrontato con il Revenue OTB del mese selezionato. 'ND' quando manca lo storico per quel mese." />
                   </th>
                   <th className="pb-3 pr-4">

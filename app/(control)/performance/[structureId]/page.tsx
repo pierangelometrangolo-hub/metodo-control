@@ -11,6 +11,7 @@ import { canViewModule } from "@/lib/permissions";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
 import { PickupChart, PickupPoint } from "@/components/performance/PickupChart";
 import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
+import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import {
   ND,
   SnapshotRow,
@@ -95,6 +96,8 @@ export default function PerformanceStructureDrilldownPage({
   const [pickupPoints, setPickupPoints] = useState<PickupPoint[]>([]);
   const [hasChannelData, setHasChannelData] = useState(false);
   const [channelRevenue, setChannelRevenue] = useState<ChannelRevenueDatum[]>([]);
+  const [hasNationalityData, setHasNationalityData] = useState(false);
+  const [nationalityData, setNationalityData] = useState<NationalityDatum[]>([]);
 
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -170,12 +173,21 @@ export default function PerformanceStructureDrilldownPage({
     if (!channelCountError) {
       setHasChannelData((channelCount || 0) > 0);
     }
+
+    const { count: nationalityCount, error: nationalityCountError } = await supabase
+      .from("guest_nationality")
+      .select("*", { count: "exact", head: true })
+      .eq("structure_id", structureId);
+
+    if (!nationalityCountError) {
+      setHasNationalityData((nationalityCount || 0) > 0);
+    }
   }
 
   useEffect(() => {
     if (accessState === "granted") void loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessState, periodStart, periodEnd, hasChannelData]);
+  }, [accessState, periodStart, periodEnd, hasChannelData, hasNationalityData]);
 
   async function loadMetrics() {
     setLoadingMetrics(true);
@@ -188,7 +200,7 @@ export default function PerformanceStructureDrilldownPage({
     const snapshotColumns =
       "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const [periodRes, sdlyRes, monthRes, budgetsRes, pickupRes, channelRes] = await Promise.all([
+    const [periodRes, sdlyRes, monthRes, budgetsRes, pickupRes, channelRes, nationalityRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -227,6 +239,14 @@ export default function PerformanceStructureDrilldownPage({
             .gte("period_start", periodStart)
             .lte("period_start", periodEnd)
         : Promise.resolve({ data: [], error: null }),
+      hasNationalityData
+        ? supabase
+            .from("guest_nationality")
+            .select("nationality, presences")
+            .eq("structure_id", structureId)
+            .gte("stay_date", periodStart)
+            .lte("stay_date", periodEnd)
+        : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (periodRes.error) setLoadError(periodRes.error.message);
@@ -235,6 +255,7 @@ export default function PerformanceStructureDrilldownPage({
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (pickupRes.error) setLoadError(pickupRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
+    if (nationalityRes.error) setLoadError(nationalityRes.error.message);
 
     setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
@@ -262,6 +283,13 @@ export default function PerformanceStructureDrilldownPage({
       channelTotals.set(key, (channelTotals.get(key) || 0) + Number(r.revenue_gross));
     });
     setChannelRevenue(Array.from(channelTotals, ([channel, revenue]) => ({ channel, revenue })));
+
+    const nationalityTotals = new Map<string, number>();
+    (nationalityRes.data || []).forEach((r) => {
+      const key = r.nationality as string;
+      nationalityTotals.set(key, (nationalityTotals.get(key) || 0) + Number(r.presences));
+    });
+    setNationalityData(Array.from(nationalityTotals, ([nationality, presences]) => ({ nationality, presences })));
 
     setLoadingMetrics(false);
   }
@@ -464,6 +492,15 @@ export default function PerformanceStructureDrilldownPage({
           subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
         >
           <ChannelRevenueBars data={channelRevenue} />
+        </AppCard>
+      )}
+
+      {hasNationalityData && (
+        <AppCard
+          title="Presenze per nazionalità"
+          subtitle={`Top 10 nazionalità per presenze sul periodo visualizzato (${periodLabel}), le restanti aggregate in "Altri" — la riga Totale deve coincidere con la somma delle barre`}
+        >
+          <NationalityBars data={nationalityData} />
         </AppCard>
       )}
     </div>

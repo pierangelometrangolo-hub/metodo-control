@@ -14,7 +14,6 @@ import {
   SnapshotRow,
   BudgetRow,
   todayString,
-  shiftDate,
   sdlyDate,
   monthRange,
   pad,
@@ -38,10 +37,10 @@ type StructureOption = {
 
 type StructureRowData = {
   structure: StructureOption;
-  reference: SnapshotRow | null;
-  weekAgo: SnapshotRow | null;
-  sdly: SnapshotRow | null;
   monthRevenue: number | null;
+  monthRoomsSold: number | null;
+  monthRoomsAvailable: number | null;
+  sdlyMonthRevenue: number | null;
   lastYearMonthRevenue: number | null;
   budgetsForMonth: BudgetRow[];
   pacing: ReturnType<typeof computePacingStatus>;
@@ -107,58 +106,51 @@ export default function PerformanceOverviewPage() {
     const ids = structures.map((s) => s.id);
 
     const { start, end, year, month } = monthRange(`${selectedYear}-${pad(selectedMonth)}-01`);
-    // Il mese corrente usa "oggi" come giorno di riferimento per le metriche
-    // giornaliere (comportamento invariato). Per qualunque altro mese si usa
-    // l'ultimo giorno del mese selezionato come "fotografia di chiusura":
-    // per un mese futuro non ci saranno dati (ND), per uno passato è il
-    // punto di riferimento più naturale.
-    const referenceDate = isCurrentMonth ? todayString() : end;
-    const weekAgo = shiftDate(referenceDate, -7);
-    const sdly = sdlyDate(referenceDate);
     const lastYearMonth = monthRange(`${year - 1}-${pad(month)}-01`);
+    // Confronto SDLY "a parità di anticipo": non l'OTB dell'ultima estrazione
+    // disponibile per il mese dell'anno scorso (sarebbe il consuntivo finale,
+    // già coperto dalla colonna "Consuntivo anno prec."), ma l'OTB di quel
+    // mese così come si presentava un anno esatto fa rispetto ad oggi.
+    const sdlyCutoff = sdlyDate(todayString());
 
     const snapshotColumns =
       "structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const [referenceRes, weekAgoRes, sdlyRes, monthRes, lastYearMonthRes, budgetsRes, importsRes] =
-      await Promise.all([
-        supabase.from("v_snapshot_latest").select(snapshotColumns).eq("stay_date", referenceDate).in("structure_id", ids),
-        supabase.from("v_snapshot_latest").select(snapshotColumns).eq("stay_date", weekAgo).in("structure_id", ids),
-        supabase.from("v_snapshot_latest").select(snapshotColumns).eq("stay_date", sdly).in("structure_id", ids),
-        supabase
-          .from("v_snapshot_latest")
-          .select(snapshotColumns)
-          .gte("stay_date", start)
-          .lte("stay_date", end)
-          .in("structure_id", ids),
-        supabase
-          .from("v_snapshot_latest")
-          .select(snapshotColumns)
-          .gte("stay_date", lastYearMonth.start)
-          .lte("stay_date", lastYearMonth.end)
-          .in("structure_id", ids),
-        supabase
-          .from("v_budgets_current")
-          .select("structure_id, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
-          .eq("season_year", year)
-          .eq("month", month)
-          .in("structure_id", ids),
-        supabase.from("bd_imports").select("extraction_date").in("structure_id", ids),
-      ]);
+    const [monthRes, lastYearMonthRes, sdlyMonthRes, budgetsRes, importsRes] = await Promise.all([
+      supabase
+        .from("v_snapshot_latest")
+        .select(snapshotColumns)
+        .gte("stay_date", start)
+        .lte("stay_date", end)
+        .in("structure_id", ids),
+      supabase
+        .from("v_snapshot_latest")
+        .select(snapshotColumns)
+        .gte("stay_date", lastYearMonth.start)
+        .lte("stay_date", lastYearMonth.end)
+        .in("structure_id", ids),
+      supabase.rpc("fn_snapshot_asof", {
+        p_structure_ids: ids,
+        p_stay_date_start: lastYearMonth.start,
+        p_stay_date_end: lastYearMonth.end,
+        p_cutoff_date: sdlyCutoff,
+      }),
+      supabase
+        .from("v_budgets_current")
+        .select("structure_id, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
+        .eq("season_year", year)
+        .eq("month", month)
+        .in("structure_id", ids),
+      supabase.from("bd_imports").select("extraction_date").in("structure_id", ids),
+    ]);
 
-    if (referenceRes.error) setLoadError(referenceRes.error.message);
-    if (weekAgoRes.error) setLoadError(weekAgoRes.error.message);
-    if (sdlyRes.error) setLoadError(sdlyRes.error.message);
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (lastYearMonthRes.error) setLoadError(lastYearMonthRes.error.message);
+    if (sdlyMonthRes.error) setLoadError(sdlyMonthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (importsRes.error) setLoadError(importsRes.error.message);
 
     setAllExtractionDates(new Set((importsRes.data || []).map((r) => r.extraction_date as string)));
-
-    const referenceByStructure = new Map((referenceRes.data || []).map((r) => [r.structure_id, r as SnapshotRow]));
-    const weekAgoByStructure = new Map((weekAgoRes.data || []).map((r) => [r.structure_id, r as SnapshotRow]));
-    const sdlyByStructure = new Map((sdlyRes.data || []).map((r) => [r.structure_id, r as SnapshotRow]));
 
     const monthByStructure = new Map<string, SnapshotRow[]>();
     (monthRes.data || []).forEach((r) => {
@@ -174,6 +166,13 @@ export default function PerformanceOverviewPage() {
       lastYearMonthByStructure.set(r.structure_id, list);
     });
 
+    const sdlyMonthByStructure = new Map<string, SnapshotRow[]>();
+    (sdlyMonthRes.data || []).forEach((r: { structure_id: string } & Omit<SnapshotRow, "status">) => {
+      const list = sdlyMonthByStructure.get(r.structure_id) || [];
+      list.push({ ...r, status: "otb" });
+      sdlyMonthByStructure.set(r.structure_id, list);
+    });
+
     const budgetsByStructure = new Map<string, BudgetRow[]>();
     (budgetsRes.data || []).forEach((r) => {
       const list = budgetsByStructure.get(r.structure_id) || [];
@@ -185,14 +184,15 @@ export default function PerformanceOverviewPage() {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
       const lastYearMonthToDate = sumSnapshots(lastYearMonthByStructure.get(structure.id) || []);
+      const sdlyMonthToDate = sumSnapshots(sdlyMonthByStructure.get(structure.id) || []);
       const budgetsForMonth = budgetsByStructure.get(structure.id) || [];
 
       return {
         structure,
-        reference: referenceByStructure.get(structure.id) || null,
-        weekAgo: weekAgoByStructure.get(structure.id) || null,
-        sdly: sdlyByStructure.get(structure.id) || null,
         monthRevenue: monthToDate.revenue,
+        monthRoomsSold: monthToDate.roomsSold,
+        monthRoomsAvailable: monthToDate.roomsAvailable,
+        sdlyMonthRevenue: sdlyMonthToDate.revenue,
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
@@ -220,7 +220,7 @@ export default function PerformanceOverviewPage() {
       <PageHeader
         eyebrow="Performance"
         title="Dashboard Performance"
-        description="Stato commerciale di tutte le strutture, con ritmo verso il budget del mese e confronto sulla stessa data della settimana precedente. Seleziona un mese diverso per rivedere periodi passati o futuri."
+        description="Stato commerciale mensile di tutte le strutture, con ritmo verso il budget del mese e confronto SDLY a parità di anticipo. Seleziona un mese diverso per rivedere periodi passati o futuri."
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
           <Link href="/performance/import" className="text-sm font-medium text-[#017A92] hover:underline">
@@ -338,7 +338,7 @@ export default function PerformanceOverviewPage() {
                   </th>
                   <th className="pb-3 pr-4">
                     SDLY
-                    <InfoTooltip text="Revenue on-the-books del giorno di riferimento (oggi per il mese corrente, ultimo giorno del mese per gli altri) confrontato con l'OTB alla stessa data dell'anno scorso. 'ND' quando manca lo storico per quella data." />
+                    <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. 'ND' quando nessun giorno del mese ha copertura a quella data." />
                   </th>
                   <th className="pb-3 pr-4">
                     Consuntivo anno prec. vs OTB
@@ -346,15 +346,15 @@ export default function PerformanceOverviewPage() {
                   </th>
                   <th className="pb-3 pr-4">
                     ADR
-                    <InfoTooltip text="Tariffa media giornaliera: revenue diviso camere vendute, sul giorno di riferimento (oggi per il mese corrente, ultimo giorno del mese per gli altri)." />
+                    <InfoTooltip text="Tariffa media mensile: somma revenue del mese selezionato diviso somma camere vendute nello stesso mese." />
                   </th>
                   <th className="pb-3 pr-4">
                     RevPAR
-                    <InfoTooltip text="Revenue per camera disponibile: revenue diviso camere disponibili, sul giorno di riferimento (oggi per il mese corrente, ultimo giorno del mese per gli altri)." />
+                    <InfoTooltip text="Revenue per camera disponibile nel mese: somma revenue del mese selezionato diviso somma camere disponibili nello stesso mese." />
                   </th>
                   <th className="pb-3 pr-4">
                     Occupazione
-                    <InfoTooltip text="Camere vendute diviso camere disponibili, sullo stesso giorno di riferimento e sulla stessa riga dati — numeratore e denominatore coprono sempre lo stesso periodo." />
+                    <InfoTooltip text="Somma camere vendute diviso somma camere disponibili sull'intero mese selezionato — numeratore e denominatore coprono sempre lo stesso periodo." />
                   </th>
                   <th className="pb-3 pr-4">
                     Budget Minimo
@@ -372,29 +372,9 @@ export default function PerformanceOverviewPage() {
               </thead>
               <tbody>
                 {rows.map((row) => {
-                  const referenceAdr = row.reference
-                    ? adr(Number(row.reference.revenue_total), Number(row.reference.rooms_sold))
-                    : null;
-                  const weekAgoAdr = row.weekAgo
-                    ? adr(Number(row.weekAgo.revenue_total), Number(row.weekAgo.rooms_sold))
-                    : null;
-
-                  const referenceRevPar = row.reference
-                    ? revPar(Number(row.reference.revenue_total), Number(row.reference.rooms_available))
-                    : null;
-                  const weekAgoRevPar = row.weekAgo
-                    ? revPar(Number(row.weekAgo.revenue_total), Number(row.weekAgo.rooms_available))
-                    : null;
-
-                  const referenceOcc = row.reference
-                    ? occupancy(Number(row.reference.rooms_sold), Number(row.reference.rooms_available))
-                    : null;
-                  const weekAgoOcc = row.weekAgo
-                    ? occupancy(Number(row.weekAgo.rooms_sold), Number(row.weekAgo.rooms_available))
-                    : null;
-
-                  const referenceRevenue = row.reference ? Number(row.reference.revenue_total) : null;
-                  const sdlyRevenue = row.sdly ? Number(row.sdly.revenue_total) : null;
+                  const monthAdr = adr(row.monthRevenue, row.monthRoomsSold);
+                  const monthRevPar = revPar(row.monthRevenue, row.monthRoomsAvailable);
+                  const monthOcc = occupancy(row.monthRoomsSold, row.monthRoomsAvailable);
 
                   const minimoBudget = row.budgetsForMonth.find((b) => b.level === "minimo");
                   const minimoTarget = minimoBudget ? Number(minimoBudget.revenue_target) : null;
@@ -427,9 +407,9 @@ export default function PerformanceOverviewPage() {
                       </td>
 
                       <MetricCell
-                        current={formatCurrency(sdlyRevenue)}
-                        delta={formatDelta(referenceRevenue, sdlyRevenue)}
-                        deltaLabel="vs SDLY"
+                        current={formatCurrency(row.sdlyMonthRevenue)}
+                        delta={formatDelta(row.monthRevenue, row.sdlyMonthRevenue)}
+                        deltaLabel="vs SDLY mese"
                       />
 
                       <MetricCell
@@ -438,21 +418,9 @@ export default function PerformanceOverviewPage() {
                         deltaLabel="vs mese-anno-scorso"
                       />
 
-                      <MetricCell
-                        current={formatCurrency(referenceAdr)}
-                        delta={formatDelta(referenceAdr, weekAgoAdr)}
-                        deltaLabel="vs 7gg fa"
-                      />
-                      <MetricCell
-                        current={formatCurrency(referenceRevPar)}
-                        delta={formatDelta(referenceRevPar, weekAgoRevPar)}
-                        deltaLabel="vs 7gg fa"
-                      />
-                      <MetricCell
-                        current={formatPercent(referenceOcc)}
-                        delta={formatDelta(referenceOcc, weekAgoOcc)}
-                        deltaLabel="vs 7gg fa"
-                      />
+                      <td className="py-3 pr-4 text-[#2B2D2F]">{formatCurrency(monthAdr)}</td>
+                      <td className="py-3 pr-4 text-[#2B2D2F]">{formatCurrency(monthRevPar)}</td>
+                      <td className="py-3 pr-4 text-[#2B2D2F]">{formatPercent(monthOcc)}</td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
                         {(() => {

@@ -129,10 +129,10 @@ export default function PerformanceOverviewPage() {
         .gte("stay_date", lastYearMonth.start)
         .lte("stay_date", lastYearMonth.end)
         .in("structure_id", ids),
-      supabase.rpc("fn_snapshot_asof", {
+      supabase.rpc("fn_month_snapshot_asof", {
         p_structure_ids: ids,
-        p_stay_date_start: lastYearMonth.start,
-        p_stay_date_end: lastYearMonth.end,
+        p_period_year: lastYearMonth.year,
+        p_period_month: lastYearMonth.month,
         p_cutoff_date: sdlyCutoff,
       }),
       supabase
@@ -166,12 +166,16 @@ export default function PerformanceOverviewPage() {
       lastYearMonthByStructure.set(r.structure_id, list);
     });
 
-    const sdlyMonthByStructure = new Map<string, SnapshotRow[]>();
-    (sdlyMonthRes.data || []).forEach((r: { structure_id: string } & Omit<SnapshotRow, "status">) => {
-      const list = sdlyMonthByStructure.get(r.structure_id) || [];
-      list.push({ ...r, status: "otb" });
-      sdlyMonthByStructure.set(r.structure_id, list);
-    });
+    // fn_month_snapshot_asof restituisce già un totale mensile risolto per
+    // struttura (riga performance_monthly_snapshot se disponibile al cutoff,
+    // altrimenti somma dei giorni disponibili in performance_daily_snapshot):
+    // niente da sommare qui, un'unica riga per struttura o nessuna (ND).
+    const sdlyMonthRevenueByStructure = new Map<string, number>(
+      (sdlyMonthRes.data || []).map((r: { structure_id: string; revenue_total: number }) => [
+        r.structure_id,
+        Number(r.revenue_total),
+      ])
+    );
 
     const budgetsByStructure = new Map<string, BudgetRow[]>();
     (budgetsRes.data || []).forEach((r) => {
@@ -184,7 +188,6 @@ export default function PerformanceOverviewPage() {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
       const lastYearMonthToDate = sumSnapshots(lastYearMonthByStructure.get(structure.id) || []);
-      const sdlyMonthToDate = sumSnapshots(sdlyMonthByStructure.get(structure.id) || []);
       const budgetsForMonth = budgetsByStructure.get(structure.id) || [];
 
       return {
@@ -192,7 +195,7 @@ export default function PerformanceOverviewPage() {
         monthRevenue: monthToDate.revenue,
         monthRoomsSold: monthToDate.roomsSold,
         monthRoomsAvailable: monthToDate.roomsAvailable,
-        sdlyMonthRevenue: sdlyMonthToDate.revenue,
+        sdlyMonthRevenue: sdlyMonthRevenueByStructure.get(structure.id) ?? null,
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
@@ -338,7 +341,7 @@ export default function PerformanceOverviewPage() {
                   </th>
                   <th className="pb-3 pr-4">
                     SDLY
-                    <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. 'ND' quando nessun giorno del mese ha copertura a quella data." />
+                    <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. Usa lo storico mensile se disponibile a quella data, altrimenti la somma dei giorni disponibili. 'ND' quando manca copertura per quel mese." />
                   </th>
                   <th className="pb-3 pr-4">
                     Consuntivo anno prec. vs OTB

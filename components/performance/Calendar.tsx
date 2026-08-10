@@ -9,6 +9,13 @@ type CalendarProps = {
   highlightedDates: Set<string>;
   anomalyDates?: Set<string>;
   legendLabel?: string;
+  // Modalita' intervallo: quando attiva, il click seleziona un range di
+  // date invece di un giorno singolo. onChange resta inutilizzato in
+  // questa modalita'.
+  rangeMode?: boolean;
+  rangeStart?: string | null;
+  rangeEnd?: string | null;
+  onRangeChange?: (start: string | null, end: string | null) => void;
 };
 
 const WEEKDAY_LABELS = ["L", "M", "M", "G", "V", "S", "D"];
@@ -27,6 +34,10 @@ export function Calendar({
   highlightedDates,
   anomalyDates = new Set(),
   legendLabel = "giorni con un import reale registrato per questa struttura",
+  rangeMode = false,
+  rangeStart = null,
+  rangeEnd = null,
+  onRangeChange,
 }: CalendarProps) {
   const [y, m] = value.split("-").map(Number);
   const [viewYear, setViewYear] = useState(y);
@@ -68,6 +79,25 @@ export function Calendar({
     }
   }
 
+  function handleDayClick(dateStr: string) {
+    if (!rangeMode) {
+      onChange(dateStr);
+      return;
+    }
+
+    if (!onRangeChange) return;
+
+    const pickingNewRange = !rangeStart || (rangeStart && rangeEnd);
+
+    if (pickingNewRange) {
+      onRangeChange(dateStr, null);
+    } else {
+      const start = dateStr < rangeStart! ? dateStr : rangeStart!;
+      const end = dateStr < rangeStart! ? rangeStart! : dateStr;
+      onRangeChange(start, end);
+    }
+  }
+
   return (
     <div className="w-full max-w-[280px] rounded-[14px] border border-[#e7dfd8] bg-white p-3">
       <div className="mb-2 flex items-center justify-between">
@@ -101,9 +131,14 @@ export function Calendar({
           if (day === null) return <div key={i} />;
 
           const dateStr = toDateString(viewYear, viewMonth, day);
-          const isSelected = dateStr === value;
           const isHighlighted = highlightedDates.has(dateStr);
           const hasAnomaly = anomalyDates.has(dateStr);
+
+          const isSelected = rangeMode
+            ? dateStr === rangeStart || dateStr === rangeEnd
+            : dateStr === value;
+          const isInRange =
+            rangeMode && !!rangeStart && !!rangeEnd && dateStr > rangeStart && dateStr < rangeEnd;
 
           const titleParts = [
             isHighlighted ? "Estrazione BD presente per questa data" : null,
@@ -114,11 +149,13 @@ export function Calendar({
             <button
               key={i}
               type="button"
-              onClick={() => onChange(dateStr)}
-              className={`relative flex h-8 w-8 flex-col items-center justify-center rounded-full text-[12px] transition ${
+              onClick={() => handleDayClick(dateStr)}
+              className={`relative flex h-8 w-8 flex-col items-center justify-center text-[12px] transition ${
                 isSelected
-                  ? "bg-[#017A92] font-semibold text-white"
-                  : "text-[#2B2D2F] hover:bg-[#f3f8fa]"
+                  ? "rounded-full bg-[#017A92] font-semibold text-white"
+                  : isInRange
+                    ? "rounded-none bg-[#e5f2f5] text-[#2B2D2F]"
+                    : "rounded-full text-[#2B2D2F] hover:bg-[#f3f8fa]"
               }`}
               title={titleParts.length > 0 ? titleParts.join(" · ") : undefined}
             >
@@ -139,6 +176,16 @@ export function Calendar({
           );
         })}
       </div>
+
+      {rangeMode && (
+        <p className="mt-3 text-[11px] leading-4 text-[#017A92]">
+          {!rangeStart
+            ? "Clicca il primo giorno dell'intervallo."
+            : !rangeEnd
+              ? "Ora clicca l'ultimo giorno dell'intervallo."
+              : `Intervallo selezionato: ${rangeStart} → ${rangeEnd}`}
+        </p>
+      )}
 
       <p className="mt-3 text-[11px] leading-4 text-[#6a6d70]">
         <span className="mr-1 inline-block h-[4px] w-[4px] rounded-full bg-[#017A92] align-middle" />

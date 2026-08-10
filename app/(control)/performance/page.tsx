@@ -27,6 +27,7 @@ import {
   computePacingStatus,
   pacingLabels,
   pacingDotClasses,
+  pacingDetail,
   sumSnapshots,
 } from "@/lib/performanceMetrics";
 
@@ -49,19 +50,6 @@ type StructureRowData = {
 const [TODAY_YEAR, TODAY_MONTH] = todayString().split("-").map(Number);
 const YEAR_OPTIONS = Array.from({ length: 5 }, (_, i) => TODAY_YEAR - 3 + i);
 
-function pacingDetail(monthRevenue: number | null, minimoTarget: number | null): string | null {
-  if (monthRevenue === null || minimoTarget === null) return null;
-
-  const diff = monthRevenue - minimoTarget;
-  const diffFormatted = formatCurrency(Math.abs(diff));
-
-  if (diff < 0) {
-    return `Budget Minimo: ${formatCurrency(minimoTarget)} — mancano ${diffFormatted}`;
-  }
-
-  return `Budget Minimo: ${formatCurrency(minimoTarget)} — +${diffFormatted} sopra Minimo`;
-}
-
 export default function PerformanceOverviewPage() {
   const router = useRouter();
 
@@ -71,6 +59,7 @@ export default function PerformanceOverviewPage() {
   const [selectedYear, setSelectedYear] = useState(TODAY_YEAR);
   const [selectedMonth, setSelectedMonth] = useState(TODAY_MONTH);
   const [allExtractionDates, setAllExtractionDates] = useState<Set<string>>(new Set());
+  const [calendarOpen, setCalendarOpen] = useState(false);
 
   const [rows, setRows] = useState<StructureRowData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -302,12 +291,26 @@ export default function PerformanceOverviewPage() {
             )}
           </div>
 
-          <Calendar
-            value={`${selectedYear}-${pad(selectedMonth)}-01`}
-            onChange={handleCalendarPick}
-            highlightedDates={allExtractionDates}
-            legendLabel="giorni con almeno un import reale registrato (qualunque struttura)"
-          />
+          <div>
+            <button
+              type="button"
+              onClick={() => setCalendarOpen((prev) => !prev)}
+              className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+            >
+              {calendarOpen ? "Nascondi calendario ▲" : "Mostra calendario ▾"}
+            </button>
+
+            {calendarOpen && (
+              <div className="mt-3">
+                <Calendar
+                  value={`${selectedYear}-${pad(selectedMonth)}-01`}
+                  onChange={handleCalendarPick}
+                  highlightedDates={allExtractionDates}
+                  legendLabel="giorni con almeno un import reale registrato (qualunque struttura)"
+                />
+              </div>
+            )}
+          </div>
         </div>
       </AppCard>
 
@@ -338,7 +341,7 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Revenue on-the-books del giorno di riferimento (oggi per il mese corrente, ultimo giorno del mese per gli altri) confrontato con l'OTB alla stessa data dell'anno scorso. 'ND' quando manca lo storico per quella data." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Storico consuntivo mese-anno-scorso
+                    Consuntivo anno prec.
                     <InfoTooltip text="Revenue totale chiuso dello stesso mese dell'anno precedente rispetto al mese selezionato, confrontato con il Revenue OTB del mese selezionato. 'ND' quando manca lo storico per quel mese." />
                   </th>
                   <th className="pb-3 pr-4">

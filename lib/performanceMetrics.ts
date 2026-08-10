@@ -108,6 +108,19 @@ export function computePacingStatus(
   return "green";
 }
 
+export function pacingDetail(monthRevenue: number | null, minimoTarget: number | null): string | null {
+  if (monthRevenue === null || minimoTarget === null) return null;
+
+  const diff = monthRevenue - minimoTarget;
+  const diffFormatted = formatCurrency(Math.abs(diff));
+
+  if (diff < 0) {
+    return `Budget Minimo: ${formatCurrency(minimoTarget)} — mancano ${diffFormatted}`;
+  }
+
+  return `Budget Minimo: ${formatCurrency(minimoTarget)} — +${diffFormatted} sopra Minimo`;
+}
+
 export const pacingLabels: Record<Exclude<PacingStatus, null>, string> = {
   red: "Sotto Minimo",
   yellow: "Tra Minimo e Realistico",

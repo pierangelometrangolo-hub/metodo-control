@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { formatCurrency, ND } from "@/lib/performanceMetrics";
 
 export type ChannelRevenueDatum = {
@@ -12,8 +15,65 @@ type ChannelRevenueBarsProps = {
 const POSITIVE_COLOR = "#017A92";
 const NEGATIVE_COLOR = "#b6423f";
 
+// Non abbiamo i file dei loghi reali (Booking.com/Expedia sono marchi
+// registrati, non recuperabili/indovinabili da qui) - per esplicita
+// indicazione, dove il logo non è disponibile si usa un colore pieno
+// riconoscibile invece di lasciare il pallino vuoto. CRM e le due
+// varianti di Booking Engine condividono colore perché gestiti dallo
+// stesso strumento (Booking Designer).
+const CHANNEL_COLORS: Record<string, string> = {
+  "Booking.com": "#003580",
+  Expedia: "#f9a721",
+  CRM: "#6b625c",
+  "Booking Engine": "#6b625c",
+  "Booking Engine - Advance": "#6b625c",
+};
+
+const FALLBACK_PALETTE = ["#8a6a1f", "#2f7d43", "#5c6bc0", "#8a3a3a", "#5f6368"];
+
+function colorForChannel(channel: string): string {
+  if (CHANNEL_COLORS[channel]) return CHANNEL_COLORS[channel];
+
+  let hash = 0;
+  for (let i = 0; i < channel.length; i++) {
+    hash = (hash * 31 + channel.charCodeAt(i)) >>> 0;
+  }
+  return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
+}
+
 function formatPercent1(value: number) {
   return `${value.toLocaleString("it-IT", { maximumFractionDigits: 1, minimumFractionDigits: 1 })}%`;
+}
+
+function ChannelLabel({ channel }: { channel: string }) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [open]);
+
+  return (
+    <span
+      className="group relative w-36 shrink-0 cursor-default truncate text-sm text-[#2B2D2F]"
+      onClick={(e) => {
+        e.stopPropagation();
+        setOpen((prev) => !prev);
+      }}
+    >
+      {channel}
+      <span
+        role="tooltip"
+        className={`absolute left-0 top-full z-10 mt-1 w-max max-w-[220px] rounded-[8px] border border-[#e7dfd8] bg-white px-2 py-1 text-[11px] normal-case leading-4 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
+          open ? "opacity-100" : "pointer-events-none opacity-0 group-hover:opacity-100"
+        }`}
+      >
+        {channel}
+      </span>
+    </span>
+  );
 }
 
 export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
@@ -27,20 +87,21 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
 
   const sorted = [...data].sort((a, b) => b.revenue - a.revenue);
   const total = sorted.reduce((sum, row) => sum + row.revenue, 0);
-  const maxAbs = Math.max(...sorted.map((row) => Math.abs(row.revenue)), 1);
 
   return (
     <div className="space-y-2">
       {sorted.map((row) => {
         const isNegative = row.revenue < 0;
-        const barWidthPct = isNegative ? 0 : Math.max(2, (row.revenue / maxAbs) * 100);
+        // Larghezza proporzionale alla quota sul TOTALE, non sul canale
+        // massimo - altrimenti il canale più grande riempie sempre il
+        // 100% della riga indipendentemente dalla sua reale percentuale.
+        const barWidthPct =
+          isNegative || total <= 0 ? 0 : Math.min(100, Math.max(2, (row.revenue / total) * 100));
         const percentOfTotal = total !== 0 ? (row.revenue / total) * 100 : 0;
 
         return (
           <div key={row.channel} className="flex items-center gap-3">
-            <span className="w-36 shrink-0 truncate text-sm text-[#2B2D2F]" title={row.channel}>
-              {row.channel}
-            </span>
+            <ChannelLabel channel={row.channel} />
 
             <div className="h-6 flex-1 overflow-hidden rounded-full bg-[#f0ece6]">
               {!isNegative && (
@@ -50,6 +111,12 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
                 />
               )}
             </div>
+
+            <span
+              className="h-5 w-5 shrink-0 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(43,45,47,0.08)]"
+              style={{ backgroundColor: colorForChannel(row.channel) }}
+              title={row.channel}
+            />
 
             <span
               className={`w-24 shrink-0 text-right text-sm font-semibold tabular-nums ${
@@ -70,6 +137,7 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
       <div className="flex items-center gap-3 border-t border-[#e7dfd8] pt-2">
         <span className="w-36 shrink-0 text-sm font-semibold text-[#2B2D2F]">Totale</span>
         <div className="flex-1" />
+        <span className="h-5 w-5 shrink-0" />
         <span className="w-24 shrink-0 text-right text-sm font-semibold tabular-nums text-[#2B2D2F]">
           {formatCurrency(total)}
         </span>

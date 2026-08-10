@@ -24,6 +24,9 @@ import {
   occupancy,
   los,
   sumSnapshots,
+  computePacingStatus,
+  pacingDotClasses,
+  pacingDetail,
 } from "@/lib/performanceMetrics";
 
 const budgetLevelLabels: Record<string, string> = {
@@ -48,8 +51,12 @@ export default function PerformanceStructureDrilldownPage({
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
 
-  const [daySnapshot, setDaySnapshot] = useState<SnapshotRow | null>(null);
-  const [sdlySnapshot, setSdlySnapshot] = useState<SnapshotRow | null>(null);
+  const [rangeMode, setRangeMode] = useState(false);
+  const [rangeStart, setRangeStart] = useState<string | null>(null);
+  const [rangeEnd, setRangeEnd] = useState<string | null>(null);
+
+  const [periodSnapshots, setPeriodSnapshots] = useState<SnapshotRow[]>([]);
+  const [sdlySnapshots, setSdlySnapshots] = useState<SnapshotRow[]>([]);
   const [monthSnapshots, setMonthSnapshots] = useState<SnapshotRow[]>([]);
   const [budgets, setBudgets] = useState<BudgetRow[]>([]);
   const [pickupPoints, setPickupPoints] = useState<PickupPoint[]>([]);
@@ -58,6 +65,13 @@ export default function PerformanceStructureDrilldownPage({
 
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
+
+  const isRangeActive = rangeMode && !!rangeStart && !!rangeEnd;
+  const periodStart = isRangeActive ? rangeStart! : selectedDate;
+  const periodEnd = isRangeActive ? rangeEnd! : selectedDate;
+  // "Mese in corso vs budget" resta un concetto mensile: se e' attivo un
+  // intervallo, usa il mese del primo giorno dell'intervallo come ancora.
+  const budgetAnchorDate = isRangeActive ? rangeStart! : selectedDate;
 
   useEffect(() => {
     void checkAccessAndLoadStructure();
@@ -128,34 +142,38 @@ export default function PerformanceStructureDrilldownPage({
   useEffect(() => {
     if (accessState === "granted") void loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessState, selectedDate, hasChannelData]);
+  }, [accessState, selectedDate, rangeStart, rangeEnd, hasChannelData]);
 
   async function loadMetrics() {
     setLoadingMetrics(true);
     setLoadError("");
 
-    const sdly = sdlyDate(selectedDate);
-    const { start, end, year, month } = monthRange(selectedDate);
+    const sdlyStart = sdlyDate(periodStart);
+    const sdlyEnd = sdlyDate(periodEnd);
+    const { start: monthStart, end: monthEnd, year, month } = monthRange(budgetAnchorDate);
 
-    const [dayRes, sdlyRes, monthRes, budgetsRes, pickupRes, channelRes] = await Promise.all([
+    const snapshotColumns =
+      "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
+
+    const [periodRes, sdlyRes, monthRes, budgetsRes, pickupRes, channelRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
-        .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
+        .select(snapshotColumns)
         .eq("structure_id", structureId)
-        .eq("stay_date", selectedDate)
-        .maybeSingle(),
+        .gte("stay_date", periodStart)
+        .lte("stay_date", periodEnd),
       supabase
         .from("v_snapshot_latest")
-        .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
+        .select(snapshotColumns)
         .eq("structure_id", structureId)
-        .eq("stay_date", sdly)
-        .maybeSingle(),
+        .gte("stay_date", sdlyStart)
+        .lte("stay_date", sdlyEnd),
       supabase
         .from("v_snapshot_latest")
-        .select("stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status")
+        .select(snapshotColumns)
         .eq("structure_id", structureId)
-        .gte("stay_date", start)
-        .lte("stay_date", end),
+        .gte("stay_date", monthStart)
+        .lte("stay_date", monthEnd),
       supabase
         .from("v_budgets_current")
         .select("level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
@@ -166,34 +184,46 @@ export default function PerformanceStructureDrilldownPage({
         .from("performance_daily_snapshot")
         .select("extraction_date, revenue_total")
         .eq("structure_id", structureId)
-        .eq("stay_date", selectedDate)
-        .order("extraction_date", { ascending: true }),
+        .gte("stay_date", periodStart)
+        .lte("stay_date", periodEnd),
       hasChannelData
         ? supabase
             .from("channel_revenue")
             .select("channel, revenue_gross")
             .eq("structure_id", structureId)
-            .gte("period_start", start)
-            .lte("period_start", end)
+            // Di default (nessun intervallo attivo) resta mensile, come
+            // prima di introdurre il range - non giornaliero: sarebbe un
+            // cambio di comportamento non richiesto. Solo con un
+            // intervallo attivo si passa al range esatto.
+            .gte("period_start", isRangeActive ? periodStart : monthStart)
+            .lte("period_start", isRangeActive ? periodEnd : monthEnd)
         : Promise.resolve({ data: [], error: null }),
     ]);
 
-    if (dayRes.error) setLoadError(dayRes.error.message);
+    if (periodRes.error) setLoadError(periodRes.error.message);
     if (sdlyRes.error) setLoadError(sdlyRes.error.message);
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (pickupRes.error) setLoadError(pickupRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
 
-    setDaySnapshot((dayRes.data as SnapshotRow) || null);
-    setSdlySnapshot((sdlyRes.data as SnapshotRow) || null);
+    setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
+    setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
     setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
     setBudgets((budgetsRes.data as BudgetRow[]) || []);
+
+    // Un punto per extraction_date: per un giorno singolo coincide con le
+    // righe stesse, per un intervallo somma il revenue di tutti i giorni
+    // che condividono la stessa estrazione (stessa logica, generalizzata).
+    const pickupMap = new Map<string, number>();
+    (pickupRes.data || []).forEach((r) => {
+      const key = r.extraction_date as string;
+      pickupMap.set(key, (pickupMap.get(key) || 0) + Number(r.revenue_total));
+    });
     setPickupPoints(
-      (pickupRes.data || []).map((r) => ({
-        extractionDate: r.extraction_date as string,
-        revenue: Number(r.revenue_total),
-      }))
+      Array.from(pickupMap, ([extractionDate, revenue]) => ({ extractionDate, revenue })).sort((a, b) =>
+        a.extractionDate.localeCompare(b.extractionDate)
+      )
     );
 
     const channelTotals = new Map<string, number>();
@@ -206,12 +236,44 @@ export default function PerformanceStructureDrilldownPage({
     setLoadingMetrics(false);
   }
 
+  const periodAgg = useMemo(() => sumSnapshots(periodSnapshots), [periodSnapshots]);
+  const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
   const monthToDate = useMemo(() => sumSnapshots(monthSnapshots), [monthSnapshots]);
-  const { daysInMonth } = monthRange(selectedDate);
+
+  const monthPacing = useMemo(
+    () => computePacingStatus(monthToDate.revenue, budgets),
+    [monthToDate.revenue, budgets]
+  );
+  const monthPacingDetail = useMemo(() => {
+    const minimoBudget = budgets.find((b) => b.level === "minimo");
+    return pacingDetail(monthToDate.revenue, minimoBudget ? Number(minimoBudget.revenue_target) : null);
+  }, [monthToDate.revenue, budgets]);
+
+  const { daysInMonth } = monthRange(budgetAnchorDate);
+
+  const hasPeriodAnomaly =
+    periodAgg.roomsSold !== null &&
+    periodAgg.roomsAvailable !== null &&
+    periodAgg.roomsSold > periodAgg.roomsAvailable;
+
+  function handleRangeToggle() {
+    if (rangeMode) {
+      setRangeMode(false);
+      setRangeStart(null);
+      setRangeEnd(null);
+    } else {
+      setRangeMode(true);
+      setRangeStart(null);
+      setRangeEnd(null);
+    }
+  }
 
   if (accessState !== "granted") {
     return null;
   }
+
+  const periodLabel = isRangeActive ? `${periodStart} → ${periodEnd}` : selectedDate;
+  const sdlyLabel = isRangeActive ? `${sdlyDate(periodStart)} → ${sdlyDate(periodEnd)}` : sdlyDate(selectedDate);
 
   return (
     <div className="space-y-6">
@@ -222,95 +284,100 @@ export default function PerformanceStructureDrilldownPage({
       <PageHeader
         eyebrow="Performance"
         title={structureName || "Struttura"}
-        description="Confronto giornaliero vs stesso giorno anno precedente (SDLY), mese in corso vs budget, pickup revenue. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
+        description="Confronto vs stesso periodo anno precedente (SDLY), mese in corso vs budget, pickup revenue. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
       />
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <AppCard title="Giorno di riferimento">
+          <div className="mb-3">
+            <button
+              type="button"
+              onClick={handleRangeToggle}
+              className={`h-9 rounded-[12px] border px-3 text-[12px] font-medium transition ${
+                rangeMode
+                  ? "border-[#017A92] bg-[#f3f8fa] text-[#017A92]"
+                  : "border-[#e7dfd8] bg-white text-[#6a6d70] hover:bg-[#f8f6f2]"
+              }`}
+            >
+              {rangeMode ? "Annulla intervallo — torna a giorno singolo" : "Seleziona un intervallo"}
+            </button>
+          </div>
+
           <Calendar
             value={selectedDate}
             onChange={setSelectedDate}
             highlightedDates={highlightedDates}
             anomalyDates={anomalyDates}
+            rangeMode={rangeMode}
+            rangeStart={rangeStart}
+            rangeEnd={rangeEnd}
+            onRangeChange={(start, end) => {
+              setRangeStart(start);
+              setRangeEnd(end);
+            }}
           />
           {loadError && <p className="mt-3 text-sm text-[#8a3a3a]">{loadError}</p>}
         </AppCard>
 
         <div className="space-y-6">
           <AppCard
-            title={`${selectedDate}`}
+            title={periodLabel}
             subtitle={
-              daySnapshot
-                ? `Dato ${daySnapshot.status === "consuntivo" ? "consuntivo" : daySnapshot.status === "otb" ? "on-the-books" : "in corso"} · confronto con ${sdlyDate(selectedDate)} (SDLY)`
-                : `Nessun dato importato per questo giorno · confronto con ${sdlyDate(selectedDate)} (SDLY)`
+              isRangeActive
+                ? `Somma di ${periodAgg.daysWithData} giorni con dati nell'intervallo · confronto con ${sdlyLabel} (SDLY)`
+                : periodAgg.daysWithData > 0
+                  ? `Dato importato per questo giorno · confronto con ${sdlyLabel} (SDLY)`
+                  : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel} (SDLY)`
             }
           >
             {loadingMetrics ? (
               <p className="text-sm text-[#6a6d70]">Caricamento...</p>
             ) : (
               <>
-                {daySnapshot && Number(daySnapshot.rooms_sold) > Number(daySnapshot.rooms_available) && (
+                {hasPeriodAnomaly && (
                   <p className="mb-4 rounded-[12px] border border-[#e9c9c9] bg-[#fbf1f1] px-4 py-3 text-sm text-[#8a3a3a]">
-                    Attenzione: Booking Designer riporta {Number(daySnapshot.rooms_sold)} camere vendute su{" "}
-                    {Number(daySnapshot.rooms_available)} disponibili per questo giorno — inconsistenza nella fonte,
-                    non un errore di calcolo nostro. Dato mostrato così com'è arrivato da BD.
+                    Attenzione: Booking Designer riporta {periodAgg.roomsSold} camere vendute su{" "}
+                    {periodAgg.roomsAvailable} disponibili{isRangeActive ? " nel periodo selezionato" : " per questo giorno"}{" "}
+                    — inconsistenza nella fonte, non un errore di calcolo nostro. Dato mostrato così com'è arrivato da BD.
                   </p>
                 )}
 
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-                <KpiCard
-                  label="Revenue"
-                  current={formatCurrency(daySnapshot ? Number(daySnapshot.revenue_total) : null)}
-                  sdly={formatCurrency(sdlySnapshot ? Number(sdlySnapshot.revenue_total) : null)}
-                />
-                <KpiCard
-                  label="Occupazione"
-                  current={formatPercent(
-                    occupancy(
-                      daySnapshot ? Number(daySnapshot.rooms_sold) : null,
-                      daySnapshot ? Number(daySnapshot.rooms_available) : null
-                    )
-                  )}
-                  sdly={formatPercent(
-                    occupancy(
-                      sdlySnapshot ? Number(sdlySnapshot.rooms_sold) : null,
-                      sdlySnapshot ? Number(sdlySnapshot.rooms_available) : null
-                    )
-                  )}
-                />
-                <KpiCard
-                  label="Arrivi"
-                  current={formatNumber(daySnapshot ? Number(daySnapshot.arrivals) : null)}
-                  sdly={formatNumber(sdlySnapshot ? Number(sdlySnapshot.arrivals) : null)}
-                />
-                <KpiCard
-                  label="Presenze"
-                  current={formatNumber(daySnapshot ? Number(daySnapshot.presences) : null)}
-                  sdly={formatNumber(sdlySnapshot ? Number(sdlySnapshot.presences) : null)}
-                />
-                <KpiCard
-                  label="LOS"
-                  current={(() => {
-                    const value = daySnapshot
-                      ? los(Number(daySnapshot.rooms_sold), Number(daySnapshot.arrivals))
-                      : null;
-                    return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
-                  })()}
-                  sdly={(() => {
-                    const value = sdlySnapshot
-                      ? los(Number(sdlySnapshot.rooms_sold), Number(sdlySnapshot.arrivals))
-                      : null;
-                    return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
-                  })()}
-                />
+                  <KpiCard
+                    label="Revenue"
+                    current={formatCurrency(periodAgg.revenue)}
+                    sdly={formatCurrency(sdlyAgg.revenue)}
+                  />
+                  <KpiCard
+                    label="Occupazione"
+                    current={formatPercent(occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable))}
+                    sdly={formatPercent(occupancy(sdlyAgg.roomsSold, sdlyAgg.roomsAvailable))}
+                  />
+                  <KpiCard label="Arrivi" current={formatNumber(periodAgg.arrivals)} sdly={formatNumber(sdlyAgg.arrivals)} />
+                  <KpiCard
+                    label="Presenze"
+                    current={formatNumber(periodAgg.presences)}
+                    sdly={formatNumber(sdlyAgg.presences)}
+                  />
+                  <KpiCard
+                    label="LOS"
+                    current={(() => {
+                      const value = los(periodAgg.roomsSold, periodAgg.arrivals);
+                      return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
+                    })()}
+                    sdly={(() => {
+                      const value = los(sdlyAgg.roomsSold, sdlyAgg.arrivals);
+                      return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
+                    })()}
+                  />
                 </div>
               </>
             )}
           </AppCard>
 
           <AppCard
-            title="Pickup revenue per questo giorno"
-            subtitle="Come è cresciuto il revenue on-the-books nelle ultime estrazioni disponibili per questa stay_date"
+            title={isRangeActive ? "Pickup revenue per il periodo selezionato" : "Pickup revenue per questo giorno"}
+            subtitle="Come è cresciuto il revenue on-the-books nelle ultime estrazioni disponibili"
           >
             <PickupChart points={pickupPoints} />
           </AppCard>
@@ -326,24 +393,36 @@ export default function PerformanceStructureDrilldownPage({
         }
       >
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[560px] border-collapse text-sm">
+          <table className="w-full min-w-[420px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                 <th className="pb-3 pr-4">Scenario</th>
-                <th className="pb-3 pr-4">Revenue target</th>
-                <th className="pb-3 pr-4">Revenue reale (mese)</th>
-                <th className="pb-3 pr-4">Occupazione target</th>
-                <th className="pb-3">Occupazione reale (mese)</th>
+                <th className="pb-3 pr-4">Revenue</th>
+                <th className="pb-3">Occupazione</th>
               </tr>
             </thead>
             <tbody>
               <tr className="border-b border-[#f0ece6]">
                 <td className="py-2 pr-4 font-semibold text-[#2B2D2F]">Reale</td>
-                <td className="py-2 pr-4 text-[#6a6d70]">—</td>
                 <td className="py-2 pr-4 text-[#2B2D2F]">
-                  {monthToDate.daysWithData > 0 ? formatCurrency(monthToDate.revenue) : ND}
+                  {monthToDate.daysWithData > 0 ? (
+                    <div className="flex items-start gap-2">
+                      {monthPacing && (
+                        <span
+                          className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${pacingDotClasses[monthPacing]}`}
+                        />
+                      )}
+                      <div>
+                        <div>{formatCurrency(monthToDate.revenue)}</div>
+                        {monthPacingDetail && (
+                          <div className="text-[11px] text-[#6a6d70]">{monthPacingDetail}</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    ND
+                  )}
                 </td>
-                <td className="py-2 pr-4 text-[#6a6d70]">—</td>
                 <td className="py-2 text-[#2B2D2F]">
                   {monthToDate.daysWithData > 0
                     ? formatPercent(occupancy(monthToDate.roomsSold, monthToDate.roomsAvailable))
@@ -360,11 +439,9 @@ export default function PerformanceStructureDrilldownPage({
                     <td className="py-2 pr-4 text-[#2B2D2F]">
                       {budget ? formatCurrency(Number(budget.revenue_target)) : ND}
                     </td>
-                    <td className="py-2 pr-4 text-[#6a6d70]">—</td>
-                    <td className="py-2 pr-4 text-[#2B2D2F]">
+                    <td className="py-2 text-[#2B2D2F]">
                       {budget ? formatPercent(Number(budget.occupancy_pct_target)) : ND}
                     </td>
-                    <td className="py-2 text-[#6a6d70]">—</td>
                   </tr>
                 );
               })}
@@ -376,7 +453,9 @@ export default function PerformanceStructureDrilldownPage({
       {hasChannelData && (
         <AppCard
           title="Revenue per canale"
-          subtitle={`Fatturato aggregato per canale sul mese visualizzato (${selectedDate.slice(0, 7)}) — la riga Totale deve coincidere con la somma delle barre`}
+          subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${
+            isRangeActive ? periodLabel : selectedDate.slice(0, 7)
+          }) — la riga Totale deve coincidere con la somma delle barre`}
         >
           <ChannelRevenueBars data={channelRevenue} />
         </AppCard>

@@ -44,16 +44,16 @@ export default function DashboardPage() {
 
       supabase
         .from("tracking")
-        .select("*")
+        .select("id, data, minuti, attivita, operator_id, client_id, created_at")
         .order("created_at", { ascending: false }),
 
       supabase
         .from("profiles")
-        .select("*"),
+        .select("id, email"),
 
       supabase
         .from("clients")
-        .select("*"),
+        .select("id, name"),
     ]);
 
     if (tasksError) {
@@ -62,20 +62,14 @@ export default function DashboardPage() {
 
     if (trackingError) {
       console.error("Errore lettura tracking:", trackingError);
-    } else {
-      console.log("TRACKING RAW:", trackingData);
     }
 
     if (profilesError) {
       console.error("Errore lettura profiles:", profilesError);
-    } else {
-      console.log("PROFILES RAW:", profilesData);
     }
 
     if (clientsError) {
       console.error("Errore lettura clients:", clientsError);
-    } else {
-      console.log("CLIENTS RAW:", clientsData);
     }
 
     setSupabaseTasks((tasksData as SupabaseTask[]) || []);

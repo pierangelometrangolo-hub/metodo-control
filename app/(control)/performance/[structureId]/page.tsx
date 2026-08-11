@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
+import { InfoTooltip } from "@/components/ui/InfoTooltip";
+import { CellTooltip } from "@/components/ui/CellTooltip";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
@@ -60,7 +62,11 @@ type DailyDetailRow = {
   adr: number | null;
   revPar: number | null;
   occupancy: number | null;
-  pickup: number | null;
+  roomsSold: number;
+  roomsUnavailable: number | null;
+  pickupRooms: number | null;
+  pickupRevenue: number | null;
+  previousExtractionDate: string | null;
 };
 
 const DEFAULT_MONTH = monthRange(todayString());
@@ -91,6 +97,7 @@ export default function PerformanceStructureDrilldownPage({
     "checking"
   );
   const [structureName, setStructureName] = useState("");
+  const [structureRooms, setStructureRooms] = useState<number | null>(null);
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
   const [lastAdrRevparUpdate, setLastAdrRevparUpdate] = useState<string | null>(null);
@@ -161,7 +168,7 @@ export default function PerformanceStructureDrilldownPage({
 
     const { data, error } = await supabase
       .from("structures")
-      .select("name")
+      .select("name, n_rooms")
       .eq("id", structureId)
       .single();
 
@@ -171,6 +178,7 @@ export default function PerformanceStructureDrilldownPage({
     }
 
     setStructureName(data.name);
+    setStructureRooms(data.n_rooms !== null && data.n_rooms !== undefined ? Number(data.n_rooms) : null);
 
     const importsRes = await supabase
       .from("bd_imports")
@@ -198,26 +206,15 @@ export default function PerformanceStructureDrilldownPage({
 
     // Data dell'ultima estrazione che alimenta Revenue OTB/ADR/RevPAR/
     // Occupazione (performance_daily_snapshot + performance_monthly_snapshot),
-    // non le fonti di Canali/Nazionalità che sono tabelle separate.
-    const [dailyLatestRes, monthlyLatestRes] = await Promise.all([
-      supabase
-        .from("performance_daily_snapshot")
-        .select("extraction_date")
-        .eq("structure_id", structureId)
-        .order("extraction_date", { ascending: false })
-        .limit(1),
-      supabase
-        .from("performance_monthly_snapshot")
-        .select("extraction_date")
-        .eq("structure_id", structureId)
-        .order("extraction_date", { ascending: false })
-        .limit(1),
-    ]);
+    // non le fonti di Canali/Nazionalità che sono tabelle separate. Stessa
+    // funzione usata dalla Dashboard per la colonna "Ultimo upload".
+    const latestExtractionRes = await supabase.rpc("fn_latest_extraction_per_structure", {
+      p_structure_ids: [structureId],
+    });
 
-    const dailyLatest = dailyLatestRes.data?.[0]?.extraction_date as string | undefined;
-    const monthlyLatest = monthlyLatestRes.data?.[0]?.extraction_date as string | undefined;
-    const candidates = [dailyLatest, monthlyLatest].filter((d): d is string => Boolean(d));
-    setLastAdrRevparUpdate(candidates.length > 0 ? candidates.sort().at(-1)! : null);
+    if (!latestExtractionRes.error) {
+      setLastAdrRevparUpdate(latestExtractionRes.data?.[0]?.extraction_date ?? null);
+    }
 
     // Struttura mai popolata (es. Montecallini): la sezione va nascosta
     // del tutto, non solo mostrata con "ND" - controllo una volta sola,
@@ -373,11 +370,15 @@ export default function PerformanceStructureDrilldownPage({
     // Per ogni stay_date, le righe arrivano gia' ordinate per extraction_date
     // decrescente: la prima e' l'ultima estrazione disponibile, la seconda
     // (se c'e') e' l'upload precedente - il pickup e' la differenza tra le due.
-    const byDay = new Map<string, { revenue_total: number; rooms_sold: number; rooms_available: number }[]>();
+    const byDay = new Map<
+      string,
+      { extraction_date: string; revenue_total: number; rooms_sold: number; rooms_available: number }[]
+    >();
     (data || []).forEach((r) => {
       const key = r.stay_date as string;
       const list = byDay.get(key) || [];
       list.push({
+        extraction_date: r.extraction_date as string,
         revenue_total: Number(r.revenue_total),
         rooms_sold: Number(r.rooms_sold),
         rooms_available: Number(r.rooms_available),
@@ -396,7 +397,11 @@ export default function PerformanceStructureDrilldownPage({
           adr: adr(latest.revenue_total, latest.rooms_sold),
           revPar: revPar(latest.revenue_total, latest.rooms_available),
           occupancy: occupancy(latest.rooms_sold, latest.rooms_available),
-          pickup: previous ? latest.revenue_total - previous.revenue_total : null,
+          roomsSold: latest.rooms_sold,
+          roomsUnavailable: structureRooms !== null ? structureRooms - latest.rooms_available : null,
+          pickupRooms: previous ? latest.rooms_sold - previous.rooms_sold : null,
+          pickupRevenue: previous ? latest.revenue_total - previous.revenue_total : null,
+          previousExtractionDate: previous ? previous.extraction_date : null,
         };
       })
       .sort((a, b) => a.stayDate.localeCompare(b.stayDate));
@@ -535,71 +540,6 @@ export default function PerformanceStructureDrilldownPage({
       </div>
 
       <AppCard
-        title="Dettaglio giornaliero"
-        subtitle={`Una riga per ogni giorno di ${periodLabel} con dato disponibile`}
-      >
-        <button
-          type="button"
-          onClick={() => setDailyDetailOpen((prev) => !prev)}
-          className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
-        >
-          {dailyDetailOpen ? "Nascondi dettaglio giornaliero ▲" : "Mostra dettaglio giornaliero ▾"}
-        </button>
-
-        {dailyDetailOpen && (
-          <div className="mt-4 overflow-x-auto">
-            {dailyDetailLoading ? (
-              <p className="text-sm text-[#6a6d70]">Caricamento...</p>
-            ) : dailyDetailRows && dailyDetailRows.length > 0 ? (
-              <table className="w-full min-w-[640px] border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                    <th className="pb-3 pr-4">Data</th>
-                    <th className="pb-3 pr-4">Revenue</th>
-                    <th className="pb-3 pr-4">ADR</th>
-                    <th className="pb-3 pr-4">RevPAR</th>
-                    <th className="pb-3 pr-4">Occupazione</th>
-                    <th className="pb-3">Pickup (vs ultimo upload)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dailyDetailRows.map((row) => (
-                    <tr key={row.stayDate} className="border-b border-[#f0ece6] last:border-0">
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatDateIt(row.stayDate)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revenue)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.adr)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revPar)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatPercent(row.occupancy)}</td>
-                      <td className="py-2 text-[#2B2D2F]">
-                        {row.pickup === null ? (
-                          ND
-                        ) : (
-                          <span
-                            className={
-                              row.pickup > 0
-                                ? "text-[#2f7d43]"
-                                : row.pickup < 0
-                                ? "text-[#8a3a3a]"
-                                : undefined
-                            }
-                          >
-                            {row.pickup >= 0 ? "+" : ""}
-                            {formatCurrency(row.pickup)}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="text-sm text-[#6a6d70]">{ND} — nessun dato per questo periodo.</p>
-            )}
-          </div>
-        )}
-      </AppCard>
-
-      <AppCard
         title="Mese in corso vs budget"
         subtitle={
           monthToDate.daysWithData > 0
@@ -727,6 +667,116 @@ export default function PerformanceStructureDrilldownPage({
           <NationalityBars data={nationalityData} />
         </AppCard>
       )}
+
+      <AppCard
+        title="Dettaglio giornaliero"
+        subtitle={`Una riga per ogni giorno di ${periodLabel} con dato disponibile`}
+      >
+        <button
+          type="button"
+          onClick={() => setDailyDetailOpen((prev) => !prev)}
+          className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+        >
+          {dailyDetailOpen ? "Nascondi dettaglio giornaliero ▲" : "Mostra dettaglio giornaliero ▾"}
+        </button>
+
+        {dailyDetailOpen && (
+          <div className="mt-4 overflow-x-auto">
+            {dailyDetailLoading ? (
+              <p className="text-sm text-[#6a6d70]">Caricamento...</p>
+            ) : dailyDetailRows && dailyDetailRows.length > 0 ? (
+              <table className="w-full min-w-[920px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                    <th className="pb-3 pr-4">Data</th>
+                    <th className="pb-3 pr-4">Revenue</th>
+                    <th className="pb-3 pr-4">ADR</th>
+                    <th className="pb-3 pr-4">RevPAR</th>
+                    <th className="pb-3 pr-4">Occupazione</th>
+                    <th className="pb-3 pr-4">Camere occupate</th>
+                    <th className="pb-3 pr-4">Camere fuori disp.</th>
+                    <th className="pb-3 pr-4">
+                      Pickup RN
+                      <InfoTooltip text="Differenza di camere vendute per questo giorno tra l'ultima estrazione disponibile e quella precedente." />
+                    </th>
+                    <th className="pb-3">
+                      Pickup €
+                      <InfoTooltip text="Differenza di revenue per questo giorno tra l'ultima estrazione disponibile e quella precedente." />
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyDetailRows.map((row) => (
+                    <tr key={row.stayDate} className="border-b border-[#f0ece6] last:border-0">
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatDateIt(row.stayDate)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revenue)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.adr)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revPar)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatPercent(row.occupancy)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsSold)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">
+                        {row.roomsUnavailable !== null ? formatNumber(row.roomsUnavailable) : ND}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {row.pickupRooms === null ? (
+                          <span className="text-[#2B2D2F]">{ND}</span>
+                        ) : (
+                          <CellTooltip
+                            trigger={
+                              <span
+                                className={
+                                  row.pickupRooms > 0
+                                    ? "text-[#2f7d43]"
+                                    : row.pickupRooms < 0
+                                    ? "text-[#8a3a3a]"
+                                    : "text-[#2B2D2F]"
+                                }
+                              >
+                                {row.pickupRooms >= 0 ? "+" : ""}
+                                {formatNumber(row.pickupRooms)}
+                              </span>
+                            }
+                          >
+                            vs ultimo aggiornamento:{" "}
+                            {row.previousExtractionDate ? formatDateIt(row.previousExtractionDate) : ND}
+                          </CellTooltip>
+                        )}
+                      </td>
+                      <td className="py-2">
+                        {row.pickupRevenue === null ? (
+                          <span className="text-[#2B2D2F]">{ND}</span>
+                        ) : (
+                          <CellTooltip
+                            trigger={
+                              <span
+                                className={
+                                  row.pickupRevenue > 0
+                                    ? "text-[#2f7d43]"
+                                    : row.pickupRevenue < 0
+                                    ? "text-[#8a3a3a]"
+                                    : "text-[#2B2D2F]"
+                                }
+                              >
+                                {row.pickupRevenue >= 0 ? "+" : ""}
+                                {formatCurrency(row.pickupRevenue)}
+                              </span>
+                            }
+                          >
+                            vs ultimo aggiornamento:{" "}
+                            {row.previousExtractionDate ? formatDateIt(row.previousExtractionDate) : ND}
+                          </CellTooltip>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-sm text-[#6a6d70]">{ND} — nessun dato per questo periodo.</p>
+            )}
+          </div>
+        )}
+      </AppCard>
     </div>
   );
 }

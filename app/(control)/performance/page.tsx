@@ -22,11 +22,13 @@ import {
   formatCurrencyCents,
   formatSignedCurrency,
   formatPercent,
+  formatNumber,
   formatDelta,
   occupancy,
   adr,
   revPar,
-  adrToGoal,
+  computeGoalGap,
+  GoalGap,
   computePacingStatus,
   pacingLabels,
   pacingDotClasses,
@@ -77,7 +79,21 @@ type StructureRowData = {
   lastYearMonthRevenue: number | null;
   budgetsForMonth: BudgetRow[];
   pacing: ReturnType<typeof computePacingStatus>;
+  lastExtractionDate: string | null;
 };
+
+// "YYYY-MM-DD" -> "DD/MM/YYYY" senza passare da Date (eviterebbe scarti di
+// fuso orario sulla mezzanotte UTC).
+function formatDateIt(dateStr: string): string {
+  return dateStr.split("-").reverse().join("/");
+}
+
+function GoalCell({ goal, render }: { goal: GoalGap | null; render: (g: GoalGap) => string }) {
+  if (goal === null) return <>{ND}</>;
+  if (goal.status === "achieved") return <span className="text-[#2f7d43]">✓ Raggiunto</span>;
+  if (goal.status === "sold_out") return <span className="text-[#6a6d70]">Esaurito</span>;
+  return <>{render(goal)}</>;
+}
 
 const [TODAY_YEAR, TODAY_MONTH] = todayString().split("-").map(Number);
 const YEAR_OPTIONS = Array.from({ length: 5 }, (_, i) => TODAY_YEAR - 3 + i);
@@ -188,7 +204,7 @@ export default function PerformanceOverviewPage() {
       })
     );
 
-    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, ...sdlyResults] = await Promise.all([
+    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, lastExtractionRes, ...sdlyResults] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -208,6 +224,9 @@ export default function PerformanceOverviewPage() {
         .in("month", monthsInScope)
         .in("structure_id", ids),
       supabase.from("bd_imports").select("extraction_date").in("structure_id", ids),
+      // Data ultimo upload (ADR/RevPAR) per struttura: non dipende dal
+      // periodo selezionato, e' una fotografia di freschezza del dato.
+      supabase.rpc("fn_latest_extraction_per_structure", { p_structure_ids: ids }),
       ...sdlyPromises,
     ]);
 
@@ -215,6 +234,7 @@ export default function PerformanceOverviewPage() {
     if (lastYearMonthRes.error) setLoadError(lastYearMonthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (importsRes.error) setLoadError(importsRes.error.message);
+    if (lastExtractionRes.error) setLoadError(lastExtractionRes.error.message);
     sdlyResults.forEach((res) => {
       if (res.error) setLoadError(res.error.message);
     });
@@ -258,6 +278,13 @@ export default function PerformanceOverviewPage() {
       budgetRowsByStructureLevel.set(key, list);
     });
 
+    const lastExtractionByStructure = new Map<string, string>(
+      (lastExtractionRes.data || []).map((r: { structure_id: string; extraction_date: string }) => [
+        r.structure_id,
+        r.extraction_date,
+      ])
+    );
+
     const nextRows: StructureRowData[] = structures.map((structure) => {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
@@ -279,6 +306,7 @@ export default function PerformanceOverviewPage() {
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
+        lastExtractionDate: lastExtractionByStructure.get(structure.id) ?? null,
       };
     });
 
@@ -411,10 +439,14 @@ export default function PerformanceOverviewPage() {
           <p className="text-sm text-[#6a6d70]">Caricamento...</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1500px] border-collapse text-sm">
+            <table className="w-full min-w-[1700px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                   <th className="pb-3 pr-4">Struttura</th>
+                  <th className="pb-3 pr-4">
+                    Ultimo upload
+                    <InfoTooltip text="Data dell'ultima estrazione ADR/RevPAR disponibile per questa struttura (la fonte che alimenta Revenue OTB/ADR/RevPAR/Occupazione) — non le estrazioni di Canali o Nazionalità." />
+                  </th>
                   <th className="pb-3 pr-4">
                     Revenue OTB ({isWholeYear ? "anno" : "mese"})
                     <InfoTooltip
@@ -450,8 +482,12 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Somma camere vendute diviso somma camere disponibili sull'intero mese selezionato — numeratore e denominatore coprono sempre lo stesso periodo." />
                   </th>
                   <th className="pb-3 pr-4">
+                    RN TO GOAL
+                    <InfoTooltip text="Room night mancanti rispetto all'occupazione target del Budget Minimo: (% Occupazione target × Room night disponibili del Minimo) − Room night già vendute. '✓ Raggiunto' se il Minimo è già superato in revenue, 'Esaurito' se le room night target sono già tutte vendute ma manca ancora revenue (serve un prezzo più alto, non altre camere)." />
+                  </th>
+                  <th className="pb-3 pr-4">
                     ADR TO GOAL
-                    <InfoTooltip text="ADR necessaria per raggiungere il Budget Minimo, sulle camere che mancano rispetto all'occupazione target del Minimo: (Budget Minimo − Revenue OTB) / ((% Occupazione target × Room night disponibili del Minimo) − Room night già vendute). '✓ Raggiunto' se il Minimo è già superato in revenue." />
+                    <InfoTooltip text="ADR necessaria sulle room night mancanti (colonna RN TO GOAL) per raggiungere il Budget Minimo: (Budget Minimo − Revenue OTB) / RN TO GOAL. Stessi stati '✓ Raggiunto' / 'Esaurito' di RN TO GOAL." />
                   </th>
                   <th className="pb-3 pr-4">
                     Min.
@@ -479,7 +515,7 @@ export default function PerformanceOverviewPage() {
 
                   const sdlyDelta = formatDelta(row.monthRevenue, row.sdlyMonthRevenue);
                   const lastYearDelta = formatDelta(row.monthRevenue, row.lastYearMonthRevenue);
-                  const goal = adrToGoal(row.monthRevenue, minimoBudget, row.monthRoomsSold);
+                  const goal = computeGoalGap(row.monthRevenue, minimoBudget, row.monthRoomsSold);
 
                   return (
                     <tr
@@ -488,6 +524,10 @@ export default function PerformanceOverviewPage() {
                       className="cursor-pointer border-b border-[#f0ece6] transition last:border-0 hover:bg-[#f8f6f2]"
                     >
                       <td className="py-3 pr-4 font-semibold text-[#2B2D2F]">{row.structure.name}</td>
+
+                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                        {row.lastExtractionDate ? formatDateIt(row.lastExtractionDate) : ND}
+                      </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
                         {row.monthRevenue !== null ? formatCurrencyCents(row.monthRevenue) : ND}
@@ -565,13 +605,11 @@ export default function PerformanceOverviewPage() {
                       <td className="py-3 pr-4 text-[#2B2D2F]">{formatPercent(monthOcc)}</td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
-                        {goal.achieved ? (
-                          <span className="text-[#2f7d43]">✓ Raggiunto</span>
-                        ) : goal.value !== null ? (
-                          formatCurrency(goal.value)
-                        ) : (
-                          ND
-                        )}
+                        <GoalCell goal={goal} render={(g) => formatNumber(Math.ceil(g.roomsNeeded ?? 0))} />
+                      </td>
+
+                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                        <GoalCell goal={goal} render={(g) => formatCurrency(g.adrNeeded)} />
                       </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">

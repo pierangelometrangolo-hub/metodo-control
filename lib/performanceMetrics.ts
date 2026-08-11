@@ -109,38 +109,53 @@ export function los(roomsSold: number | null, arrivals: number | null): number |
   return roomsSold / arrivals;
 }
 
-export type AdrToGoal = { value: number | null; achieved: boolean };
+// "pending": mancano sia room night sia revenue, i due valori sono validi.
+// "achieved": il Minimo e' gia' superato in revenue - non serve vendere
+// altro, ADR/RN to goal non hanno senso come numero.
+// "sold_out": le room night mancanti sono gia' esaurite (si e' venduto
+// almeno quanto previsto dall'occupazione target) ma il revenue del
+// Minimo non e' ancora raggiunto - serve un prezzo piu' alto sulle
+// camere gia' vendute, non altre camere: stato distinto da "achieved" e
+// da "ND" (qui i dati ci sono, e' l'esito del calcolo ad essere un
+// esaurimento inventario, non un dato mancante).
+export type GoalGap = {
+  roomsNeeded: number | null;
+  adrNeeded: number | null;
+  status: "pending" | "achieved" | "sold_out";
+};
 
-// ADR necessaria per raggiungere il Budget Minimo, sulle camere che
-// mancano rispetto all'OCCUPAZIONE TARGET del Minimo (non su tutte le
-// camere fisicamente ancora libere nel mese, che sarebbero molte di piu'
-// di quelle davvero previste dal budget): (Minimo - Revenue OTB mese) /
-// ((% Occupazione target del Minimo x Room night disponibili del Minimo)
-// - Room night gia' vendute). Se il Minimo e' gia' superato in revenue,
-// "achieved" segnala che non serve un'ADR minima (obiettivo raggiunto),
-// non un valore numerico privo di senso.
-export function adrToGoal(
+// Room night e ADR necessari per raggiungere il Budget Minimo, sulle
+// camere che mancano rispetto all'OCCUPAZIONE TARGET del Minimo (non su
+// tutte le camere fisicamente ancora libere nel mese, che sarebbero molte
+// di piu' di quelle davvero previste dal budget):
+//   room night mancanti = (% Occupazione target del Minimo x Room night
+//     disponibili del Minimo) - Room night gia' vendute
+//   ADR necessaria = (Minimo - Revenue OTB mese) / room night mancanti
+// Restituisce null (ND) solo se manca uno degli input; altrimenti sempre
+// un oggetto con uno status esplicito (achieved/sold_out/pending), mai un
+// numero privo di senso.
+export function computeGoalGap(
   monthRevenue: number | null,
   minimoBudget: BudgetRow | undefined,
   roomsSold: number | null
-): AdrToGoal {
+): GoalGap | null {
   if (monthRevenue === null || !minimoBudget || roomsSold === null) {
-    return { value: null, achieved: false };
+    return null;
   }
 
   const minimoTarget = Number(minimoBudget.revenue_target);
   const remainingRevenue = minimoTarget - monthRevenue;
   if (remainingRevenue <= 0) {
-    return { value: null, achieved: true };
+    return { roomsNeeded: null, adrNeeded: null, status: "achieved" };
   }
 
   const targetRoomsSold = Number(minimoBudget.occupancy_pct_target) * Number(minimoBudget.room_nights_available);
   const remainingRooms = targetRoomsSold - roomsSold;
   if (remainingRooms <= 0) {
-    return { value: null, achieved: false };
+    return { roomsNeeded: null, adrNeeded: null, status: "sold_out" };
   }
 
-  return { value: remainingRevenue / remainingRooms, achieved: false };
+  return { roomsNeeded: remainingRooms, adrNeeded: remainingRevenue / remainingRooms, status: "pending" };
 }
 
 export function computePacingStatus(

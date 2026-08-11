@@ -3,6 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
+import { KpiCard } from "@/components/ui/KpiCard";
+import { canViewModule } from "@/lib/permissions";
+import { todayString } from "@/lib/performanceMetrics";
 
 type SupabaseTask = {
   id: string;
@@ -20,15 +23,123 @@ type RawTrackingEntry = Record<string, any>;
 type RawProfile = Record<string, any>;
 type RawClient = Record<string, any>;
 
+type PerformanceSummary = {
+  green: number;
+  yellow: number;
+  red: number;
+};
+
 export default function DashboardPage() {
   const [supabaseTasks, setSupabaseTasks] = useState<SupabaseTask[]>([]);
   const [trackingEntries, setTrackingEntries] = useState<RawTrackingEntry[]>([]);
   const [profiles, setProfiles] = useState<RawProfile[]>([]);
   const [clients, setClients] = useState<RawClient[]>([]);
 
+  // Gate lato client (nasconde la card) - il gate che conta davvero e'
+  // quello lato query in loadPerformanceSummary: fn_month_snapshot_asof e
+  // performance_monthly_snapshot sono protette da RLS che richiede
+  // fn_user_level_rank(auth.uid()) >= 2 (senior/master), quindi anche
+  // aggirando questo stato un utente 'user' otterrebbe comunque righe
+  // vuote, non dati reali.
+  const [performanceAccess, setPerformanceAccess] = useState(false);
+  const [performanceSummary, setPerformanceSummary] = useState<PerformanceSummary | null>(null);
+
   useEffect(() => {
     loadDashboardData();
+    void loadPerformanceSummary();
   }, []);
+
+  async function loadPerformanceSummary() {
+    const allowed = await canViewModule("performance");
+    setPerformanceAccess(allowed);
+
+    if (!allowed) {
+      setPerformanceSummary(null);
+      return;
+    }
+
+    const { data: structuresData, error: structuresError } = await supabase
+      .from("structures")
+      .select("id");
+
+    if (structuresError) {
+      console.error("Errore lettura strutture per sintesi Performance:", structuresError);
+      return;
+    }
+
+    const ids = (structuresData || []).map((s) => s.id as string);
+
+    if (ids.length === 0) {
+      setPerformanceSummary({ green: 0, yellow: 0, red: 0 });
+      return;
+    }
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+
+    const [monthRes, budgetsRes] = await Promise.all([
+      // security invoker (nessun "security definer"): applica la RLS con
+      // il ruolo di chi chiama, non con quello del proprietario - un
+      // utente 'user' riceve qui 0 righe, non un bypass.
+      supabase.rpc("fn_month_snapshot_asof", {
+        p_structure_ids: ids,
+        p_period_year: year,
+        p_period_month: month,
+        p_cutoff_date: todayString(),
+      }),
+      supabase
+        .from("v_budgets_current")
+        .select("structure_id, level, revenue_target")
+        .eq("season_year", year)
+        .eq("month", month)
+        .in("structure_id", ids),
+    ]);
+
+    if (monthRes.error) {
+      console.error("Errore lettura sintesi Performance:", monthRes.error);
+    }
+
+    if (budgetsRes.error) {
+      console.error("Errore lettura budget sintesi Performance:", budgetsRes.error);
+    }
+
+    const revenueByStructure = new Map<string, number>(
+      (monthRes.data || []).map((r: { structure_id: string; revenue_total: number }) => [
+        r.structure_id,
+        Number(r.revenue_total),
+      ])
+    );
+
+    const targetsByStructure = new Map<string, { minimo?: number; realistico?: number }>();
+    (budgetsRes.data || []).forEach((row: { structure_id: string; level: string; revenue_target: number }) => {
+      const entry = targetsByStructure.get(row.structure_id) || {};
+      if (row.level === "minimo") entry.minimo = (entry.minimo ?? 0) + Number(row.revenue_target);
+      if (row.level === "realistico") entry.realistico = (entry.realistico ?? 0) + Number(row.revenue_target);
+      targetsByStructure.set(row.structure_id, entry);
+    });
+
+    // Stesse soglie di lib/performanceMetrics.ts#computePacingStatus (rosso
+    // sotto Minimo, giallo tra Minimo e Realistico, verde sopra Realistico)
+    // - qui replicate su valori scalari perche' non serve il resto
+    // dell'oggetto BudgetRow, solo il conteggio per la card di sintesi.
+    const counts: PerformanceSummary = { green: 0, yellow: 0, red: 0 };
+
+    ids.forEach((id) => {
+      const revenue = revenueByStructure.get(id);
+      const targets = targetsByStructure.get(id);
+
+      if (revenue === undefined || targets?.minimo === undefined || targets?.realistico === undefined) {
+        return;
+      }
+
+      if (revenue < targets.minimo) counts.red += 1;
+      else if (revenue < targets.realistico) counts.yellow += 1;
+      else counts.green += 1;
+    });
+
+    setPerformanceSummary(counts);
+  }
 
   async function loadDashboardData() {
     const [
@@ -310,40 +421,26 @@ export default function DashboardPage() {
       value: openTasks.length.toString(),
       note: "Task reali da Supabase",
       href: "/operations",
-      accent: "bg-[#017A92]",
-      cardClass: "border-[#017A92] bg-[#f3f8fa]",
-      labelClass: "text-[#017A92]",
-      valueClass: "text-[#2B2D2F]",
+      active: true,
     },
     {
       title: "Task in ritardo",
       value: overdueTasks.length.toString(),
       note: "Richiedono attenzione prioritaria",
       href: "/operations",
-      accent: "bg-[#993333]",
-      cardClass: "border-[#e7dfd8] bg-white",
-      labelClass: "text-[#993333]",
-      valueClass: "text-[#2B2D2F]",
+      alert: overdueTasks.length > 0,
     },
     {
       title: "Tempo tracciato oggi",
       value: formattedTrackedTime,
       note: `${todayTrackingEntries.length} attività registrate`,
       href: "/time-tracking",
-      accent: "bg-[#017A92]",
-      cardClass: "border-[#e7dfd8] bg-white",
-      labelClass: "text-[#017A92]",
-      valueClass: "text-[#2B2D2F]",
     },
     {
       title: "Task oggi",
       value: todayTasks.length.toString(),
       note: "Scadenze operative giornaliere",
       href: "/operations",
-      accent: "bg-[#017A92]",
-      cardClass: "border-[#e7dfd8] bg-white",
-      labelClass: "text-[#017A92]",
-      valueClass: "text-[#2B2D2F]",
     },
   ];
 
@@ -380,27 +477,59 @@ export default function DashboardPage() {
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {overviewCards.map((card) => (
-          <Link
+          <KpiCard
             key={card.title}
+            title={card.title}
+            value={card.value}
+            note={card.note}
             href={card.href}
-            className={`rounded-[20px] border px-5 py-4 shadow-[0_6px_16px_rgba(43,45,47,0.03)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_30px_rgba(43,45,47,0.05)] ${card.cardClass}`}
-          >
-            <div className={`mb-4 h-1.5 w-8 rounded-full ${card.accent}`} />
-
-            <p
-              className={`text-[11px] font-semibold uppercase tracking-[0.22em] ${card.labelClass}`}
-            >
-              {card.title}
-            </p>
-
-            <p className={`mt-4 text-4xl font-semibold leading-none ${card.valueClass}`}>
-              {card.value}
-            </p>
-
-            <p className="mt-3 text-sm text-[#555555]">{card.note}</p>
-          </Link>
+            active={card.active}
+            alert={card.alert}
+          />
         ))}
       </section>
+
+      {performanceAccess && performanceSummary && (
+        <section className="rounded-[24px] border border-[#e7dfd8] bg-white p-6 shadow-[0_12px_30px_rgba(43,45,47,0.05)]">
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h2 className="text-2xl text-[#2B2D2F]">Sintesi Performance</h2>
+              <p className="mt-2 text-sm text-[#555555]">
+                Ritmo verso il budget del mese corrente, per tutte le strutture.
+              </p>
+            </div>
+
+            <Link
+              href="/performance"
+              className="rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-2 text-sm font-medium text-[#2B2D2F] transition hover:bg-[#f7f3ee]"
+            >
+              Vai a Performance
+            </Link>
+          </div>
+
+          <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+            <KpiCard
+              title="Sopra Realistico"
+              value={performanceSummary.green.toString()}
+              note="Strutture sopra il budget Realistico del mese"
+              href="/performance"
+            />
+            <KpiCard
+              title="Tra Minimo e Realistico"
+              value={performanceSummary.yellow.toString()}
+              note="Strutture in linea, tra Minimo e Realistico"
+              href="/performance"
+            />
+            <KpiCard
+              title="Sotto Minimo"
+              value={performanceSummary.red.toString()}
+              note="Strutture sotto il budget Minimo del mese"
+              href="/performance"
+              alert={performanceSummary.red > 0}
+            />
+          </div>
+        </section>
+      )}
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.6fr_1fr]">
         <div className="rounded-[24px] border border-[#e7dfd8] bg-white p-6 shadow-[0_12px_30px_rgba(43,45,47,0.05)]">

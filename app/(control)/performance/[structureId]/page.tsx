@@ -63,7 +63,7 @@ type DailyDetailRow = {
   revPar: number | null;
   occupancy: number | null;
   roomsSold: number;
-  roomsUnavailable: number | null;
+  roomsAvailable: number;
   pickupRooms: number | null;
   pickupRevenue: number | null;
   previousExtractionDate: string | null;
@@ -97,7 +97,6 @@ export default function PerformanceStructureDrilldownPage({
     "checking"
   );
   const [structureName, setStructureName] = useState("");
-  const [structureRooms, setStructureRooms] = useState<number | null>(null);
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
   const [lastAdrRevparUpdate, setLastAdrRevparUpdate] = useState<string | null>(null);
@@ -168,7 +167,7 @@ export default function PerformanceStructureDrilldownPage({
 
     const { data, error } = await supabase
       .from("structures")
-      .select("name, n_rooms")
+      .select("name")
       .eq("id", structureId)
       .single();
 
@@ -178,7 +177,6 @@ export default function PerformanceStructureDrilldownPage({
     }
 
     setStructureName(data.name);
-    setStructureRooms(data.n_rooms !== null && data.n_rooms !== undefined ? Number(data.n_rooms) : null);
 
     const importsRes = await supabase
       .from("bd_imports")
@@ -398,7 +396,7 @@ export default function PerformanceStructureDrilldownPage({
           revPar: revPar(latest.revenue_total, latest.rooms_available),
           occupancy: occupancy(latest.rooms_sold, latest.rooms_available),
           roomsSold: latest.rooms_sold,
-          roomsUnavailable: structureRooms !== null ? structureRooms - latest.rooms_available : null,
+          roomsAvailable: latest.rooms_available,
           pickupRooms: previous ? latest.rooms_sold - previous.rooms_sold : null,
           pickupRevenue: previous ? latest.revenue_total - previous.revenue_total : null,
           previousExtractionDate: previous ? previous.extraction_date : null,
@@ -694,7 +692,7 @@ export default function PerformanceStructureDrilldownPage({
                     <th className="pb-3 pr-4">RevPAR</th>
                     <th className="pb-3 pr-4">Occupazione</th>
                     <th className="pb-3 pr-4">Camere occupate</th>
-                    <th className="pb-3 pr-4">Camere fuori disp.</th>
+                    <th className="pb-3 pr-4">Camere disponibili</th>
                     <th className="pb-3 pr-4">
                       Pickup RN
                       <InfoTooltip text="Differenza di camere vendute per questo giorno tra l'ultima estrazione disponibile e quella precedente." />
@@ -714,9 +712,7 @@ export default function PerformanceStructureDrilldownPage({
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revPar)}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatPercent(row.occupancy)}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsSold)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">
-                        {row.roomsUnavailable !== null ? formatNumber(row.roomsUnavailable) : ND}
-                      </td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsAvailable)}</td>
                       <td className="py-2 pr-4">
                         {row.pickupRooms === null ? (
                           <span className="text-[#2B2D2F]">{ND}</span>

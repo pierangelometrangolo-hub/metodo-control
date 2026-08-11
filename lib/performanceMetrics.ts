@@ -62,6 +62,12 @@ export function formatCurrency(value: number | null): string {
   });
 }
 
+export function formatSignedCurrency(value: number | null): string {
+  if (value === null) return ND;
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatCurrency(value)}`;
+}
+
 export function formatCurrencyCents(value: number | null): string {
   if (value === null) return ND;
   return value.toLocaleString("it-IT", {

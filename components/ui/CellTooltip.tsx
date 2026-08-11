@@ -26,7 +26,7 @@ export function CellTooltip({ trigger, children }: CellTooltipProps) {
   }, [open]);
 
   return (
-    <span className="group relative inline-block cursor-help">
+    <span className="group relative block w-full cursor-help">
       <span
         onClick={(e) => {
           e.stopPropagation();

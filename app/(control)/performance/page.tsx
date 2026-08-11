@@ -20,6 +20,7 @@ import {
   pad,
   formatCurrency,
   formatCurrencyCents,
+  formatSignedCurrency,
   formatPercent,
   formatDelta,
   occupancy,
@@ -37,6 +38,35 @@ type StructureOption = {
   id: string;
   name: string;
 };
+
+// Aggrega piu' righe budget (una per mese) in un'unica riga equivalente:
+// revenue_target e room_nights_available si sommano, occupancy_pct_target
+// diventa una media pesata sulle camere disponibili di ciascun mese, cosi'
+// che (occupancy_pct_target x room_nights_available) ricostruisca la somma
+// corretta delle camere-obiettivo mese per mese (non la somma di medie
+// slegate, che darebbe un risultato diverso e sbagliato). Su un singolo
+// mese (un solo elemento nell'array) restituisce esattamente la riga di
+// partenza: stessa funzione usata per la modalita' "Tutto l'anno" e per
+// quella mensile, senza bisogno di due percorsi di calcolo separati.
+function aggregateBudgetRows(rows: BudgetRow[]): BudgetRow {
+  const revenue_target = rows.reduce((sum, r) => sum + Number(r.revenue_target), 0);
+  const room_nights_available = rows.reduce((sum, r) => sum + Number(r.room_nights_available), 0);
+  const room_nights_sold_target = rows.reduce((sum, r) => sum + Number(r.room_nights_sold_target), 0);
+  const targetRoomsSoldSum = rows.reduce(
+    (sum, r) => sum + Number(r.occupancy_pct_target) * Number(r.room_nights_available),
+    0
+  );
+  const avgAdr = rows.length > 0 ? rows.reduce((sum, r) => sum + Number(r.adr), 0) / rows.length : 0;
+
+  return {
+    level: rows[0].level,
+    adr: avgAdr,
+    revenue_target,
+    room_nights_sold_target,
+    room_nights_available,
+    occupancy_pct_target: room_nights_available !== 0 ? targetRoomsSoldSum / room_nights_available : 0,
+  };
+}
 
 type StructureRowData = {
   structure: StructureOption;
@@ -68,6 +98,9 @@ export default function PerformanceOverviewPage() {
   const [loadError, setLoadError] = useState("");
 
   const isCurrentMonth = selectedYear === TODAY_YEAR && selectedMonth === TODAY_MONTH;
+  // selectedMonth === 0 e' il valore sentinella per "Tutto l'anno" (i mesi
+  // veri vanno da 1 a 12).
+  const isWholeYear = selectedMonth === 0;
 
   useEffect(() => {
     void checkAccess();
@@ -108,8 +141,35 @@ export default function PerformanceOverviewPage() {
     const structures = (structuresData as StructureOption[]) || [];
     const ids = structures.map((s) => s.id);
 
-    const { start, end, year, month } = monthRange(`${selectedYear}-${pad(selectedMonth)}-01`);
-    const lastYearMonth = monthRange(`${year - 1}-${pad(month)}-01`);
+    // "Tutto l'anno": stesso principio di aggregazione dei mesi, con range
+    // piu' ampio. L'anno corrente si ferma ad oggi (non ha senso includere
+    // prenotazioni OTB future di mesi non ancora iniziati nell'anno in
+    // corso), un anno passato copre invece l'intero 1 gen - 31 dic.
+    const currentMonthRange = monthRange(`${selectedYear}-${pad(isWholeYear ? 1 : selectedMonth)}-01`);
+    const start = isWholeYear ? `${selectedYear}-01-01` : currentMonthRange.start;
+    const end = isWholeYear
+      ? selectedYear === TODAY_YEAR
+        ? todayString()
+        : `${selectedYear}-12-31`
+      : currentMonthRange.end;
+
+    // Consuntivo anno prec.: sempre il periodo pieno e chiuso dell'anno
+    // precedente (a differenza del periodo corrente, un anno passato e'
+    // per definizione concluso, non va troncato ad "oggi").
+    const lastYearMonthRange = monthRange(`${selectedYear - 1}-${pad(isWholeYear ? 1 : selectedMonth)}-01`);
+    const lastYearStart = isWholeYear ? `${selectedYear - 1}-01-01` : lastYearMonthRange.start;
+    const lastYearEnd = isWholeYear ? `${selectedYear - 1}-12-31` : lastYearMonthRange.end;
+
+    // Mesi dell'anno selezionato effettivamente in ambito: 1 solo mese in
+    // modalita' mensile, fino al mese di oggi se l'anno corrente e' quello
+    // selezionato (non ha senso includere budget/SDLY di mesi futuri non
+    // ancora iniziati), altrimenti tutti e 12 per un anno passato concluso.
+    // Riusato sia per i budget dell'anno selezionato sia, spostato di un
+    // anno indietro, per il confronto SDLY "a parita' di anticipo".
+    const monthsInScope = isWholeYear
+      ? Array.from({ length: selectedYear === TODAY_YEAR ? TODAY_MONTH : 12 }, (_, i) => i + 1)
+      : [selectedMonth];
+
     // Confronto SDLY "a parità di anticipo": non l'OTB dell'ultima estrazione
     // disponibile per il mese dell'anno scorso (sarebbe il consuntivo finale,
     // già coperto dalla colonna "Consuntivo anno prec."), ma l'OTB di quel
@@ -119,7 +179,16 @@ export default function PerformanceOverviewPage() {
     const snapshotColumns =
       "structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const [monthRes, lastYearMonthRes, sdlyMonthRes, budgetsRes, importsRes] = await Promise.all([
+    const sdlyPromises = monthsInScope.map((m) =>
+      supabase.rpc("fn_month_snapshot_asof", {
+        p_structure_ids: ids,
+        p_period_year: selectedYear - 1,
+        p_period_month: m,
+        p_cutoff_date: sdlyCutoff,
+      })
+    );
+
+    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, ...sdlyResults] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -129,29 +198,26 @@ export default function PerformanceOverviewPage() {
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
-        .gte("stay_date", lastYearMonth.start)
-        .lte("stay_date", lastYearMonth.end)
+        .gte("stay_date", lastYearStart)
+        .lte("stay_date", lastYearEnd)
         .in("structure_id", ids),
-      supabase.rpc("fn_month_snapshot_asof", {
-        p_structure_ids: ids,
-        p_period_year: lastYearMonth.year,
-        p_period_month: lastYearMonth.month,
-        p_cutoff_date: sdlyCutoff,
-      }),
       supabase
         .from("v_budgets_current")
         .select("structure_id, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
-        .eq("season_year", year)
-        .eq("month", month)
+        .eq("season_year", selectedYear)
+        .in("month", monthsInScope)
         .in("structure_id", ids),
       supabase.from("bd_imports").select("extraction_date").in("structure_id", ids),
+      ...sdlyPromises,
     ]);
 
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (lastYearMonthRes.error) setLoadError(lastYearMonthRes.error.message);
-    if (sdlyMonthRes.error) setLoadError(sdlyMonthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (importsRes.error) setLoadError(importsRes.error.message);
+    sdlyResults.forEach((res) => {
+      if (res.error) setLoadError(res.error.message);
+    });
 
     setAllExtractionDates(new Set((importsRes.data || []).map((r) => r.extraction_date as string)));
 
@@ -171,34 +237,45 @@ export default function PerformanceOverviewPage() {
 
     // fn_month_snapshot_asof restituisce già un totale mensile risolto per
     // struttura (riga performance_monthly_snapshot se disponibile al cutoff,
-    // altrimenti somma dei giorni disponibili in performance_daily_snapshot):
-    // niente da sommare qui, un'unica riga per struttura o nessuna (ND).
-    const sdlyMonthRevenueByStructure = new Map<string, number>(
-      (sdlyMonthRes.data || []).map((r: { structure_id: string; revenue_total: number }) => [
-        r.structure_id,
-        Number(r.revenue_total),
-      ])
-    );
+    // altrimenti somma dei giorni disponibili in performance_daily_snapshot).
+    // In modalità "Tutto l'anno" si somma su più mesi: se anche un solo
+    // mese ha copertura si mostra la somma parziale, "ND" solo se nessun
+    // mese in ambito ha alcuna copertura per quella struttura.
+    const sdlySumByStructure = new Map<string, number>();
+    const sdlyCoverageByStructure = new Map<string, number>();
+    sdlyResults.forEach((res) => {
+      (res.data || []).forEach((r: { structure_id: string; revenue_total: number }) => {
+        sdlySumByStructure.set(r.structure_id, (sdlySumByStructure.get(r.structure_id) || 0) + Number(r.revenue_total));
+        sdlyCoverageByStructure.set(r.structure_id, (sdlyCoverageByStructure.get(r.structure_id) || 0) + 1);
+      });
+    });
 
-    const budgetsByStructure = new Map<string, BudgetRow[]>();
+    const budgetRowsByStructureLevel = new Map<string, BudgetRow[]>();
     (budgetsRes.data || []).forEach((r) => {
-      const list = budgetsByStructure.get(r.structure_id) || [];
+      const key = `${r.structure_id}::${r.level}`;
+      const list = budgetRowsByStructureLevel.get(key) || [];
       list.push(r as BudgetRow);
-      budgetsByStructure.set(r.structure_id, list);
+      budgetRowsByStructureLevel.set(key, list);
     });
 
     const nextRows: StructureRowData[] = structures.map((structure) => {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
       const lastYearMonthToDate = sumSnapshots(lastYearMonthByStructure.get(structure.id) || []);
-      const budgetsForMonth = budgetsByStructure.get(structure.id) || [];
+
+      const budgetsForMonth: BudgetRow[] = ["minimo", "realistico", "sfidante"]
+        .map((level) => budgetRowsByStructureLevel.get(`${structure.id}::${level}`))
+        .filter((rows): rows is BudgetRow[] => Boolean(rows && rows.length > 0))
+        .map((rows) => aggregateBudgetRows(rows));
 
       return {
         structure,
         monthRevenue: monthToDate.revenue,
         monthRoomsSold: monthToDate.roomsSold,
         monthRoomsAvailable: monthToDate.roomsAvailable,
-        sdlyMonthRevenue: sdlyMonthRevenueByStructure.get(structure.id) ?? null,
+        sdlyMonthRevenue: (sdlyCoverageByStructure.get(structure.id) || 0) > 0
+          ? sdlySumByStructure.get(structure.id) ?? 0
+          : null,
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
@@ -219,8 +296,10 @@ export default function PerformanceOverviewPage() {
     return null;
   }
 
-  const periodLabel = `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear}`;
-  const lastYearPeriodLabel = `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear - 1}`;
+  const periodLabel = isWholeYear ? `${selectedYear}` : `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear}`;
+  const lastYearPeriodLabel = isWholeYear
+    ? `${selectedYear - 1}`
+    : `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear - 1}`;
 
   return (
     <div className="space-y-6">
@@ -257,6 +336,7 @@ export default function PerformanceOverviewPage() {
                 onChange={(e) => setSelectedMonth(Number(e.target.value))}
                 className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
               >
+                <option value={0}>Tutto l'anno</option>
                 {MONTH_LABELS.map((label, i) => (
                   <option key={label} value={i + 1}>
                     {label}
@@ -310,7 +390,7 @@ export default function PerformanceOverviewPage() {
             {calendarOpen && (
               <div className="mt-3">
                 <Calendar
-                  value={`${selectedYear}-${pad(selectedMonth)}-01`}
+                  value={`${selectedYear}-${pad(isWholeYear ? 1 : selectedMonth)}-01`}
                   onChange={handleCalendarPick}
                   highlightedDates={allExtractionDates}
                   legendLabel="giorni con almeno un import reale registrato (qualunque struttura)"
@@ -336,8 +416,14 @@ export default function PerformanceOverviewPage() {
                 <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                   <th className="pb-3 pr-4">Struttura</th>
                   <th className="pb-3 pr-4">
-                    Revenue OTB (mese)
-                    <InfoTooltip text="Somma del revenue on-the-books di tutti i giorni del mese selezionato per cui esiste un dato importato. Valore parziale se il mese non è concluso o mancano import." />
+                    Revenue OTB ({isWholeYear ? "anno" : "mese"})
+                    <InfoTooltip
+                      text={
+                        isWholeYear
+                          ? "Somma del revenue on-the-books di tutti i giorni dell'anno selezionato (fino ad oggi se l'anno è quello corrente) per cui esiste un dato importato. Valore parziale se l'anno non è concluso o mancano import."
+                          : "Somma del revenue on-the-books di tutti i giorni del mese selezionato per cui esiste un dato importato. Valore parziale se il mese non è concluso o mancano import."
+                      }
+                    />
                   </th>
                   <th className="pb-3 pr-4">
                     OTB vs BUDGET
@@ -436,7 +522,13 @@ export default function PerformanceOverviewPage() {
                           >
                             <p>OTB {periodLabel}: {formatCurrency(row.monthRevenue)}</p>
                             <p>SDLY {lastYearPeriodLabel} (a parità di anticipo): {formatCurrency(row.sdlyMonthRevenue)}</p>
-                            <p className="mt-1">Variazione: {sdlyDelta.text}</p>
+                            <p className="mt-1">
+                              Differenza:{" "}
+                              {formatSignedCurrency(
+                                row.monthRevenue !== null ? row.monthRevenue - row.sdlyMonthRevenue : null
+                              )}
+                            </p>
+                            <p>Variazione: {sdlyDelta.text}</p>
                           </CellTooltip>
                         ) : (
                           <span className="text-[#6a6d70]">{ND}</span>
@@ -455,7 +547,13 @@ export default function PerformanceOverviewPage() {
                           >
                             <p>Revenue OTB {periodLabel}: {formatCurrency(row.monthRevenue)}</p>
                             <p>Consuntivo chiuso {lastYearPeriodLabel}: {formatCurrency(row.lastYearMonthRevenue)}</p>
-                            <p className="mt-1">Variazione: {lastYearDelta.text}</p>
+                            <p className="mt-1">
+                              Differenza:{" "}
+                              {formatSignedCurrency(
+                                row.monthRevenue !== null ? row.monthRevenue - row.lastYearMonthRevenue : null
+                              )}
+                            </p>
+                            <p>Variazione: {lastYearDelta.text}</p>
                           </CellTooltip>
                         ) : (
                           <span className="text-[#6a6d70]">{ND}</span>

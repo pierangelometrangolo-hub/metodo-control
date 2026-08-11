@@ -105,26 +105,31 @@ export function los(roomsSold: number | null, arrivals: number | null): number |
 
 export type AdrToGoal = { value: number | null; achieved: boolean };
 
-// ADR necessaria sulle camere ancora da vendere nel mese per raggiungere il
-// Budget Minimo: (Minimo - Revenue OTB mese) / (camere disponibili - camere
-// vendute). Se il Minimo e' gia' superato, "achieved" segnala che non serve
-// un'ADR minima (obiettivo raggiunto), non un valore numerico privo di senso.
+// ADR necessaria per raggiungere il Budget Minimo, sulle camere che
+// mancano rispetto all'OCCUPAZIONE TARGET del Minimo (non su tutte le
+// camere fisicamente ancora libere nel mese, che sarebbero molte di piu'
+// di quelle davvero previste dal budget): (Minimo - Revenue OTB mese) /
+// ((% Occupazione target del Minimo x Room night disponibili del Minimo)
+// - Room night gia' vendute). Se il Minimo e' gia' superato in revenue,
+// "achieved" segnala che non serve un'ADR minima (obiettivo raggiunto),
+// non un valore numerico privo di senso.
 export function adrToGoal(
   monthRevenue: number | null,
-  minimoTarget: number | null,
-  roomsSold: number | null,
-  roomsAvailable: number | null
+  minimoBudget: BudgetRow | undefined,
+  roomsSold: number | null
 ): AdrToGoal {
-  if (monthRevenue === null || minimoTarget === null || roomsSold === null || roomsAvailable === null) {
+  if (monthRevenue === null || !minimoBudget || roomsSold === null) {
     return { value: null, achieved: false };
   }
 
+  const minimoTarget = Number(minimoBudget.revenue_target);
   const remainingRevenue = minimoTarget - monthRevenue;
   if (remainingRevenue <= 0) {
     return { value: null, achieved: true };
   }
 
-  const remainingRooms = roomsAvailable - roomsSold;
+  const targetRoomsSold = Number(minimoBudget.occupancy_pct_target) * Number(minimoBudget.room_nights_available);
+  const remainingRooms = targetRoomsSold - roomsSold;
   if (remainingRooms <= 0) {
     return { value: null, achieved: false };
   }

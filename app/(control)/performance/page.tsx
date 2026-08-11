@@ -348,7 +348,7 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. Usa lo storico mensile se disponibile a quella data, altrimenti la somma dei giorni disponibili. 'ND' quando manca copertura per quel mese. Passa il mouse (o tocca) sulla riga per i valori assoluti." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Consuntivo anno prec.
+                    Consuntivo anno prec. vs OTB
                     <InfoTooltip text="Revenue totale chiuso dello stesso mese dell'anno precedente rispetto al mese selezionato, confrontato con il Revenue OTB del mese selezionato. 'ND' quando manca lo storico per quel mese. Passa il mouse (o tocca) sulla riga per i valori assoluti." />
                   </th>
                   <th className="pb-3 pr-4">
@@ -365,7 +365,7 @@ export default function PerformanceOverviewPage() {
                   </th>
                   <th className="pb-3 pr-4">
                     ADR TO GOAL
-                    <InfoTooltip text="ADR necessaria sulle camere ancora da vendere nel mese per raggiungere il Budget Minimo: (Budget Minimo − Revenue OTB) / camere ancora disponibili. '✓ Raggiunto' se il Minimo è già superato." />
+                    <InfoTooltip text="ADR necessaria per raggiungere il Budget Minimo, sulle camere che mancano rispetto all'occupazione target del Minimo: (Budget Minimo − Revenue OTB) / ((% Occupazione target × Room night disponibili del Minimo) − Room night già vendute). '✓ Raggiunto' se il Minimo è già superato in revenue." />
                   </th>
                   <th className="pb-3 pr-4">
                     Min.
@@ -393,7 +393,7 @@ export default function PerformanceOverviewPage() {
 
                   const sdlyDelta = formatDelta(row.monthRevenue, row.sdlyMonthRevenue);
                   const lastYearDelta = formatDelta(row.monthRevenue, row.lastYearMonthRevenue);
-                  const goal = adrToGoal(row.monthRevenue, minimoTarget, row.monthRoomsSold, row.monthRoomsAvailable);
+                  const goal = adrToGoal(row.monthRevenue, minimoBudget, row.monthRoomsSold);
 
                   return (
                     <tr

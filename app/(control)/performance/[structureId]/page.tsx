@@ -22,6 +22,8 @@ import {
   formatNumber,
   formatPercent,
   occupancy,
+  adr,
+  revPar,
   los,
   sumSnapshots,
   computePacingStatus,
@@ -33,6 +35,32 @@ const budgetLevelLabels: Record<string, string> = {
   minimo: "Minimo",
   realistico: "Realistico",
   sfidante: "Sfidante",
+};
+
+// CRM + Booking Engine (entrambe le varianti, stesso strumento) sono i
+// canali "diretti": nessuna commissione a OTA terze.
+const DIRECT_CHANNELS = new Set(["CRM", "Booking Engine", "Booking Engine - Advance"]);
+
+function directShareOf(data: ChannelRevenueDatum[]) {
+  if (data.length === 0) return { direct: null as number | null, total: null as number | null, share: null as number | null };
+  const total = data.reduce((sum, r) => sum + r.revenue, 0);
+  const direct = data.filter((r) => DIRECT_CHANNELS.has(r.channel)).reduce((sum, r) => sum + r.revenue, 0);
+  return { direct, total, share: total !== 0 ? direct / total : null };
+}
+
+// "YYYY-MM-DD" -> "DD/MM/YYYY" senza passare da Date (eviterebbe scarti di
+// fuso orario sulla mezzanotte UTC).
+function formatDateIt(dateStr: string): string {
+  return dateStr.split("-").reverse().join("/");
+}
+
+type DailyDetailRow = {
+  stayDate: string;
+  revenue: number;
+  adr: number | null;
+  revPar: number | null;
+  occupancy: number | null;
+  pickup: number | null;
 };
 
 const DEFAULT_MONTH = monthRange(todayString());
@@ -65,6 +93,7 @@ export default function PerformanceStructureDrilldownPage({
   const [structureName, setStructureName] = useState("");
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
+  const [lastAdrRevparUpdate, setLastAdrRevparUpdate] = useState<string | null>(null);
 
   // Stato "grezzo" del calendario: durante la selezione di un intervallo
   // rangeEnd puo' essere null (primo click gia' fatto, in attesa del
@@ -94,11 +123,18 @@ export default function PerformanceStructureDrilldownPage({
   const [budgets, setBudgets] = useState<BudgetRow[]>([]);
   const [hasChannelData, setHasChannelData] = useState(false);
   const [channelRevenue, setChannelRevenue] = useState<ChannelRevenueDatum[]>([]);
+  const [channelRevenueSdly, setChannelRevenueSdly] = useState<ChannelRevenueDatum[]>([]);
   const [hasNationalityData, setHasNationalityData] = useState(false);
   const [nationalityData, setNationalityData] = useState<NationalityDatum[]>([]);
 
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
+
+  // Dettaglio giornaliero: nascosto di default, caricato solo quando aperto
+  // (query aggiuntiva non necessaria finche' nessuno lo chiede).
+  const [dailyDetailOpen, setDailyDetailOpen] = useState(false);
+  const [dailyDetailRows, setDailyDetailRows] = useState<DailyDetailRow[] | null>(null);
+  const [dailyDetailLoading, setDailyDetailLoading] = useState(false);
 
   const periodStart = confirmedStart;
   const periodEnd = confirmedEnd;
@@ -160,6 +196,29 @@ export default function PerformanceStructureDrilldownPage({
       setAnomalyDates(new Set(anomalies));
     }
 
+    // Data dell'ultima estrazione che alimenta Revenue OTB/ADR/RevPAR/
+    // Occupazione (performance_daily_snapshot + performance_monthly_snapshot),
+    // non le fonti di Canali/Nazionalità che sono tabelle separate.
+    const [dailyLatestRes, monthlyLatestRes] = await Promise.all([
+      supabase
+        .from("performance_daily_snapshot")
+        .select("extraction_date")
+        .eq("structure_id", structureId)
+        .order("extraction_date", { ascending: false })
+        .limit(1),
+      supabase
+        .from("performance_monthly_snapshot")
+        .select("extraction_date")
+        .eq("structure_id", structureId)
+        .order("extraction_date", { ascending: false })
+        .limit(1),
+    ]);
+
+    const dailyLatest = dailyLatestRes.data?.[0]?.extraction_date as string | undefined;
+    const monthlyLatest = monthlyLatestRes.data?.[0]?.extraction_date as string | undefined;
+    const candidates = [dailyLatest, monthlyLatest].filter((d): d is string => Boolean(d));
+    setLastAdrRevparUpdate(candidates.length > 0 ? candidates.sort().at(-1)! : null);
+
     // Struttura mai popolata (es. Montecallini): la sezione va nascosta
     // del tutto, non solo mostrata con "ND" - controllo una volta sola,
     // non ad ogni cambio di periodo.
@@ -198,7 +257,7 @@ export default function PerformanceStructureDrilldownPage({
     const snapshotColumns =
       "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const [periodRes, sdlyRes, monthRes, budgetsRes, channelRes, nationalityRes] = await Promise.all([
+    const [periodRes, sdlyRes, monthRes, budgetsRes, channelRes, channelSdlyRes, nationalityRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -231,6 +290,16 @@ export default function PerformanceStructureDrilldownPage({
             .gte("period_start", periodStart)
             .lte("period_start", periodEnd)
         : Promise.resolve({ data: [], error: null }),
+      // Direct Booking Share vs anno precedente: stesso periodo SDLY gia'
+      // usato per gli altri confronti storici della pagina.
+      hasChannelData
+        ? supabase
+            .from("channel_revenue")
+            .select("channel, revenue_gross")
+            .eq("structure_id", structureId)
+            .gte("period_start", sdlyStart)
+            .lte("period_start", sdlyEnd)
+        : Promise.resolve({ data: [], error: null }),
       hasNationalityData
         ? supabase
             .from("guest_nationality")
@@ -246,6 +315,7 @@ export default function PerformanceStructureDrilldownPage({
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
+    if (channelSdlyRes.error) setLoadError(channelSdlyRes.error.message);
     if (nationalityRes.error) setLoadError(nationalityRes.error.message);
 
     setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
@@ -260,6 +330,13 @@ export default function PerformanceStructureDrilldownPage({
     });
     setChannelRevenue(Array.from(channelTotals, ([channel, revenue]) => ({ channel, revenue })));
 
+    const channelSdlyTotals = new Map<string, number>();
+    (channelSdlyRes.data || []).forEach((r) => {
+      const key = r.channel as string;
+      channelSdlyTotals.set(key, (channelSdlyTotals.get(key) || 0) + Number(r.revenue_gross));
+    });
+    setChannelRevenueSdly(Array.from(channelSdlyTotals, ([channel, revenue]) => ({ channel, revenue })));
+
     const nationalityTotals = new Map<string, number>();
     (nationalityRes.data || []).forEach((r) => {
       const key = r.nationality as string;
@@ -270,9 +347,70 @@ export default function PerformanceStructureDrilldownPage({
     setLoadingMetrics(false);
   }
 
+  useEffect(() => {
+    if (dailyDetailOpen) void loadDailyDetail();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dailyDetailOpen, periodStart, periodEnd]);
+
+  async function loadDailyDetail() {
+    setDailyDetailLoading(true);
+
+    const { data, error } = await supabase
+      .from("performance_daily_snapshot")
+      .select("stay_date, extraction_date, revenue_total, rooms_sold, rooms_available")
+      .eq("structure_id", structureId)
+      .gte("stay_date", periodStart)
+      .lte("stay_date", periodEnd)
+      .order("stay_date", { ascending: true })
+      .order("extraction_date", { ascending: false });
+
+    if (error) {
+      setLoadError(error.message);
+      setDailyDetailLoading(false);
+      return;
+    }
+
+    // Per ogni stay_date, le righe arrivano gia' ordinate per extraction_date
+    // decrescente: la prima e' l'ultima estrazione disponibile, la seconda
+    // (se c'e') e' l'upload precedente - il pickup e' la differenza tra le due.
+    const byDay = new Map<string, { revenue_total: number; rooms_sold: number; rooms_available: number }[]>();
+    (data || []).forEach((r) => {
+      const key = r.stay_date as string;
+      const list = byDay.get(key) || [];
+      list.push({
+        revenue_total: Number(r.revenue_total),
+        rooms_sold: Number(r.rooms_sold),
+        rooms_available: Number(r.rooms_available),
+      });
+      byDay.set(key, list);
+    });
+
+    const rows: DailyDetailRow[] = Array.from(byDay.entries())
+      .map(([stayDate, extractions]) => {
+        const latest = extractions[0];
+        const previous = extractions[1];
+
+        return {
+          stayDate,
+          revenue: latest.revenue_total,
+          adr: adr(latest.revenue_total, latest.rooms_sold),
+          revPar: revPar(latest.revenue_total, latest.rooms_available),
+          occupancy: occupancy(latest.rooms_sold, latest.rooms_available),
+          pickup: previous ? latest.revenue_total - previous.revenue_total : null,
+        };
+      })
+      .sort((a, b) => a.stayDate.localeCompare(b.stayDate));
+
+    setDailyDetailRows(rows);
+    setDailyDetailLoading(false);
+  }
+
   const periodAgg = useMemo(() => sumSnapshots(periodSnapshots), [periodSnapshots]);
   const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
   const monthToDate = useMemo(() => sumSnapshots(monthSnapshots), [monthSnapshots]);
+
+  const directShareCurrent = useMemo(() => directShareOf(channelRevenue), [channelRevenue]);
+  const directShareSdly = useMemo(() => directShareOf(channelRevenueSdly), [channelRevenueSdly]);
 
   const monthPacing = useMemo(
     () => computePacingStatus(monthToDate.revenue, budgets),
@@ -308,7 +446,14 @@ export default function PerformanceStructureDrilldownPage({
         eyebrow="Performance"
         title={structureName || "Struttura"}
         description="Confronto vs stesso periodo anno precedente (SDLY), mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
-      />
+      >
+        <p className="text-sm text-[#6a6d70]">
+          Ultimo aggiornamento dati (ADR/RevPAR):{" "}
+          <span className="font-medium text-[#2B2D2F]">
+            {lastAdrRevparUpdate ? formatDateIt(lastAdrRevparUpdate) : ND}
+          </span>
+        </p>
+      </PageHeader>
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <AppCard
@@ -390,6 +535,71 @@ export default function PerformanceStructureDrilldownPage({
       </div>
 
       <AppCard
+        title="Dettaglio giornaliero"
+        subtitle={`Una riga per ogni giorno di ${periodLabel} con dato disponibile`}
+      >
+        <button
+          type="button"
+          onClick={() => setDailyDetailOpen((prev) => !prev)}
+          className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+        >
+          {dailyDetailOpen ? "Nascondi dettaglio giornaliero ▲" : "Mostra dettaglio giornaliero ▾"}
+        </button>
+
+        {dailyDetailOpen && (
+          <div className="mt-4 overflow-x-auto">
+            {dailyDetailLoading ? (
+              <p className="text-sm text-[#6a6d70]">Caricamento...</p>
+            ) : dailyDetailRows && dailyDetailRows.length > 0 ? (
+              <table className="w-full min-w-[640px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                    <th className="pb-3 pr-4">Data</th>
+                    <th className="pb-3 pr-4">Revenue</th>
+                    <th className="pb-3 pr-4">ADR</th>
+                    <th className="pb-3 pr-4">RevPAR</th>
+                    <th className="pb-3 pr-4">Occupazione</th>
+                    <th className="pb-3">Pickup (vs ultimo upload)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyDetailRows.map((row) => (
+                    <tr key={row.stayDate} className="border-b border-[#f0ece6] last:border-0">
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatDateIt(row.stayDate)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revenue)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.adr)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revPar)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatPercent(row.occupancy)}</td>
+                      <td className="py-2 text-[#2B2D2F]">
+                        {row.pickup === null ? (
+                          ND
+                        ) : (
+                          <span
+                            className={
+                              row.pickup > 0
+                                ? "text-[#2f7d43]"
+                                : row.pickup < 0
+                                ? "text-[#8a3a3a]"
+                                : undefined
+                            }
+                          >
+                            {row.pickup >= 0 ? "+" : ""}
+                            {formatCurrency(row.pickup)}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-sm text-[#6a6d70]">{ND} — nessun dato per questo periodo.</p>
+            )}
+          </div>
+        )}
+      </AppCard>
+
+      <AppCard
         title="Mese in corso vs budget"
         subtitle={
           monthToDate.daysWithData > 0
@@ -456,12 +666,57 @@ export default function PerformanceStructureDrilldownPage({
       </AppCard>
 
       {hasChannelData && (
-        <AppCard
-          title="Revenue per canale"
-          subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
-        >
-          <ChannelRevenueBars data={channelRevenue} />
-        </AppCard>
+        <>
+          <AppCard
+            title="Revenue per canale"
+            subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
+          >
+            <ChannelRevenueBars data={channelRevenue} />
+          </AppCard>
+
+          <AppCard
+            title="Direct Booking Share"
+            subtitle={`Quota dei canali diretti (CRM + Booking Engine) sul totale, ${periodLabel}`}
+          >
+            <div className="flex flex-wrap items-end gap-10">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  Quota diretta
+                </p>
+                <p className="mt-2 text-[28px] font-semibold leading-none text-[#2B2D2F]">
+                  {directShareCurrent.share !== null ? formatPercent(directShareCurrent.share) : ND}
+                </p>
+                {directShareCurrent.direct !== null && directShareCurrent.total !== null && (
+                  <p className="mt-2 text-[12px] text-[#6a6d70]">
+                    {formatCurrency(directShareCurrent.direct)} su {formatCurrency(directShareCurrent.total)} totali
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  vs {sdlyLabel} (SDLY)
+                </p>
+                <p className="mt-2 text-[22px] font-semibold leading-none text-[#2B2D2F]">
+                  {directShareSdly.share !== null ? formatPercent(directShareSdly.share) : ND}
+                </p>
+                {directShareCurrent.share !== null && directShareSdly.share !== null && (
+                  <p
+                    className={`mt-2 text-[12px] ${
+                      directShareCurrent.share >= directShareSdly.share ? "text-[#2f7d43]" : "text-[#8a3a3a]"
+                    }`}
+                  >
+                    {directShareCurrent.share >= directShareSdly.share ? "+" : ""}
+                    {((directShareCurrent.share - directShareSdly.share) * 100).toLocaleString("it-IT", {
+                      maximumFractionDigits: 1,
+                    })}{" "}
+                    p.p.
+                  </p>
+                )}
+              </div>
+            </div>
+          </AppCard>
+        </>
       )}
 
       {hasNationalityData && (

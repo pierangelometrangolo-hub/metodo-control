@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { KpiCard } from "@/components/ui/KpiCard";
 import TrackingStats from "@/components/time-tracking/TrackingStats";
 import TrackingAnalysis from "@/components/time-tracking/TrackingAnalysis";
 import TrackingForm from "@/components/time-tracking/TrackingForm";
@@ -360,27 +361,23 @@ export default function TimeTrackingPage() {
         eyebrow="MeToDo Control"
         title="Tracking"
         description="Controllo operativo del tempo registrato con visione chiara su aree, riferimenti, operatori, attività e storico."
-      >
-        <div className="flex flex-wrap gap-3">
-          <div className="rounded-[16px] border border-[#dbe8eb] bg-[#f3f8fa] px-4 py-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#017A92]">
-              Registrazioni
-            </p>
-            <p className="mt-1 text-[22px] font-semibold leading-none text-[#2B2D2F]">
-              {entries.length}
-            </p>
-          </div>
+      />
 
-          <div className="rounded-[16px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#2B2D2F]">
-              Minuti
-            </p>
-            <p className="mt-1 text-[22px] font-semibold leading-none text-[#2B2D2F]">
-              {totalMinutes}
-            </p>
-          </div>
-        </div>
-      </PageHeader>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <KpiCard
+          title="Registrazioni"
+          value={entries.length.toString()}
+          note="Totale storico, tutte le date"
+          href="/time-tracking"
+          active
+        />
+        <KpiCard
+          title="Minuti"
+          value={totalMinutes.toString()}
+          note="Totale storico, tutte le date"
+          href="/time-tracking"
+        />
+      </div>
 
       <TrackingStats entries={entries} onOpenAnalysis={handleOpenAnalysis} />
 

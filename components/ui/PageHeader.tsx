@@ -5,6 +5,12 @@ type PageHeaderProps = {
   children?: React.ReactNode;
 };
 
+// Banner di pagina compatto (riga singola) - sostituisce il vecchio hero a
+// piena altezza che competeva visivamente con l'header globale sticky
+// (components/Header.tsx). "eyebrow" resta nella firma per non rompere i
+// chiamanti esistenti, ma non ha piu' una riga propria nel layout compatto:
+// e' reso solo come prefisso sr-only del titolo, cosi' l'informazione
+// resta disponibile per screen reader senza occupare spazio visivo.
 export function PageHeader({
   eyebrow,
   title,
@@ -12,38 +18,34 @@ export function PageHeader({
   children,
 }: PageHeaderProps) {
   return (
-    <section className="overflow-hidden rounded-[24px] border border-[#e7dfd8] bg-white shadow-[0_12px_30px_rgba(43,45,47,0.05)]">
-      <div className="grid md:grid-cols-[280px_1fr]">
-        <div className="flex min-h-[240px] items-center justify-center bg-gradient-to-br from-[#1f6d7d] via-[#017A92] to-[#2B2D2F] p-8">
-          <div className="flex h-[160px] w-[160px] items-center justify-center rounded-[24px] border border-white/20 bg-white/95 shadow-[0_12px_30px_rgba(43,45,47,0.18)] backdrop-blur">
-            <img
-              src="/images/metodo-logo.png"
-              alt="MeToDo logo"
-              className="h-[126px] w-auto object-contain"
-            />
-          </div>
-        </div>
+    <section className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#e7dfd8] bg-white px-4 py-[10px]">
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-teal">
+          <img
+            src="/images/metodo-logo.png"
+            alt=""
+            aria-hidden="true"
+            className="h-full w-full object-cover"
+          />
+        </span>
 
-        <div className="flex flex-col justify-center p-8 md:p-10">
-          {eyebrow && (
-            <p className="text-[11px] font-semibold uppercase tracking-[0.34em] text-[#017A92]">
-              {eyebrow}
-            </p>
-          )}
-
-          <h1 className="mt-3 font-serif text-[42px] leading-[46px] tracking-[-0.03em] text-[#2B2D2F] md:text-[48px] md:leading-[52px]">
+        <div className="min-w-0">
+          <h1 className="truncate text-[16px] font-semibold leading-tight text-[#2B2D2F]">
+            {eyebrow && <span className="sr-only">{eyebrow} — </span>}
             {title}
           </h1>
 
           {description && (
-            <p className="mt-5 max-w-3xl text-[16px] leading-8 text-[#5f6368]">
+            <p className="truncate text-[11.5px] leading-tight text-[#6a6d70]">
               {description}
             </p>
           )}
-
-          {children && <div className="mt-6">{children}</div>}
         </div>
       </div>
+
+      {children && (
+        <div className="flex flex-wrap items-center gap-3">{children}</div>
+      )}
     </section>
   );
 }

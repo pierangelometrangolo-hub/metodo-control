@@ -1,10 +1,10 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState, type CSSProperties } from "react";
-import Image from "next/image";
 import { useSearchParams } from "next/navigation";
 import { Noto_Serif, Open_Sans } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
+import { PageHeader } from "@/components/ui/PageHeader";
 
 const notoSerif = Noto_Serif({
   subsets: ["latin"],
@@ -1517,47 +1517,11 @@ function OperationsContent() {
           </section>
         )}
 
-        <section style={heroCardStyle}>
-<div style={{ display: "grid", gridTemplateColumns: "1fr", minHeight: "240px" }}>            <div style={heroLogoAreaStyle}>
-              <div style={logoBoxStyle}>
-                <div style={{ position: "relative", width: "140px", height: "140px" }}>
-                  <Image
-                    src="/images/metodo-logo.png"
-                    alt="Metodo logo"
-                    fill
-                    sizes="140px"
-                    style={{ objectFit: "contain" }}
-                    priority
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div style={heroContentStyle}>
-              <div>
-                <p style={eyebrowStyle}>Metodo Control</p>
-                <h1 className={notoSerif.className} style={heroTitleStyle}>
-                  Operations
-                </h1>
-                <p style={heroTextStyle}>
-                  Controllo operativo delle attività in corso con visione chiara su priorità,
-                  stato di avanzamento, owner, tempi e storico.
-                </p>
-              </div>
-
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
-                <div style={topBadgeStyle}>
-                  <span style={topBadgeLabelStyle}>Task attive</span>
-                  <strong style={topBadgeValueStyle}>{totalTasks}</strong>
-                </div>
-                <div style={topBadgeStyle}>
-                  <span style={topBadgeLabelStyle}>Ritardi</span>
-                  <strong style={topBadgeValueStyle}>{delayedTasks}</strong>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
+        <PageHeader
+          eyebrow="Metodo Control"
+          title="Operations"
+          description="Controllo operativo delle attività in corso con visione chiara su priorità, stato di avanzamento, owner, tempi e storico."
+        />
 
         <section style={kpiGridStyle}>
           {kpis.map((item) => {
@@ -2311,67 +2275,6 @@ const mainStyle: CSSProperties = {
   padding: "32px 20px 40px",
 };
 
-const heroCardStyle: CSSProperties = {
-  background: "#ffffff",
-  border: "1px solid #e7dfd8",
-  borderRadius: "24px",
-  overflow: "hidden",
-  marginBottom: "20px",
-  boxShadow: "0 12px 30px rgba(43,45,47,0.05)",
-};
-
-const heroLogoAreaStyle: CSSProperties = {
-  display: "flex",
-  background: "linear-gradient(135deg, #0b8aa5 0%, #1f6f84 45%, #2B2D2F 100%)",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: "32px",
-};
-
-const logoBoxStyle: CSSProperties = {
-  width: "170px",
-  height: "170px",
-  background: "#ffffff",
-  borderRadius: "20px",
-  boxShadow: "0 12px 30px rgba(43,45,47,0.12)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
-
-const heroContentStyle: CSSProperties = {
-  padding: "32px",
-  display: "flex",
-  flexDirection: "column",
-  justifyContent: "space-between",
-  gap: "18px",
-};
-
-const eyebrowStyle: CSSProperties = {
-  margin: 0,
-  fontSize: "12px",
-  fontWeight: 700,
-  letterSpacing: "0.18em",
-  textTransform: "uppercase",
-  color: "#017A92",
-};
-
-const heroTitleStyle: CSSProperties = {
-  margin: "10px 0 10px",
-  fontSize: "42px",
-  lineHeight: 1.05,
-  fontWeight: 700,
-  color: "#2B2D2F",
-};
-
-const heroTextStyle: CSSProperties = {
-  margin: 0,
-  maxWidth: "760px",
-  fontSize: "15px",
-  lineHeight: 1.7,
-  color: "#555555",
-};
-
 const kpiGridStyle: CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
@@ -2466,30 +2369,6 @@ const kpiValueStyle: CSSProperties = {
   fontSize: "34px",
   lineHeight: 1,
   fontWeight: 700,
-  color: "#2B2D2F",
-};
-
-const topBadgeStyle: CSSProperties = {
-  background: "#f7fbfc",
-  border: "1px solid #d8e8ec",
-  borderRadius: "16px",
-  padding: "12px 16px",
-  display: "flex",
-  flexDirection: "column",
-  gap: "4px",
-  minWidth: "130px",
-};
-
-const topBadgeLabelStyle: CSSProperties = {
-  fontSize: "11px",
-  textTransform: "uppercase",
-  letterSpacing: "0.12em",
-  color: "#017A92",
-  fontWeight: 700,
-};
-
-const topBadgeValueStyle: CSSProperties = {
-  fontSize: "22px",
   color: "#2B2D2F",
 };
 

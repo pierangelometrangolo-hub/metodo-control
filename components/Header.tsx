@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Home, CalendarCheck, Mail, MessageCircle, Bell } from "lucide-react";
+import { Home, CalendarCheck, Bell } from "lucide-react";
+import { SiBookingdotcom, SiExpedia, SiGmail, SiWhatsapp } from "react-icons/si";
 import HamburgerMenu from "@/components/HamburgerMenu";
 import { activatePushNotifications } from "@/lib/pushNotifications";
 
@@ -16,9 +17,22 @@ type HeaderIconProps = {
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  // Override solo del colore/size dell'icona (non del bottone che la
+  // contiene) - serve per l'eccezione WhatsApp: mantenere il verde di
+  // brand invece del monotono bianco usato da tutte le altre icone header.
+  iconClassName?: string;
 };
 
-function HeaderIcon({ label, icon: Icon, href, external, onClick, disabled, className = "" }: HeaderIconProps) {
+function HeaderIcon({
+  label,
+  icon: Icon,
+  href,
+  external,
+  onClick,
+  disabled,
+  className = "",
+  iconClassName = "",
+}: HeaderIconProps) {
   const classes = `flex h-9 w-9 items-center justify-center rounded-lg text-white/90 transition hover:bg-white/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-50 ${className}`;
 
   if (href) {
@@ -31,14 +45,14 @@ function HeaderIcon({ label, icon: Icon, href, external, onClick, disabled, clas
         rel={external ? "noopener noreferrer" : undefined}
         className={classes}
       >
-        <Icon className="h-5 w-5" />
+        <Icon className={`h-5 w-5 ${iconClassName}`} />
       </Link>
     );
   }
 
   return (
     <button type="button" title={label} aria-label={label} onClick={onClick} disabled={disabled} className={classes}>
-      <Icon className="h-5 w-5" />
+      <Icon className={`h-5 w-5 ${iconClassName}`} />
     </button>
   );
 }
@@ -82,6 +96,25 @@ export function Header() {
 
         <div className="flex shrink-0 items-center gap-1">
           <HeaderIcon href="/dashboard" label="Home" icon={Home} className="hidden md:flex" />
+
+          {/* Extranet: su desktop vivono qui (icone dirette in barra); su
+              mobile l'header resta collassato, restano raggiungibili solo
+              dal drawer HamburgerMenu (sezione Extranet, nascosta li' solo
+              da md in su - vedi HamburgerMenu.tsx). */}
+          <HeaderIcon
+            href="https://admin.booking.com/"
+            label="Booking.com Extranet"
+            icon={SiBookingdotcom}
+            external
+            className="hidden md:flex"
+          />
+          <HeaderIcon
+            href="https://apps.expediapartnercentral.com/"
+            label="Expedia Partner Central"
+            icon={SiExpedia}
+            external
+            className="hidden md:flex"
+          />
           <HeaderIcon
             href={BOOKING_DESIGNER_URL}
             label="Booking Designer"
@@ -92,16 +125,20 @@ export function Header() {
           <HeaderIcon
             href="https://mail.google.com/"
             label="Gmail"
-            icon={Mail}
+            icon={SiGmail}
             external
             className="hidden md:flex"
           />
           <HeaderIcon
             href="https://web.whatsapp.com/"
             label="WhatsApp Business"
-            icon={MessageCircle}
+            icon={SiWhatsapp}
             external
             className="hidden md:flex"
+            // Eccezione esplicita (vedi commento su iconClassName): il
+            // monogramma WhatsApp in monotono bianco perde leggibilita',
+            // qui resta il verde di brand originale.
+            iconClassName="text-[#25D366]"
           />
           <HeaderIcon
             label="Notifiche"

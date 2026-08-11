@@ -153,23 +153,31 @@ export default function HamburgerMenu() {
             })}
           </ul>
 
-          <p className="mb-2 mt-6 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6a6d70]">
-            Extranet
-          </p>
-          <ul className="space-y-1">
-            {extranetLinks.map((item) => (
-              <li key={item.label}>
-                <a
-                  href={item.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex h-11 items-center rounded-lg px-3 text-sm font-medium text-[#4f5254] transition hover:bg-white"
-                >
-                  {item.label}
-                </a>
-              </li>
-            ))}
-          </ul>
+          {/* Su desktop questi link vivono anche come icone dirette
+              nell'header globale (components/Header.tsx) - ridondante
+              tenerli anche qui, quindi il gruppo sparisce da md in su.
+              Su mobile l'header resta collassato (logo + notifiche +
+              trigger menu), percio' qui restano l'unico punto d'accesso e
+              il gruppo va tenuto visibile. */}
+          <div className="md:hidden">
+            <p className="mb-2 mt-6 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6a6d70]">
+              Extranet
+            </p>
+            <ul className="space-y-1">
+              {extranetLinks.map((item) => (
+                <li key={item.label}>
+                  <a
+                    href={item.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex h-11 items-center rounded-lg px-3 text-sm font-medium text-[#4f5254] transition hover:bg-white"
+                  >
+                    {item.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
 
           <p className="mb-2 mt-6 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6a6d70]">
             Comunicazioni

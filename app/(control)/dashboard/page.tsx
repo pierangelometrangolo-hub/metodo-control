@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabaseClient";
 import { KpiCard } from "@/components/ui/KpiCard";
+import { PageHeader } from "@/components/ui/PageHeader";
 import { canViewModule } from "@/lib/permissions";
 import { todayString } from "@/lib/performanceMetrics";
 
@@ -446,34 +447,11 @@ export default function DashboardPage() {
 
   return (
     <>
-      <section className="overflow-hidden rounded-[24px] border border-[#e7dfd8] bg-white shadow-[0_12px_30px_rgba(43,45,47,0.05)]">
-        <div className="grid md:grid-cols-[320px_1fr]">
-          <div className="flex min-h-[260px] items-center justify-center bg-gradient-to-br from-[#017A92] to-[#2B2D2F] p-8">
-            <div className="flex h-[140px] w-[140px] items-center justify-center rounded-[20px] border border-white/20 bg-white shadow-[0_12px_30px_rgba(43,45,47,0.12)]">
-              <img
-                src="/images/metodo-logo.png"
-                alt="MeToDo logo"
-                className="h-[92px] w-auto object-contain"
-              />
-            </div>
-          </div>
-
-          <div className="p-8 md:p-10">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#017A92]">
-              Dashboard
-            </p>
-
-            <h1 className="mt-3 text-4xl tracking-tight text-[#2B2D2F] md:text-5xl">
-              Overview generale
-            </h1>
-
-            <p className="mt-4 max-w-3xl text-sm leading-7 text-[#555555] md:text-[15px]">
-              Snapshot sintetico di attività operative e tempo registrato, con
-              accesso rapido agli ambienti principali del sistema.
-            </p>
-          </div>
-        </div>
-      </section>
+      <PageHeader
+        eyebrow="Dashboard"
+        title="Overview generale"
+        description="Snapshot sintetico di attività operative e tempo registrato, con accesso rapido agli ambienti principali del sistema."
+      />
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {overviewCards.map((card) => (

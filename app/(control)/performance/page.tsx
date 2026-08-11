@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
+import { CellTooltip } from "@/components/ui/CellTooltip";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
@@ -18,11 +19,13 @@ import {
   monthRange,
   pad,
   formatCurrency,
+  formatCurrencyCents,
   formatPercent,
   formatDelta,
   occupancy,
   adr,
   revPar,
+  adrToGoal,
   computePacingStatus,
   pacingLabels,
   pacingDotClasses,
@@ -217,6 +220,7 @@ export default function PerformanceOverviewPage() {
   }
 
   const periodLabel = `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear}`;
+  const lastYearPeriodLabel = `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear - 1}`;
 
   return (
     <div className="space-y-6">
@@ -327,7 +331,7 @@ export default function PerformanceOverviewPage() {
           <p className="text-sm text-[#6a6d70]">Caricamento...</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1400px] border-collapse text-sm">
+            <table className="w-full min-w-[1500px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                   <th className="pb-3 pr-4">Struttura</th>
@@ -336,16 +340,16 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Somma del revenue on-the-books di tutti i giorni del mese selezionato per cui esiste un dato importato. Valore parziale se il mese non è concluso o mancano import." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Ritmo vs budget
-                    <InfoTooltip text="Confronta il Revenue OTB del mese selezionato con i tre livelli di budget dello stesso mese: rosso sotto Minimo, giallo tra Minimo e Realistico, verde sopra Realistico. Il dettaglio mostra la distanza in euro dal Budget Minimo." />
+                    OTB vs BUDGET
+                    <InfoTooltip text="Confronta il Revenue OTB del mese selezionato con i tre livelli di budget dello stesso mese: rosso sotto Minimo, giallo tra Minimo e Realistico, verde sopra Realistico. Passa il mouse (o tocca) sulla riga per il dettaglio in euro dal Budget Minimo." />
                   </th>
                   <th className="pb-3 pr-4">
                     SDLY
-                    <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. Usa lo storico mensile se disponibile a quella data, altrimenti la somma dei giorni disponibili. 'ND' quando manca copertura per quel mese." />
+                    <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. Usa lo storico mensile se disponibile a quella data, altrimenti la somma dei giorni disponibili. 'ND' quando manca copertura per quel mese. Passa il mouse (o tocca) sulla riga per i valori assoluti." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Consuntivo anno prec. vs OTB
-                    <InfoTooltip text="Revenue totale chiuso dello stesso mese dell'anno precedente rispetto al mese selezionato, confrontato con il Revenue OTB del mese selezionato. 'ND' quando manca lo storico per quel mese." />
+                    Consuntivo anno prec.
+                    <InfoTooltip text="Revenue totale chiuso dello stesso mese dell'anno precedente rispetto al mese selezionato, confrontato con il Revenue OTB del mese selezionato. 'ND' quando manca lo storico per quel mese. Passa il mouse (o tocca) sulla riga per i valori assoluti." />
                   </th>
                   <th className="pb-3 pr-4">
                     ADR
@@ -360,16 +364,20 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Somma camere vendute diviso somma camere disponibili sull'intero mese selezionato — numeratore e denominatore coprono sempre lo stesso periodo." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Budget Minimo
-                    <InfoTooltip text="Revenue target dello scenario Minimo per il mese selezionato, da v_budgets_current." />
+                    ADR TO GOAL
+                    <InfoTooltip text="ADR necessaria sulle camere ancora da vendere nel mese per raggiungere il Budget Minimo: (Budget Minimo − Revenue OTB) / camere ancora disponibili. '✓ Raggiunto' se il Minimo è già superato." />
                   </th>
                   <th className="pb-3 pr-4">
-                    Budget Realistico
-                    <InfoTooltip text="Revenue target dello scenario Realistico per il mese selezionato, da v_budgets_current." />
+                    Min.
+                    <InfoTooltip text="Budget Minimo — revenue target dello scenario Minimo per il mese selezionato, da v_budgets_current." />
+                  </th>
+                  <th className="pb-3 pr-4">
+                    Real.
+                    <InfoTooltip text="Budget Realistico — revenue target dello scenario Realistico per il mese selezionato, da v_budgets_current." />
                   </th>
                   <th className="pb-3">
-                    Budget Sfidante
-                    <InfoTooltip text="Revenue target dello scenario Sfidante per il mese selezionato, da v_budgets_current." />
+                    Sfid.
+                    <InfoTooltip text="Budget Sfidante — revenue target dello scenario Sfidante per il mese selezionato, da v_budgets_current." />
                   </th>
                 </tr>
               </thead>
@@ -383,6 +391,10 @@ export default function PerformanceOverviewPage() {
                   const minimoTarget = minimoBudget ? Number(minimoBudget.revenue_target) : null;
                   const detail = pacingDetail(row.monthRevenue, minimoTarget);
 
+                  const sdlyDelta = formatDelta(row.monthRevenue, row.sdlyMonthRevenue);
+                  const lastYearDelta = formatDelta(row.monthRevenue, row.lastYearMonthRevenue);
+                  const goal = adrToGoal(row.monthRevenue, minimoTarget, row.monthRoomsSold, row.monthRoomsAvailable);
+
                   return (
                     <tr
                       key={row.structure.id}
@@ -392,38 +404,77 @@ export default function PerformanceOverviewPage() {
                       <td className="py-3 pr-4 font-semibold text-[#2B2D2F]">{row.structure.name}</td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
-                        {row.monthRevenue !== null ? formatCurrency(row.monthRevenue) : ND}
+                        {row.monthRevenue !== null ? formatCurrencyCents(row.monthRevenue) : ND}
                       </td>
 
                       <td className="py-3 pr-4">
                         {row.pacing ? (
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className={`h-2.5 w-2.5 rounded-full ${pacingDotClasses[row.pacing]}`} />
-                              <span className="text-[#2B2D2F]">{pacingLabels[row.pacing]}</span>
-                            </div>
-                            {detail && <p className="mt-1 text-[11px] text-[#6a6d70]">{detail}</p>}
-                          </div>
+                          <CellTooltip
+                            trigger={
+                              <div className="flex items-center gap-2">
+                                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pacingDotClasses[row.pacing]}`} />
+                                <span className="text-[#2B2D2F]">{pacingLabels[row.pacing]}</span>
+                              </div>
+                            }
+                          >
+                            {detail || "Nessun dettaglio disponibile."}
+                          </CellTooltip>
                         ) : (
                           <span className="text-[#6a6d70]">{ND}</span>
                         )}
                       </td>
 
-                      <MetricCell
-                        current={formatCurrency(row.sdlyMonthRevenue)}
-                        delta={formatDelta(row.monthRevenue, row.sdlyMonthRevenue)}
-                        deltaLabel="vs SDLY mese"
-                      />
+                      <td className="py-3 pr-4">
+                        {row.sdlyMonthRevenue !== null ? (
+                          <CellTooltip
+                            trigger={
+                              <span className="text-[#2B2D2F]">
+                                {formatCurrency(row.sdlyMonthRevenue)}{" "}
+                                <span className={sdlyDelta.colorClass}>({sdlyDelta.text})</span>
+                              </span>
+                            }
+                          >
+                            <p>OTB {periodLabel}: {formatCurrency(row.monthRevenue)}</p>
+                            <p>SDLY {lastYearPeriodLabel} (a parità di anticipo): {formatCurrency(row.sdlyMonthRevenue)}</p>
+                            <p className="mt-1">Variazione: {sdlyDelta.text}</p>
+                          </CellTooltip>
+                        ) : (
+                          <span className="text-[#6a6d70]">{ND}</span>
+                        )}
+                      </td>
 
-                      <MetricCell
-                        current={formatCurrency(row.lastYearMonthRevenue)}
-                        delta={formatDelta(row.monthRevenue, row.lastYearMonthRevenue)}
-                        deltaLabel="vs mese-anno-scorso"
-                      />
+                      <td className="py-3 pr-4">
+                        {row.lastYearMonthRevenue !== null ? (
+                          <CellTooltip
+                            trigger={
+                              <span className="text-[#2B2D2F]">
+                                {formatCurrency(row.lastYearMonthRevenue)}{" "}
+                                <span className={lastYearDelta.colorClass}>({lastYearDelta.text})</span>
+                              </span>
+                            }
+                          >
+                            <p>Revenue OTB {periodLabel}: {formatCurrency(row.monthRevenue)}</p>
+                            <p>Consuntivo chiuso {lastYearPeriodLabel}: {formatCurrency(row.lastYearMonthRevenue)}</p>
+                            <p className="mt-1">Variazione: {lastYearDelta.text}</p>
+                          </CellTooltip>
+                        ) : (
+                          <span className="text-[#6a6d70]">{ND}</span>
+                        )}
+                      </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">{formatCurrency(monthAdr)}</td>
                       <td className="py-3 pr-4 text-[#2B2D2F]">{formatCurrency(monthRevPar)}</td>
                       <td className="py-3 pr-4 text-[#2B2D2F]">{formatPercent(monthOcc)}</td>
+
+                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                        {goal.achieved ? (
+                          <span className="text-[#2f7d43]">✓ Raggiunto</span>
+                        ) : goal.value !== null ? (
+                          formatCurrency(goal.value)
+                        ) : (
+                          ND
+                        )}
+                      </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
                         {(() => {
@@ -452,24 +503,5 @@ export default function PerformanceOverviewPage() {
         )}
       </AppCard>
     </div>
-  );
-}
-
-function MetricCell({
-  current,
-  delta,
-  deltaLabel,
-}: {
-  current: string;
-  delta: { text: string; colorClass: string };
-  deltaLabel: string;
-}) {
-  return (
-    <td className="py-3 pr-4">
-      <p className="text-[#2B2D2F]">{current}</p>
-      <p className={`text-[11px] ${delta.colorClass}`}>
-        {delta.text} {deltaLabel}
-      </p>
-    </td>
   );
 }

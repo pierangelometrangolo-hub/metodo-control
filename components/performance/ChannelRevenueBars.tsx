@@ -24,6 +24,9 @@ const CHANNEL_LOGOS: Record<string, string> = {
   CRM: "/images/logos/booking-designer.png",
   "Booking Engine": "/images/logos/booking-designer.png",
   "Booking Engine - Advance": "/images/logos/booking-designer.png",
+  "Imperatore Travel": "/images/logos/imperatore.png",
+  SunHotels: "/images/logos/sunhotels.png",
+  HotelBeds: "/images/logos/hotelbeds.jpg",
 };
 
 // Fallback per canali senza logo disponibile (es. "Imperatore Travel"):
@@ -86,10 +89,14 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
         const barWidthPct =
           isNegative || total <= 0 ? 0 : Math.min(100, Math.max(2, (row.revenue / total) * 100));
         const percentOfTotal = total !== 0 ? (row.revenue / total) * 100 : 0;
-        // Il badge segue la punta della barra, ma resta a un margine dai
-        // bordi della corsia (che non ha overflow-hidden) cosi' il
-        // cerchio da 24px non viene mai tagliato via a inizio/fine corsia.
-        const badgeLeftPct = isNegative ? 4 : Math.min(Math.max(barWidthPct, 6), 94);
+        // Il badge segue esattamente la punta della barra (stessa
+        // percentuale usata per la sua larghezza) - un pavimento minimo
+        // separato lo staccava dalla barra quando questa era piccola
+        // (es. barWidthPct=2% ma badge forzato a 6%, visibilmente a
+        // destra del bordo reale). La corsia non ha overflow-hidden,
+        // quindi il cerchio da 24px non viene mai tagliato: serve solo
+        // un tetto per non sovrapporsi al testo dell'importo a destra.
+        const badgeLeftPct = isNegative ? 4 : Math.min(barWidthPct, 94);
 
         return (
           <div key={row.channel} className="flex items-center gap-3">

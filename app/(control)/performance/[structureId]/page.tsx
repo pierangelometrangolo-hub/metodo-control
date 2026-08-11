@@ -9,7 +9,6 @@ import { AppCard } from "@/components/ui/AppCard";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule } from "@/lib/permissions";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
-import { PickupChart, PickupPoint } from "@/components/performance/PickupChart";
 import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import {
@@ -93,7 +92,6 @@ export default function PerformanceStructureDrilldownPage({
   const [sdlySnapshots, setSdlySnapshots] = useState<SnapshotRow[]>([]);
   const [monthSnapshots, setMonthSnapshots] = useState<SnapshotRow[]>([]);
   const [budgets, setBudgets] = useState<BudgetRow[]>([]);
-  const [pickupPoints, setPickupPoints] = useState<PickupPoint[]>([]);
   const [hasChannelData, setHasChannelData] = useState(false);
   const [channelRevenue, setChannelRevenue] = useState<ChannelRevenueDatum[]>([]);
   const [hasNationalityData, setHasNationalityData] = useState(false);
@@ -200,7 +198,7 @@ export default function PerformanceStructureDrilldownPage({
     const snapshotColumns =
       "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const [periodRes, sdlyRes, monthRes, budgetsRes, pickupRes, channelRes, nationalityRes] = await Promise.all([
+    const [periodRes, sdlyRes, monthRes, budgetsRes, channelRes, nationalityRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -225,12 +223,6 @@ export default function PerformanceStructureDrilldownPage({
         .eq("structure_id", structureId)
         .eq("season_year", year)
         .eq("month", month),
-      supabase
-        .from("performance_daily_snapshot")
-        .select("extraction_date, revenue_total")
-        .eq("structure_id", structureId)
-        .gte("stay_date", periodStart)
-        .lte("stay_date", periodEnd),
       hasChannelData
         ? supabase
             .from("channel_revenue")
@@ -253,7 +245,6 @@ export default function PerformanceStructureDrilldownPage({
     if (sdlyRes.error) setLoadError(sdlyRes.error.message);
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
-    if (pickupRes.error) setLoadError(pickupRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
     if (nationalityRes.error) setLoadError(nationalityRes.error.message);
 
@@ -261,21 +252,6 @@ export default function PerformanceStructureDrilldownPage({
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
     setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
     setBudgets((budgetsRes.data as BudgetRow[]) || []);
-
-    // Un punto per extraction_date: per un giorno singolo coincide con le
-    // righe stesse, per un intervallo/mese somma il revenue di tutti i
-    // giorni che condividono la stessa estrazione (stessa logica,
-    // generalizzata).
-    const pickupMap = new Map<string, number>();
-    (pickupRes.data || []).forEach((r) => {
-      const key = r.extraction_date as string;
-      pickupMap.set(key, (pickupMap.get(key) || 0) + Number(r.revenue_total));
-    });
-    setPickupPoints(
-      Array.from(pickupMap, ([extractionDate, revenue]) => ({ extractionDate, revenue })).sort((a, b) =>
-        a.extractionDate.localeCompare(b.extractionDate)
-      )
-    );
 
     const channelTotals = new Map<string, number>();
     (channelRes.data || []).forEach((r) => {
@@ -331,7 +307,7 @@ export default function PerformanceStructureDrilldownPage({
       <PageHeader
         eyebrow="Performance"
         title={structureName || "Struttura"}
-        description="Confronto vs stesso periodo anno precedente (SDLY), mese in corso vs budget, pickup revenue. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
+        description="Confronto vs stesso periodo anno precedente (SDLY), mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
       />
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
@@ -409,13 +385,6 @@ export default function PerformanceStructureDrilldownPage({
                 </div>
               </>
             )}
-          </AppCard>
-
-          <AppCard
-            title={isSingleDay ? "Pickup revenue per questo giorno" : "Pickup revenue per il periodo selezionato"}
-            subtitle="Come è cresciuto il revenue on-the-books nelle ultime estrazioni disponibili"
-          >
-            <PickupChart points={pickupPoints} />
           </AppCard>
         </div>
       </div>

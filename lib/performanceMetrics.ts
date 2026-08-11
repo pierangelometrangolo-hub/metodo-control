@@ -62,6 +62,17 @@ export function formatCurrency(value: number | null): string {
   });
 }
 
+export function formatCurrencyCents(value: number | null): string {
+  if (value === null) return ND;
+  return value.toLocaleString("it-IT", {
+    style: "currency",
+    currency: "EUR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    useGrouping: "always",
+  });
+}
+
 export function formatNumber(value: number | null, digits = 0): string {
   if (value === null) return ND;
   return value.toLocaleString("it-IT", { maximumFractionDigits: digits, useGrouping: "always" });
@@ -90,6 +101,35 @@ export function revPar(revenue: number | null, roomsAvailable: number | null): n
 export function los(roomsSold: number | null, arrivals: number | null): number | null {
   if (roomsSold === null || arrivals === null || arrivals === 0) return null;
   return roomsSold / arrivals;
+}
+
+export type AdrToGoal = { value: number | null; achieved: boolean };
+
+// ADR necessaria sulle camere ancora da vendere nel mese per raggiungere il
+// Budget Minimo: (Minimo - Revenue OTB mese) / (camere disponibili - camere
+// vendute). Se il Minimo e' gia' superato, "achieved" segnala che non serve
+// un'ADR minima (obiettivo raggiunto), non un valore numerico privo di senso.
+export function adrToGoal(
+  monthRevenue: number | null,
+  minimoTarget: number | null,
+  roomsSold: number | null,
+  roomsAvailable: number | null
+): AdrToGoal {
+  if (monthRevenue === null || minimoTarget === null || roomsSold === null || roomsAvailable === null) {
+    return { value: null, achieved: false };
+  }
+
+  const remainingRevenue = minimoTarget - monthRevenue;
+  if (remainingRevenue <= 0) {
+    return { value: null, achieved: true };
+  }
+
+  const remainingRooms = roomsAvailable - roomsSold;
+  if (remainingRooms <= 0) {
+    return { value: null, achieved: false };
+  }
+
+  return { value: remainingRevenue / remainingRooms, achieved: false };
 }
 
 export function computePacingStatus(

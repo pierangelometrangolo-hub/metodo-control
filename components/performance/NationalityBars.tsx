@@ -18,20 +18,29 @@ function formatPercent1(value: number) {
   return `${value.toLocaleString("it-IT", { maximumFractionDigits: 1, minimumFractionDigits: 1 })}%`;
 }
 
-function NationalityBadge({ nationality, leftPct }: { nationality: string; leftPct: number }) {
-  const flag = nationality === OTHERS_LABEL ? null : flagForNationality(nationality);
+const OTHERS_ICON = "/images/logos/terra.jpg";
 
-  // "Altri" è un aggregato, non una nazione: nessuna bandiera. Stesso
-  // discorso per una nazionalità non ancora mappata (fallback silenzioso,
-  // mai un'icona rotta) - in entrambi i casi il badge resta vuoto ma
+function NationalityBadge({ nationality, leftPct }: { nationality: string; leftPct: number }) {
+  const isOthers = nationality === OTHERS_LABEL;
+  const flag = isOthers ? null : flagForNationality(nationality);
+
+  // "Altri" è un aggregato, non una nazione: niente bandiera, ma un'icona
+  // "globo" dedicata (terra.jpg) invece di restare vuoto. Una nazionalità
+  // non ancora mappata resta invece silenziosamente senza badge (mai
+  // un'icona rotta) - in entrambi i casi lo spazio del badge resta
   // presente, per non spostare la formattazione delle colonne accanto.
   return (
     <span
-      className="absolute top-1/2 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-white text-[14px] leading-none shadow-[0_0_0_1px_rgba(43,45,47,0.12)]"
+      className="absolute top-1/2 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center overflow-hidden rounded-full border-2 border-white bg-white text-[14px] leading-none shadow-[0_0_0_1px_rgba(43,45,47,0.12)]"
       style={{ left: `${leftPct}%` }}
       title={nationality}
     >
-      {flag}
+      {isOthers ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={OTHERS_ICON} alt={nationality} className="h-full w-full object-cover" />
+      ) : (
+        flag
+      )}
     </span>
   );
 }
@@ -60,7 +69,10 @@ export function NationalityBars({ data }: NationalityBarsProps) {
       {rows.map((row) => {
         const barWidthPct = total > 0 ? Math.min(100, Math.max(2, (row.presences / total) * 100)) : 0;
         const percentOfTotal = total !== 0 ? (row.presences / total) * 100 : 0;
-        const badgeLeftPct = Math.min(Math.max(barWidthPct, 6), 94);
+        // Stesso fix di ChannelRevenueBars: il badge segue esattamente la
+        // punta della barra, nessun pavimento minimo che lo stacchi dal
+        // bordo reale quando la barra è piccola.
+        const badgeLeftPct = Math.min(barWidthPct, 94);
 
         return (
           <div key={row.nationality} className="flex items-center gap-3">

@@ -79,7 +79,6 @@ type StructureRowData = {
   lastYearMonthRevenue: number | null;
   budgetsForMonth: BudgetRow[];
   pacing: ReturnType<typeof computePacingStatus>;
-  lastExtractionDate: string | null;
 };
 
 // "YYYY-MM-DD" -> "DD/MM/YYYY" senza passare da Date (eviterebbe scarti di
@@ -112,6 +111,11 @@ export default function PerformanceOverviewPage() {
   const [rows, setRows] = useState<StructureRowData[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  // Data dell'ultimo upload piu' recente tra tutte le strutture - non una
+  // colonna per riga (le strutture hanno date diverse, es. Montecallini
+  // aggiornata via inserimento manuale con cadenza propria), ma un'unica
+  // riga di sintesi nella descrizione, stesso trattamento per tutte.
+  const [latestUploadDate, setLatestUploadDate] = useState<string | null>(null);
 
   const isCurrentMonth = selectedYear === TODAY_YEAR && selectedMonth === TODAY_MONTH;
   // selectedMonth === 0 e' il valore sentinella per "Tutto l'anno" (i mesi
@@ -285,6 +289,11 @@ export default function PerformanceOverviewPage() {
       ])
     );
 
+    // "YYYY-MM-DD" ordina correttamente anche come stringa, non serve
+    // passare da Date per trovare la piu' recente tra le strutture.
+    const latestDate = Array.from(lastExtractionByStructure.values()).sort().pop();
+    setLatestUploadDate(latestDate ?? null);
+
     const nextRows: StructureRowData[] = structures.map((structure) => {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
@@ -306,7 +315,6 @@ export default function PerformanceOverviewPage() {
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
-        lastExtractionDate: lastExtractionByStructure.get(structure.id) ?? null,
       };
     });
 
@@ -431,7 +439,9 @@ export default function PerformanceOverviewPage() {
 
       <AppCard
         title="Strutture"
-        subtitle={`Dati riferiti a ${periodLabel}${isCurrentMonth ? " (mese corrente)" : ""} — clicca una riga per il dettaglio giornaliero e il pickup`}
+        subtitle={`Dati riferiti a ${periodLabel}${isCurrentMonth ? " (mese corrente)" : ""} — clicca una riga per il dettaglio giornaliero e il pickup. Ultimo upload: ${
+          latestUploadDate ? formatDateIt(latestUploadDate) : ND
+        }`}
       >
         {loadError && <p className="mb-3 text-sm text-[#8a3a3a]">{loadError}</p>}
 
@@ -443,10 +453,6 @@ export default function PerformanceOverviewPage() {
               <thead>
                 <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                   <th className="pb-3 pr-4">Struttura</th>
-                  <th className="pb-3 pr-4">
-                    Ultimo upload
-                    <InfoTooltip text="Data dell'ultima estrazione ADR/RevPAR disponibile per questa struttura (la fonte che alimenta Revenue OTB/ADR/RevPAR/Occupazione) — non le estrazioni di Canali o Nazionalità." />
-                  </th>
                   <th className="pb-3 pr-4">
                     Revenue OTB ({isWholeYear ? "anno" : "mese"})
                     <InfoTooltip
@@ -524,10 +530,6 @@ export default function PerformanceOverviewPage() {
                       className="cursor-pointer border-b border-[#f0ece6] transition last:border-0 hover:bg-[#f8f6f2]"
                     >
                       <td className="py-3 pr-4 font-semibold text-[#2B2D2F]">{row.structure.name}</td>
-
-                      <td className="py-3 pr-4 text-[#2B2D2F]">
-                        {row.lastExtractionDate ? formatDateIt(row.lastExtractionDate) : ND}
-                      </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
                         {row.monthRevenue !== null ? formatCurrencyCents(row.monthRevenue) : ND}

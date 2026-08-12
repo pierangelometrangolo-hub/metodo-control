@@ -534,74 +534,75 @@ export default function PerformanceStructureDrilldownPage({
               </>
             )}
           </AppCard>
-        </div>
-      </div>
 
-      <AppCard
-        title="Mese in corso vs budget"
-        subtitle={
-          monthToDate.daysWithData > 0
-            ? `Somma di ${monthToDate.daysWithData} giorni con dati su ${daysInMonth} del mese (dato parziale se il mese non è concluso o mancano import)`
-            : "Nessun dato importato per questo mese"
-        }
-      >
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[420px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                <th className="pb-3 pr-4">Scenario</th>
-                <th className="pb-3 pr-4">Revenue</th>
-                <th className="pb-3">Occupazione</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="border-b border-[#f0ece6]">
-                <td className="py-2 pr-4 font-semibold text-[#2B2D2F]">Reale</td>
-                <td className="py-2 pr-4 text-[#2B2D2F]">
-                  {monthToDate.daysWithData > 0 ? (
-                    <div className="flex items-start gap-2">
-                      {monthPacing && (
-                        <span
-                          className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${pacingDotClasses[monthPacing]}`}
-                        />
+          <AppCard
+            title="Mese in corso vs budget"
+            subtitle={
+              monthToDate.daysWithData > 0
+                ? `${monthToDate.daysWithData}/${daysInMonth} giorni con dati (parziale se il mese non è concluso o mancano import)`
+                : "Nessun dato importato per questo mese"
+            }
+            className="p-4"
+          >
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[380px] border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-[#e7dfd8] text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                    <th className="pb-2 pr-4">Scenario</th>
+                    <th className="pb-2 pr-4">Revenue</th>
+                    <th className="pb-2">Occupazione</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-[#f0ece6]">
+                    <td className="py-1.5 pr-4 font-semibold text-[#2B2D2F]">Reale</td>
+                    <td className="py-1.5 pr-4 text-[#2B2D2F]">
+                      {monthToDate.daysWithData > 0 ? (
+                        <div className="flex items-start gap-2">
+                          {monthPacing && (
+                            <span
+                              className={`mt-1 h-2 w-2 shrink-0 rounded-full ${pacingDotClasses[monthPacing]}`}
+                            />
+                          )}
+                          <div>
+                            <div>{formatCurrency(monthToDate.revenue)}</div>
+                            {monthPacingDetail && (
+                              <div className="text-[10px] text-[#6a6d70]">{monthPacingDetail}</div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        ND
                       )}
-                      <div>
-                        <div>{formatCurrency(monthToDate.revenue)}</div>
-                        {monthPacingDetail && (
-                          <div className="text-[11px] text-[#6a6d70]">{monthPacingDetail}</div>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    ND
-                  )}
-                </td>
-                <td className="py-2 text-[#2B2D2F]">
-                  {monthToDate.daysWithData > 0
-                    ? formatPercent(occupancy(monthToDate.roomsSold, monthToDate.roomsAvailable))
-                    : ND}
-                </td>
-              </tr>
-
-              {["minimo", "realistico", "sfidante"].map((level) => {
-                const budget = budgets.find((b) => b.level === level);
-
-                return (
-                  <tr key={level} className="border-b border-[#f0ece6] last:border-0">
-                    <td className="py-2 pr-4 text-[#2B2D2F]">{budgetLevelLabels[level]}</td>
-                    <td className="py-2 pr-4 text-[#2B2D2F]">
-                      {budget ? formatCurrency(Number(budget.revenue_target)) : ND}
                     </td>
-                    <td className="py-2 text-[#2B2D2F]">
-                      {budget ? formatPercent(Number(budget.occupancy_pct_target)) : ND}
+                    <td className="py-1.5 text-[#2B2D2F]">
+                      {monthToDate.daysWithData > 0
+                        ? formatPercent(occupancy(monthToDate.roomsSold, monthToDate.roomsAvailable))
+                        : ND}
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+
+                  {["minimo", "realistico", "sfidante"].map((level) => {
+                    const budget = budgets.find((b) => b.level === level);
+
+                    return (
+                      <tr key={level} className="border-b border-[#f0ece6] last:border-0">
+                        <td className="py-1.5 pr-4 text-[#2B2D2F]">{budgetLevelLabels[level]}</td>
+                        <td className="py-1.5 pr-4 text-[#2B2D2F]">
+                          {budget ? formatCurrency(Number(budget.revenue_target)) : ND}
+                        </td>
+                        <td className="py-1.5 text-[#2B2D2F]">
+                          {budget ? formatPercent(Number(budget.occupancy_pct_target)) : ND}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </AppCard>
         </div>
-      </AppCard>
+      </div>
 
       {hasChannelData && (
         <>
@@ -694,6 +695,10 @@ export default function PerformanceStructureDrilldownPage({
                     <th className="pb-3 pr-4">Camere occupate</th>
                     <th className="pb-3 pr-4">Camere disponibili</th>
                     <th className="pb-3 pr-4">
+                      Camere libere
+                      <InfoTooltip text="Camere disponibili non ancora vendute per questo giorno (disponibili − occupate) — quelle su cui si può ancora generare revenue, non l'inventario totale della struttura." />
+                    </th>
+                    <th className="pb-3 pr-4">
                       Pickup RN
                       <InfoTooltip text="Differenza di camere vendute per questo giorno tra l'ultima estrazione disponibile e quella precedente." />
                     </th>
@@ -713,6 +718,9 @@ export default function PerformanceStructureDrilldownPage({
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatPercent(row.occupancy)}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsSold)}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsAvailable)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">
+                        {formatNumber(row.roomsAvailable - row.roomsSold)}
+                      </td>
                       <td className="py-2 pr-4">
                         {row.pickupRooms === null ? (
                           <span className="text-[#2B2D2F]">{ND}</span>

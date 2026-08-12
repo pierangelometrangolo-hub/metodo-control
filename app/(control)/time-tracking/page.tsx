@@ -363,7 +363,7 @@ export default function TimeTrackingPage() {
         description="Controllo operativo del tempo registrato con visione chiara su aree, riferimenti, operatori, attività e storico."
       />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-4">
         <KpiCard
           title="Registrazioni"
           value={entries.length.toString()}

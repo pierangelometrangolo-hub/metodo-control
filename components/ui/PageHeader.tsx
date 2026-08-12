@@ -20,12 +20,12 @@ export function PageHeader({
   return (
     <section className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[#e7dfd8] bg-white px-4 py-[10px]">
       <div className="flex min-w-0 items-center gap-3">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-teal">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white ring-1 ring-[#e7dfd8]">
           <img
             src="/images/metodo-logo.png"
             alt=""
             aria-hidden="true"
-            className="h-full w-full object-cover"
+            className="h-full w-full object-contain"
           />
         </span>
 

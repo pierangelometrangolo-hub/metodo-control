@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { KpiCard } from "@/components/ui/KpiCard";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { canViewModule } from "@/lib/permissions";
-import { todayString } from "@/lib/performanceMetrics";
+import { todayString, monthRange } from "@/lib/performanceMetrics";
 
 type SupabaseTask = {
   id: string;
@@ -37,8 +37,8 @@ export default function DashboardPage() {
   const [clients, setClients] = useState<RawClient[]>([]);
 
   // Gate lato client (nasconde la card) - il gate che conta davvero e'
-  // quello lato query in loadPerformanceSummary: fn_month_snapshot_asof e
-  // performance_monthly_snapshot sono protette da RLS che richiede
+  // quello lato query in loadPerformanceSummary: v_snapshot_latest e
+  // performance_daily_snapshot sono protette da RLS che richiede
   // fn_user_level_rank(auth.uid()) >= 2 (senior/master), quindi anche
   // aggirando questo stato un utente 'user' otterrebbe comunque righe
   // vuote, non dati reali.
@@ -78,17 +78,29 @@ export default function DashboardPage() {
     const now = new Date();
     const year = now.getFullYear();
     const month = now.getMonth() + 1;
+    const { start: monthStart, end: monthEnd } = monthRange(todayString());
 
     const [monthRes, budgetsRes] = await Promise.all([
-      // security invoker (nessun "security definer"): applica la RLS con
-      // il ruolo di chi chiama, non con quello del proprietario - un
-      // utente 'user' riceve qui 0 righe, non un bypass.
-      supabase.rpc("fn_month_snapshot_asof", {
-        p_structure_ids: ids,
-        p_period_year: year,
-        p_period_month: month,
-        p_cutoff_date: todayString(),
-      }),
+      // Query diretta su v_snapshot_latest, stessa fonte e stesso metodo
+      // (somma dei giorni del mese) della tabella Strutture in
+      // /performance - NON piu' fn_month_snapshot_asof: quella funzione
+      // preferisce sempre la riga piu' recente di performance_monthly_snapshot
+      // se esiste, corretto per un confronto SDLY su un mese chiuso (dove
+      // quella riga e' per definizione il dato finale) ma sbagliato per il
+      // mese in corso, dove puo' restare indietro di settimane rispetto ai
+      // dati giornalieri (bug verificato: Sangiorgio Resort ago 2026,
+      // 69.903 EUR dalla riga mensile piu' recente - ferma al 30/06 - contro
+      // 89.657 EUR reali dalla somma giornaliera aggiornata al 10/08,
+      // sufficiente a farlo classificare "sotto minimo" invece di "sopra
+      // realistico"). v_snapshot_latest e' security invoker dalla stessa
+      // migration che ha chiuso questo bypass, quindi la query diretta e'
+      // sicura quanto la RPC: un utente 'user' riceve comunque 0 righe.
+      supabase
+        .from("v_snapshot_latest")
+        .select("structure_id, revenue_total")
+        .gte("stay_date", monthStart)
+        .lte("stay_date", monthEnd)
+        .in("structure_id", ids),
       supabase
         .from("v_budgets_current")
         .select("structure_id, level, revenue_target")
@@ -105,12 +117,13 @@ export default function DashboardPage() {
       console.error("Errore lettura budget sintesi Performance:", budgetsRes.error);
     }
 
-    const revenueByStructure = new Map<string, number>(
-      (monthRes.data || []).map((r: { structure_id: string; revenue_total: number }) => [
+    const revenueByStructure = new Map<string, number>();
+    (monthRes.data || []).forEach((r: { structure_id: string; revenue_total: number }) => {
+      revenueByStructure.set(
         r.structure_id,
-        Number(r.revenue_total),
-      ])
-    );
+        (revenueByStructure.get(r.structure_id) ?? 0) + Number(r.revenue_total)
+      );
+    });
 
     const targetsByStructure = new Map<string, { minimo?: number; realistico?: number }>();
     (budgetsRes.data || []).forEach((row: { structure_id: string; level: string; revenue_target: number }) => {

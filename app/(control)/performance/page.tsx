@@ -70,6 +70,57 @@ function aggregateBudgetRows(rows: BudgetRow[]): BudgetRow {
   };
 }
 
+// PostgREST tronca silenziosamente ogni risposta oltre le 1.000 righe (il
+// suo limite di default) se non si passa un .range() esplicito - nessun
+// errore, solo meno righe di quelle che soddisfano il filtro. Con una query
+// multi-struttura su un range di date ampio ("Tutto l'anno": fino a 366
+// giorni x N strutture) questo limite si supera facilmente: bug verificato
+// il 12/08/2026 su Sangiorgio Resort, gen-ago 2026 - 1.120 righe reali,
+// risposta troncata a 1.000, somma di appena 8.514 EUR contro i 212.947 EUR
+// veri (le strutture il cui structure_id ordina alfabeticamente dopo
+// restano fuori dalle prime 1.000). Paginazione reale con .range() invece
+// di un limite piu' alto ma comunque fisso: nessun numero massimo di
+// giorni/strutture da ricalcolare a mano quando lo storico cresce.
+//
+// .order() esplicito e deterministico e' indispensabile per la
+// paginazione stessa: senza un ordinamento stabile, pagine successive di
+// .range() potrebbero saltare o ripetere righe tra una chiamata e l'altra.
+const SNAPSHOT_PAGE_SIZE = 1000;
+
+type SnapshotRowWithStructure = SnapshotRow & { structure_id: string };
+
+async function fetchAllSnapshotRows(
+  start: string,
+  end: string,
+  ids: string[],
+  columns: string
+): Promise<{ data: SnapshotRowWithStructure[]; error: { message: string } | null }> {
+  const allRows: SnapshotRowWithStructure[] = [];
+  let from = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from("v_snapshot_latest")
+      .select(columns)
+      .gte("stay_date", start)
+      .lte("stay_date", end)
+      .in("structure_id", ids)
+      .order("structure_id", { ascending: true })
+      .order("stay_date", { ascending: true })
+      .range(from, from + SNAPSHOT_PAGE_SIZE - 1);
+
+    if (error) return { data: allRows, error };
+
+    allRows.push(...((data as unknown as SnapshotRowWithStructure[]) || []));
+
+    if (!data || data.length < SNAPSHOT_PAGE_SIZE) break;
+    from += SNAPSHOT_PAGE_SIZE;
+  }
+
+  return { data: allRows, error: null };
+}
+
 type StructureRowData = {
   structure: StructureOption;
   monthRevenue: number | null;
@@ -209,18 +260,8 @@ export default function PerformanceOverviewPage() {
     );
 
     const [monthRes, lastYearMonthRes, budgetsRes, importsRes, lastExtractionRes, ...sdlyResults] = await Promise.all([
-      supabase
-        .from("v_snapshot_latest")
-        .select(snapshotColumns)
-        .gte("stay_date", start)
-        .lte("stay_date", end)
-        .in("structure_id", ids),
-      supabase
-        .from("v_snapshot_latest")
-        .select(snapshotColumns)
-        .gte("stay_date", lastYearStart)
-        .lte("stay_date", lastYearEnd)
-        .in("structure_id", ids),
+      fetchAllSnapshotRows(start, end, ids, snapshotColumns),
+      fetchAllSnapshotRows(lastYearStart, lastYearEnd, ids, snapshotColumns),
       supabase
         .from("v_budgets_current")
         .select("structure_id, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")

@@ -213,16 +213,19 @@ export default function PerformanceOverviewPage() {
     const ids = structures.map((s) => s.id);
 
     // "Tutto l'anno": stesso principio di aggregazione dei mesi, con range
-    // piu' ampio. L'anno corrente si ferma ad oggi (non ha senso includere
-    // prenotazioni OTB future di mesi non ancora iniziati nell'anno in
-    // corso), un anno passato copre invece l'intero 1 gen - 31 dic.
+    // piu' ampio - sempre 1 gen - 31 dic, anno corrente incluso. Revenue
+    // OTB (On The Books) significa per definizione "gia' prenotato ad
+    // oggi", non "gia' soggiornato": include correttamente le date future
+    // dell'anno corrente gia' prenotate (es. settembre-dicembre prenotati
+    // entro l'estrazione di agosto). Troncare a todayString() escludeva
+    // quell'OTB futuro - bug verificato confrontando con i file BD reali
+    // (differenza 0,00 EUR su tutte le strutture dopo la rimozione del
+    // troncamento, prima sottostima da 35.000 a 165.000 EUR a struttura).
+    // Il mese singolo (non "Tutto l'anno") non ha mai avuto questo
+    // troncamento: currentMonthRange.end e' gia' sempre fine mese.
     const currentMonthRange = monthRange(`${selectedYear}-${pad(isWholeYear ? 1 : selectedMonth)}-01`);
     const start = isWholeYear ? `${selectedYear}-01-01` : currentMonthRange.start;
-    const end = isWholeYear
-      ? selectedYear === TODAY_YEAR
-        ? todayString()
-        : `${selectedYear}-12-31`
-      : currentMonthRange.end;
+    const end = isWholeYear ? `${selectedYear}-12-31` : currentMonthRange.end;
 
     // Consuntivo anno prec.: sempre il periodo pieno e chiuso dell'anno
     // precedente (a differenza del periodo corrente, un anno passato e'
@@ -231,15 +234,23 @@ export default function PerformanceOverviewPage() {
     const lastYearStart = isWholeYear ? `${selectedYear - 1}-01-01` : lastYearMonthRange.start;
     const lastYearEnd = isWholeYear ? `${selectedYear - 1}-12-31` : lastYearMonthRange.end;
 
-    // Mesi dell'anno selezionato effettivamente in ambito: 1 solo mese in
+    // Mesi per il confronto SDLY "a parita' di anticipo": 1 solo mese in
     // modalita' mensile, fino al mese di oggi se l'anno corrente e' quello
-    // selezionato (non ha senso includere budget/SDLY di mesi futuri non
-    // ancora iniziati), altrimenti tutti e 12 per un anno passato concluso.
-    // Riusato sia per i budget dell'anno selezionato sia, spostato di un
-    // anno indietro, per il confronto SDLY "a parita' di anticipo".
-    const monthsInScope = isWholeYear
+    // selezionato (non ha senso confrontare con mesi dell'anno scorso non
+    // ancora "iniziati" a quel punto dell'anno), altrimenti tutti e 12 per
+    // un anno passato concluso.
+    const sdlyMonthsInScope = isWholeYear
       ? Array.from({ length: selectedYear === TODAY_YEAR ? TODAY_MONTH : 12 }, (_, i) => i + 1)
       : [selectedMonth];
+
+    // Mesi per il target di budget: sempre l'intero anno (1-12) in "Tutto
+    // l'anno", anche per l'anno corrente - deve coprire lo stesso periodo
+    // del Revenue OTB qui sopra (ora sempre 1 gen - 31 dic, l'OTB include
+    // le prenotazioni future gia' confermate), altrimenti "OTB vs BUDGET"
+    // confronterebbe un OTB dell'intero anno con un target di sole
+    // gennaio-agosto - stesso tipo di disallineamento appena corretto sul
+    // Revenue OTB, ma sul lato budget del confronto.
+    const budgetMonthsInScope = isWholeYear ? Array.from({ length: 12 }, (_, i) => i + 1) : [selectedMonth];
 
     // Confronto SDLY "a parità di anticipo": non l'OTB dell'ultima estrazione
     // disponibile per il mese dell'anno scorso (sarebbe il consuntivo finale,
@@ -250,7 +261,7 @@ export default function PerformanceOverviewPage() {
     const snapshotColumns =
       "structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const sdlyPromises = monthsInScope.map((m) =>
+    const sdlyPromises = sdlyMonthsInScope.map((m) =>
       supabase.rpc("fn_month_snapshot_asof", {
         p_structure_ids: ids,
         p_period_year: selectedYear - 1,
@@ -266,7 +277,7 @@ export default function PerformanceOverviewPage() {
         .from("v_budgets_current")
         .select("structure_id, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
         .eq("season_year", selectedYear)
-        .in("month", monthsInScope)
+        .in("month", budgetMonthsInScope)
         .in("structure_id", ids),
       supabase.from("bd_imports").select("extraction_date").in("structure_id", ids),
       // Data ultimo upload (ADR/RevPAR) per struttura: non dipende dal

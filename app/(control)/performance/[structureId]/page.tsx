@@ -31,6 +31,7 @@ import {
   computePacingStatus,
   pacingDotClasses,
   pacingDetail,
+  formatDelta,
 } from "@/lib/performanceMetrics";
 
 const budgetLevelLabels: Record<string, string> = {
@@ -68,6 +69,130 @@ type DailyDetailRow = {
   pickupRevenue: number | null;
   previousExtractionDate: string | null;
 };
+
+type DetailGranularity = "day" | "week" | "month";
+
+// Riga visualizzata nella tabella "Dettaglio giornaliero", indipendente
+// dalla granularita' scelta - a livello giorno e' un mapping 1:1 da
+// DailyDetailRow, a livello settimana/mese e' un aggregato ricalcolato
+// (mai una media di medie: ADR/RevPAR/Occupazione sempre ricalcolati da
+// revenue/camere sommati, stessa regola gia' in uso per periodAgg/sdlyAgg).
+type DetailRow = {
+  key: string;
+  label: string;
+  revenue: number;
+  adr: number | null;
+  revPar: number | null;
+  occupancy: number | null;
+  roomsSold: number;
+  roomsAvailable: number;
+  pickupRooms: number | null;
+  pickupRevenue: number | null;
+  pickupTooltip: string;
+};
+
+// Lunedi' della settimana ISO contenente dateStr, in "YYYY-MM-DD".
+function weekStartDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const dow = date.getUTCDay(); // 0=domenica..6=sabato
+  const diffToMonday = dow === 0 ? 6 : dow - 1;
+  date.setUTCDate(date.getUTCDate() - diffToMonday);
+  return date.toISOString().slice(0, 10);
+}
+
+function buildDetailRows(rows: DailyDetailRow[], granularity: DetailGranularity): DetailRow[] {
+  if (granularity === "day") {
+    return rows.map((r) => ({
+      key: r.stayDate,
+      label: formatDateIt(r.stayDate),
+      revenue: r.revenue,
+      adr: r.adr,
+      revPar: r.revPar,
+      occupancy: r.occupancy,
+      roomsSold: r.roomsSold,
+      roomsAvailable: r.roomsAvailable,
+      pickupRooms: r.pickupRooms,
+      pickupRevenue: r.pickupRevenue,
+      pickupTooltip: `vs ultimo aggiornamento: ${r.previousExtractionDate ? formatDateIt(r.previousExtractionDate) : ND}`,
+    }));
+  }
+
+  const bucketKey = (stayDate: string) => (granularity === "week" ? weekStartDate(stayDate) : stayDate.slice(0, 7));
+
+  const buckets = new Map<string, DailyDetailRow[]>();
+  rows.forEach((r) => {
+    const key = bucketKey(r.stayDate);
+    const list = buckets.get(key) || [];
+    list.push(r);
+    buckets.set(key, list);
+  });
+
+  const pickupTooltipSuffix = granularity === "week" ? "della settimana" : "del mese";
+
+  return Array.from(buckets.entries())
+    .map(([key, bucketRows]) => {
+      const sorted = [...bucketRows].sort((a, b) => a.stayDate.localeCompare(b.stayDate));
+      const revenue = sorted.reduce((sum, r) => sum + r.revenue, 0);
+      const roomsSold = sorted.reduce((sum, r) => sum + r.roomsSold, 0);
+      const roomsAvailable = sorted.reduce((sum, r) => sum + r.roomsAvailable, 0);
+
+      const pickupRoomsRows = sorted.filter((r) => r.pickupRooms !== null);
+      const pickupRevenueRows = sorted.filter((r) => r.pickupRevenue !== null);
+
+      const label =
+        granularity === "week"
+          ? sorted.length > 1
+            ? `${formatDateIt(sorted[0].stayDate)} – ${formatDateIt(sorted[sorted.length - 1].stayDate)}`
+            : formatDateIt(sorted[0].stayDate)
+          : `${MONTH_LABELS[Number(key.slice(5, 7)) - 1]} ${key.slice(0, 4)}`;
+
+      return {
+        key,
+        label,
+        revenue,
+        adr: adr(revenue, roomsSold),
+        revPar: revPar(revenue, roomsAvailable),
+        occupancy: occupancy(roomsSold, roomsAvailable),
+        roomsSold,
+        roomsAvailable,
+        pickupRooms: pickupRoomsRows.length > 0 ? pickupRoomsRows.reduce((sum, r) => sum + (r.pickupRooms || 0), 0) : null,
+        pickupRevenue:
+          pickupRevenueRows.length > 0 ? pickupRevenueRows.reduce((sum, r) => sum + (r.pickupRevenue || 0), 0) : null,
+        pickupTooltip: `Somma dei pickup giornalieri ${pickupTooltipSuffix}`,
+      };
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
+const DETAIL_GRANULARITY_OPTIONS: { value: DetailGranularity; label: string }[] = [
+  { value: "day", label: "Giornaliero" },
+  { value: "week", label: "Settimanale" },
+  { value: "month", label: "Mensile" },
+];
+
+type ComparisonTab = "sdly" | "consuntivo";
+
+type KpiAgg = {
+  revenue: number | null;
+  roomsSold: number | null;
+  roomsAvailable: number | null;
+  arrivals: number | null;
+  presences: number | null;
+};
+
+const EMPTY_KPI_AGG: KpiAgg = {
+  revenue: null,
+  roomsSold: null,
+  roomsAvailable: null,
+  arrivals: null,
+  presences: null,
+};
+
+const COMPARISON_TAB_OPTIONS: { value: ComparisonTab; label: string }[] = [
+  { value: "sdly", label: "vs SDLY" },
+  { value: "consuntivo", label: "vs Consuntivo anno prec." },
+];
 
 const DEFAULT_MONTH = monthRange(todayString());
 
@@ -124,7 +249,17 @@ export default function PerformanceStructureDrilldownPage({
   }, [rangeStart, rangeEnd]);
 
   const [periodSnapshots, setPeriodSnapshots] = useState<SnapshotRow[]>([]);
+  // "Consuntivo anno prec.": v_snapshot_latest sullo stesso periodo di un
+  // anno fa, senza cutoff - per un periodo passato e' sempre il risultato
+  // finale chiuso, non un OTB storico (correttamente cosi', e' quello che
+  // rappresenta).
   const [sdlySnapshots, setSdlySnapshots] = useState<SnapshotRow[]>([]);
+  // "SDLY" vero: stesso periodo di un anno fa, ma con l'estrazione
+  // disponibile al cutoff = oggi meno un anno (fn_month_snapshot_asof per
+  // un mese pieno, fn_snapshot_asof per un periodo custom) - a parita' di
+  // anticipo rispetto ad oggi, non il consuntivo finale. Vedi loadMetrics.
+  const [sdlyAsofAgg, setSdlyAsofAgg] = useState<KpiAgg>(EMPTY_KPI_AGG);
+  const [comparisonTab, setComparisonTab] = useState<ComparisonTab>("sdly");
   const [monthSnapshots, setMonthSnapshots] = useState<SnapshotRow[]>([]);
   const [budgets, setBudgets] = useState<BudgetRow[]>([]);
   const [hasChannelData, setHasChannelData] = useState(false);
@@ -141,6 +276,7 @@ export default function PerformanceStructureDrilldownPage({
   const [dailyDetailOpen, setDailyDetailOpen] = useState(false);
   const [dailyDetailRows, setDailyDetailRows] = useState<DailyDetailRow[] | null>(null);
   const [dailyDetailLoading, setDailyDetailLoading] = useState(false);
+  const [detailGranularity, setDetailGranularity] = useState<DetailGranularity>("day");
 
   const periodStart = confirmedStart;
   const periodEnd = confirmedEnd;
@@ -252,7 +388,32 @@ export default function PerformanceStructureDrilldownPage({
     const snapshotColumns =
       "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const [periodRes, sdlyRes, monthRes, budgetsRes, channelRes, channelSdlyRes, nationalityRes] = await Promise.all([
+    // Tab "SDLY": OTB del periodo di un anno fa cosi' come si presentava
+    // allo stesso cutoff di oggi (oggi meno un anno), non il consuntivo
+    // finale - stessa convenzione gia' validata sulla Dashboard
+    // (fn_month_snapshot_asof, sdlyCutoff = sdlyDate(todayString())). Per
+    // un mese pieno usa la funzione mensile (unica fonte per lo storico
+    // 2025, caricato a granularita' mensile); per un periodo custom usa la
+    // funzione giornaliera - che per periodi 2025 non ancora coperti da
+    // performance_daily_snapshot torna ND, onestamente, invece di un dato
+    // approssimato.
+    const sdlyCutoff = sdlyDate(todayString());
+    const sdlyIsFullMonth = isFullMonth(periodStart, periodEnd);
+    const sdlyAsofPromise = sdlyIsFullMonth
+      ? supabase.rpc("fn_month_snapshot_asof", {
+          p_structure_ids: [structureId],
+          p_period_year: Number(sdlyStart.slice(0, 4)),
+          p_period_month: Number(sdlyStart.slice(5, 7)),
+          p_cutoff_date: sdlyCutoff,
+        })
+      : supabase.rpc("fn_snapshot_asof", {
+          p_structure_ids: [structureId],
+          p_stay_date_start: sdlyStart,
+          p_stay_date_end: sdlyEnd,
+          p_cutoff_date: sdlyCutoff,
+        });
+
+    const [periodRes, sdlyRes, sdlyAsofRes, monthRes, budgetsRes, channelRes, channelSdlyRes, nationalityRes] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -265,6 +426,7 @@ export default function PerformanceStructureDrilldownPage({
         .eq("structure_id", structureId)
         .gte("stay_date", sdlyStart)
         .lte("stay_date", sdlyEnd),
+      sdlyAsofPromise,
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -285,8 +447,15 @@ export default function PerformanceStructureDrilldownPage({
             .gte("period_start", periodStart)
             .lte("period_start", periodEnd)
         : Promise.resolve({ data: [], error: null }),
-      // Direct Booking Share vs anno precedente: stesso periodo SDLY gia'
-      // usato per gli altri confronti storici della pagina.
+      // Direct Booking Share vs anno precedente: SEMPRE consuntivo, mai vero
+      // SDLY - verificato empiricamente che channel_revenue non ha uno
+      // storico di estrazioni (un solo bd_import_id/extraction_date per
+      // ogni combinazione period_start/channel, a differenza di
+      // performance_daily_snapshot che ha una riga per ogni estrazione).
+      // Senza uno storico non esiste un "OTB a parita' di anticipo" da
+      // ricostruire: l'unico dato disponibile per l'anno scorso e' gia' il
+      // risultato finale, quindi qui non c'e' un tab SDLY - l'etichetta
+      // dice esplicitamente "Consuntivo anno prec." invece di "SDLY".
       hasChannelData
         ? supabase
             .from("channel_revenue")
@@ -307,6 +476,7 @@ export default function PerformanceStructureDrilldownPage({
 
     if (periodRes.error) setLoadError(periodRes.error.message);
     if (sdlyRes.error) setLoadError(sdlyRes.error.message);
+    if (sdlyAsofRes.error) setLoadError(sdlyAsofRes.error.message);
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
@@ -317,6 +487,36 @@ export default function PerformanceStructureDrilldownPage({
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
     setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
     setBudgets((budgetsRes.data as BudgetRow[]) || []);
+
+    if (sdlyIsFullMonth) {
+      const row = ((sdlyAsofRes.data as
+        | { revenue_total: number; rooms_sold: number; rooms_available: number; arrivals: number; presences: number }[]
+        | null) || [])[0];
+      setSdlyAsofAgg(
+        row
+          ? {
+              revenue: Number(row.revenue_total),
+              roomsSold: Number(row.rooms_sold),
+              roomsAvailable: Number(row.rooms_available),
+              arrivals: Number(row.arrivals),
+              presences: Number(row.presences),
+            }
+          : EMPTY_KPI_AGG
+      );
+    } else {
+      const rowsWithStatus = ((sdlyAsofRes.data as SnapshotRow[] | null) || []).map((r) => ({
+        ...r,
+        status: "otb" as const,
+      }));
+      const agg = sumSnapshots(rowsWithStatus);
+      setSdlyAsofAgg({
+        revenue: agg.revenue,
+        roomsSold: agg.roomsSold,
+        roomsAvailable: agg.roomsAvailable,
+        arrivals: agg.arrivals,
+        presences: agg.presences,
+      });
+    }
 
     const channelTotals = new Map<string, number>();
     (channelRes.data || []).forEach((r) => {
@@ -409,7 +609,13 @@ export default function PerformanceStructureDrilldownPage({
   }
 
   const periodAgg = useMemo(() => sumSnapshots(periodSnapshots), [periodSnapshots]);
+  // "Consuntivo anno prec.": v_snapshot_latest sullo stesso periodo di un
+  // anno fa, invariato. "SDLY": sdlyAsofAgg, calcolato con cutoff (vedi
+  // loadMetrics) - due fonti diverse per due confronti diversi, mai
+  // scambiate tra loro.
   const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
+  const comparisonAgg: KpiAgg = comparisonTab === "sdly" ? sdlyAsofAgg : sdlyAgg;
+  const comparisonLabel = comparisonTab === "sdly" ? "SDLY" : "Consuntivo anno prec.";
   const monthToDate = useMemo(() => sumSnapshots(monthSnapshots), [monthSnapshots]);
 
   const directShareCurrent = useMemo(() => directShareOf(channelRevenue), [channelRevenue]);
@@ -423,6 +629,11 @@ export default function PerformanceStructureDrilldownPage({
     const minimoBudget = budgets.find((b) => b.level === "minimo");
     return pacingDetail(monthToDate.revenue, minimoBudget ? Number(minimoBudget.revenue_target) : null);
   }, [monthToDate.revenue, budgets]);
+
+  const displayedDetailRows = useMemo(
+    () => buildDetailRows(dailyDetailRows || [], detailGranularity),
+    [dailyDetailRows, detailGranularity]
+  );
 
   const { daysInMonth } = monthRange(budgetAnchorDate);
 
@@ -448,7 +659,7 @@ export default function PerformanceStructureDrilldownPage({
       <PageHeader
         eyebrow="Performance"
         title={structureName || "Struttura"}
-        description="Confronto vs stesso periodo anno precedente (SDLY), mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
+        description="Confronto vs stesso periodo anno precedente — SDLY (a parità di anticipo) o Consuntivo finale, a scelta — e mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
       >
         <p className="text-sm text-[#6a6d70]">
           Ultimo aggiornamento dati (ADR/RevPAR):{" "}
@@ -485,9 +696,9 @@ export default function PerformanceStructureDrilldownPage({
             subtitle={
               isSingleDay
                 ? periodAgg.daysWithData > 0
-                  ? `Dato importato per questo giorno · confronto con ${sdlyLabel} (SDLY)`
-                  : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel} (SDLY)`
-                : `Somma di ${periodAgg.daysWithData} giorni con dati nel periodo · confronto con ${sdlyLabel} (SDLY)`
+                  ? `Dato importato per questo giorno · confronto con ${sdlyLabel}`
+                  : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel}`
+                : `Somma di ${periodAgg.daysWithData} giorni con dati nel periodo · confronto con ${sdlyLabel}`
             }
           >
             {loadingMetrics ? (
@@ -502,22 +713,64 @@ export default function PerformanceStructureDrilldownPage({
                   </p>
                 )}
 
+                <div className="mb-4 flex flex-wrap gap-2">
+                  {COMPARISON_TAB_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setComparisonTab(opt.value)}
+                      className={`rounded-[14px] px-4 py-2 text-sm font-semibold transition ${
+                        comparisonTab === opt.value
+                          ? "bg-teal text-white"
+                          : "border border-[#e7dfd8] bg-white text-[#2B2D2F] hover:bg-[#f8f6f2]"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                {comparisonTab === "sdly" &&
+                  comparisonAgg.revenue === null &&
+                  comparisonAgg.roomsSold === null && (
+                    <p className="mb-4 text-sm text-[#6a6d70]">
+                      {ND} — nessun dato disponibile per {sdlyLabel} al cutoff a parità di anticipo (
+                      {formatDateIt(sdlyDate(todayString()))}).
+                    </p>
+                  )}
+
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
                   <KpiCard
                     label="Revenue"
                     current={formatCurrency(periodAgg.revenue)}
-                    sdly={formatCurrency(sdlyAgg.revenue)}
+                    currentRaw={periodAgg.revenue}
+                    comparison={formatCurrency(comparisonAgg.revenue)}
+                    comparisonRaw={comparisonAgg.revenue}
+                    comparisonLabel={comparisonLabel}
                   />
                   <KpiCard
                     label="Occupazione"
                     current={formatPercent(occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable))}
-                    sdly={formatPercent(occupancy(sdlyAgg.roomsSold, sdlyAgg.roomsAvailable))}
+                    currentRaw={occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable)}
+                    comparison={formatPercent(occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable))}
+                    comparisonRaw={occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable)}
+                    comparisonLabel={comparisonLabel}
                   />
-                  <KpiCard label="Arrivi" current={formatNumber(periodAgg.arrivals)} sdly={formatNumber(sdlyAgg.arrivals)} />
+                  <KpiCard
+                    label="Arrivi"
+                    current={formatNumber(periodAgg.arrivals)}
+                    currentRaw={periodAgg.arrivals}
+                    comparison={formatNumber(comparisonAgg.arrivals)}
+                    comparisonRaw={comparisonAgg.arrivals}
+                    comparisonLabel={comparisonLabel}
+                  />
                   <KpiCard
                     label="Presenze"
                     current={formatNumber(periodAgg.presences)}
-                    sdly={formatNumber(sdlyAgg.presences)}
+                    currentRaw={periodAgg.presences}
+                    comparison={formatNumber(comparisonAgg.presences)}
+                    comparisonRaw={comparisonAgg.presences}
+                    comparisonLabel={comparisonLabel}
                   />
                   <KpiCard
                     label="LOS"
@@ -525,10 +778,13 @@ export default function PerformanceStructureDrilldownPage({
                       const value = los(periodAgg.roomsSold, periodAgg.arrivals);
                       return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
                     })()}
-                    sdly={(() => {
-                      const value = los(sdlyAgg.roomsSold, sdlyAgg.arrivals);
+                    currentRaw={los(periodAgg.roomsSold, periodAgg.arrivals)}
+                    comparison={(() => {
+                      const value = los(comparisonAgg.roomsSold, comparisonAgg.arrivals);
                       return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
                     })()}
+                    comparisonRaw={los(comparisonAgg.roomsSold, comparisonAgg.arrivals)}
+                    comparisonLabel={comparisonLabel}
                   />
                 </div>
               </>
@@ -545,9 +801,9 @@ export default function PerformanceStructureDrilldownPage({
             className="p-4"
           >
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[380px] border-collapse text-xs">
+              <table className="w-full min-w-[380px] border-collapse text-sm">
                 <thead>
-                  <tr className="border-b border-[#e7dfd8] text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                     <th className="pb-2 pr-4">Scenario</th>
                     <th className="pb-2 pr-4">Revenue</th>
                     <th className="pb-2">Occupazione</th>
@@ -567,7 +823,7 @@ export default function PerformanceStructureDrilldownPage({
                           <div>
                             <div>{formatCurrency(monthToDate.revenue)}</div>
                             {monthPacingDetail && (
-                              <div className="text-[10px] text-[#6a6d70]">{monthPacingDetail}</div>
+                              <div className="text-[12px] text-[#6a6d70]">{monthPacingDetail}</div>
                             )}
                           </div>
                         </div>
@@ -619,29 +875,29 @@ export default function PerformanceStructureDrilldownPage({
           >
             <div className="flex flex-wrap items-end gap-10">
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
                   Quota diretta
                 </p>
                 <p className="mt-2 text-[28px] font-semibold leading-none text-[#2B2D2F]">
                   {directShareCurrent.share !== null ? formatPercent(directShareCurrent.share) : ND}
                 </p>
                 {directShareCurrent.direct !== null && directShareCurrent.total !== null && (
-                  <p className="mt-2 text-[12px] text-[#6a6d70]">
+                  <p className="mt-2 text-[14px] text-[#6a6d70]">
                     {formatCurrency(directShareCurrent.direct)} su {formatCurrency(directShareCurrent.total)} totali
                   </p>
                 )}
               </div>
 
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                  vs {sdlyLabel} (SDLY)
+                <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  vs {sdlyLabel} (Consuntivo anno prec.)
                 </p>
                 <p className="mt-2 text-[22px] font-semibold leading-none text-[#2B2D2F]">
                   {directShareSdly.share !== null ? formatPercent(directShareSdly.share) : ND}
                 </p>
                 {directShareCurrent.share !== null && directShareSdly.share !== null && (
                   <p
-                    className={`mt-2 text-[12px] ${
+                    className={`mt-2 text-[14px] ${
                       directShareCurrent.share >= directShareSdly.share ? "text-[#2f7d43]" : "text-[#8a3a3a]"
                     }`}
                   >
@@ -669,25 +925,50 @@ export default function PerformanceStructureDrilldownPage({
 
       <AppCard
         title="Dettaglio giornaliero"
-        subtitle={`Una riga per ogni giorno di ${periodLabel} con dato disponibile`}
+        subtitle={`Una riga per ${
+          detailGranularity === "day" ? "ogni giorno" : detailGranularity === "week" ? "ogni settimana" : "ogni mese"
+        } di ${periodLabel} con dato disponibile`}
       >
-        <button
-          type="button"
-          onClick={() => setDailyDetailOpen((prev) => !prev)}
-          className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
-        >
-          {dailyDetailOpen ? "Nascondi dettaglio giornaliero ▲" : "Mostra dettaglio giornaliero ▾"}
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setDailyDetailOpen((prev) => !prev)}
+            className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+          >
+            {dailyDetailOpen ? "Nascondi dettaglio giornaliero ▲" : "Mostra dettaglio giornaliero ▾"}
+          </button>
+
+          {dailyDetailOpen && (
+            <div className="flex flex-wrap gap-2">
+              {DETAIL_GRANULARITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setDetailGranularity(opt.value)}
+                  className={`rounded-[14px] px-4 py-2 text-sm font-semibold transition ${
+                    detailGranularity === opt.value
+                      ? "bg-teal text-white"
+                      : "border border-[#e7dfd8] bg-white text-[#2B2D2F] hover:bg-[#f8f6f2]"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {dailyDetailOpen && (
           <div className="mt-4 overflow-x-auto">
             {dailyDetailLoading ? (
               <p className="text-sm text-[#6a6d70]">Caricamento...</p>
-            ) : dailyDetailRows && dailyDetailRows.length > 0 ? (
+            ) : displayedDetailRows.length > 0 ? (
               <table className="w-full min-w-[920px] border-collapse text-sm">
                 <thead>
-                  <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                    <th className="pb-3 pr-4">Data</th>
+                  <tr className="border-b border-[#e7dfd8] text-left text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                    <th className="pb-3 pr-4">
+                      {detailGranularity === "day" ? "Data" : detailGranularity === "week" ? "Settimana" : "Mese"}
+                    </th>
                     <th className="pb-3 pr-4">Revenue</th>
                     <th className="pb-3 pr-4">ADR</th>
                     <th className="pb-3 pr-4">RevPAR</th>
@@ -696,22 +977,22 @@ export default function PerformanceStructureDrilldownPage({
                     <th className="pb-3 pr-4">Camere disponibili</th>
                     <th className="pb-3 pr-4">
                       Camere libere
-                      <InfoTooltip text="Camere disponibili non ancora vendute per questo giorno (disponibili − occupate) — quelle su cui si può ancora generare revenue, non l'inventario totale della struttura." />
+                      <InfoTooltip text="Camere disponibili non ancora vendute per questo periodo (disponibili − occupate) — quelle su cui si può ancora generare revenue, non l'inventario totale della struttura." />
                     </th>
                     <th className="pb-3 pr-4">
                       Pickup RN
-                      <InfoTooltip text="Differenza di camere vendute per questo giorno tra l'ultima estrazione disponibile e quella precedente." />
+                      <InfoTooltip text="Differenza di camere vendute tra l'ultima estrazione disponibile e quella precedente, per giorno se la vista è giornaliera, sommata se è settimanale/mensile." />
                     </th>
                     <th className="pb-3">
                       Pickup €
-                      <InfoTooltip text="Differenza di revenue per questo giorno tra l'ultima estrazione disponibile e quella precedente." />
+                      <InfoTooltip text="Differenza di revenue tra l'ultima estrazione disponibile e quella precedente, per giorno se la vista è giornaliera, sommata se è settimanale/mensile." />
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {dailyDetailRows.map((row) => (
-                    <tr key={row.stayDate} className="border-b border-[#f0ece6] last:border-0">
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatDateIt(row.stayDate)}</td>
+                  {displayedDetailRows.map((row) => (
+                    <tr key={row.key} className="border-b border-[#f0ece6] last:border-0">
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.label}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revenue)}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.adr)}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revPar)}</td>
@@ -741,8 +1022,7 @@ export default function PerformanceStructureDrilldownPage({
                               </span>
                             }
                           >
-                            vs ultimo aggiornamento:{" "}
-                            {row.previousExtractionDate ? formatDateIt(row.previousExtractionDate) : ND}
+                            {row.pickupTooltip}
                           </CellTooltip>
                         )}
                       </td>
@@ -766,8 +1046,7 @@ export default function PerformanceStructureDrilldownPage({
                               </span>
                             }
                           >
-                            vs ultimo aggiornamento:{" "}
-                            {row.previousExtractionDate ? formatDateIt(row.previousExtractionDate) : ND}
+                            {row.pickupTooltip}
                           </CellTooltip>
                         )}
                       </td>
@@ -788,19 +1067,32 @@ export default function PerformanceStructureDrilldownPage({
 function KpiCard({
   label,
   current,
-  sdly,
+  currentRaw,
+  comparison,
+  comparisonRaw,
+  comparisonLabel,
 }: {
   label: string;
   current: string;
-  sdly: string;
+  currentRaw: number | null;
+  comparison: string;
+  comparisonRaw: number | null;
+  comparisonLabel: string;
 }) {
+  const delta = formatDelta(currentRaw, comparisonRaw);
+
   return (
     <div className="rounded-[16px] border border-[#e7dfd8] bg-[#fcfbf9] p-4">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+      <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
         {label}
       </p>
       <p className="mt-2 text-[22px] font-semibold leading-none text-[#2B2D2F]">{current}</p>
-      <p className="mt-2 text-[12px] text-[#6a6d70]">SDLY: {sdly}</p>
+      <p className="mt-2 text-[14px] text-[#6a6d70]">
+        {comparisonLabel}: {comparison}
+      </p>
+      <p className={`mt-1 text-[14px] font-medium ${delta.colorClass}`}>
+        {delta.text} vs {comparisonLabel}
+      </p>
     </div>
   );
 }

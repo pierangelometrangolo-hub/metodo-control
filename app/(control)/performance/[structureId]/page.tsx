@@ -9,7 +9,7 @@ import { AppCard } from "@/components/ui/AppCard";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import { CellTooltip } from "@/components/ui/CellTooltip";
 import { supabase } from "@/lib/supabaseClient";
-import { canViewModule } from "@/lib/permissions";
+import { canViewModule, getUserLevelRank } from "@/lib/permissions";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
 import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
@@ -44,6 +44,12 @@ const budgetLevelLabels: Record<string, string> = {
 // CRM + Booking Engine (entrambe le varianti, stesso strumento) sono i
 // canali "diretti": nessuna commissione a OTA terze.
 const DIRECT_CHANNELS = new Set(["CRM", "Booking Engine", "Booking Engine - Advance"]);
+
+// channel_commission_rates ha RLS SELECT a rank >= 2 (dato economico
+// sensibile, stessa soglia di channel_revenue) - il toggle "Mostra netto"
+// va nascosto del tutto per level=user, non solo disabilitato, altrimenti
+// risulterebbe un controllo che non fa mai nulla per quell'utente.
+const SENIOR_RANK = 2;
 
 function directShareOf(data: ChannelRevenueDatum[]) {
   if (data.length === 0) return { direct: null as number | null, total: null as number | null, share: null as number | null };
@@ -338,6 +344,7 @@ export default function PerformanceStructureDrilldownPage({
   const [accessState, setAccessState] = useState<"checking" | "granted" | "denied">(
     "checking"
   );
+  const [canManage, setCanManage] = useState(false);
   const [structureName, setStructureName] = useState("");
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
@@ -382,6 +389,12 @@ export default function PerformanceStructureDrilldownPage({
   const [hasChannelData, setHasChannelData] = useState(false);
   const [channelRevenue, setChannelRevenue] = useState<ChannelRevenueDatum[]>([]);
   const [channelRevenueSdly, setChannelRevenueSdly] = useState<ChannelRevenueDatum[]>([]);
+  // Percentuale commissione per canale, per il mese ancora del periodo
+  // selezionato (stesso mese usato da "Mese in corso vs budget") - solo i
+  // canali con una riga in channel_commission_rates per quel mese finiscono
+  // in questa mappa, gli altri restano senza netto calcolato.
+  const [channelCommissionRates, setChannelCommissionRates] = useState<Map<string, number>>(new Map());
+  const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
   const [hasNationalityData, setHasNationalityData] = useState(false);
   const [nationalityData, setNationalityData] = useState<NationalityDatum[]>([]);
 
@@ -426,6 +439,9 @@ export default function PerformanceStructureDrilldownPage({
     }
 
     setAccessState("granted");
+
+    const rank = await getUserLevelRank();
+    setCanManage(rank !== null && rank >= SENIOR_RANK);
 
     const { data, error } = await supabase
       .from("structures")
@@ -501,7 +517,7 @@ export default function PerformanceStructureDrilldownPage({
   useEffect(() => {
     if (accessState === "granted") void loadMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessState, periodStart, periodEnd, hasChannelData, hasNationalityData]);
+  }, [accessState, periodStart, periodEnd, hasChannelData, hasNationalityData, canManage]);
 
   async function loadMetrics() {
     setLoadingMetrics(true);
@@ -539,7 +555,17 @@ export default function PerformanceStructureDrilldownPage({
           p_cutoff_date: sdlyCutoff,
         });
 
-    const [periodRes, sdlyRes, sdlyAsofRes, monthRes, budgetsRes, channelRes, channelSdlyRes, nationalityRes] = await Promise.all([
+    const [
+      periodRes,
+      sdlyRes,
+      sdlyAsofRes,
+      monthRes,
+      budgetsRes,
+      channelRes,
+      channelSdlyRes,
+      commissionRatesRes,
+      nationalityRes,
+    ] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -590,6 +616,20 @@ export default function PerformanceStructureDrilldownPage({
             .gte("period_start", sdlyStart)
             .lte("period_start", sdlyEnd)
         : Promise.resolve({ data: [], error: null }),
+      // Percentuali commissione per il toggle "Mostra netto" su Revenue per
+      // canale - ancorate allo stesso mese di budgetAnchorDate/monthRange
+      // gia' usato per "Mese in corso vs budget" (year/month qui sopra).
+      // RLS su channel_commission_rates e' gia' rank >= 2: gated anche qui
+      // lato query per non fare una fetch inutile a chi non la vedrebbe
+      // comunque (torna 0 righe, non un errore).
+      hasChannelData && canManage
+        ? supabase
+            .from("channel_commission_rates")
+            .select("channel, commission_pct")
+            .eq("structure_id", structureId)
+            .eq("period_year", year)
+            .eq("period_month", month)
+        : Promise.resolve({ data: [], error: null }),
       hasNationalityData
         ? supabase
             .from("guest_nationality")
@@ -607,12 +647,22 @@ export default function PerformanceStructureDrilldownPage({
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
     if (channelSdlyRes.error) setLoadError(channelSdlyRes.error.message);
+    if (commissionRatesRes.error) setLoadError(commissionRatesRes.error.message);
     if (nationalityRes.error) setLoadError(nationalityRes.error.message);
 
     setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
     setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
     setBudgets((budgetsRes.data as BudgetRow[]) || []);
+
+    setChannelCommissionRates(
+      new Map(
+        ((commissionRatesRes.data as { channel: string; commission_pct: number }[] | null) || []).map((r) => [
+          r.channel,
+          Number(r.commission_pct),
+        ])
+      )
+    );
 
     if (sdlyIsFullMonth) {
       const row = ((sdlyAsofRes.data as
@@ -982,8 +1032,24 @@ export default function PerformanceStructureDrilldownPage({
           <AppCard
             title="Revenue per canale"
             subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
+            action={
+              canManage ? (
+                <label className="flex items-center gap-2 text-sm text-[#2B2D2F]">
+                  <input
+                    type="checkbox"
+                    checked={showNetChannelRevenue}
+                    onChange={(e) => setShowNetChannelRevenue(e.target.checked)}
+                  />
+                  Mostra netto
+                </label>
+              ) : undefined
+            }
           >
-            <ChannelRevenueBars data={channelRevenue} />
+            <ChannelRevenueBars
+              data={channelRevenue}
+              commissionRates={channelCommissionRates}
+              showNet={showNetChannelRevenue}
+            />
           </AppCard>
 
           <AppCard

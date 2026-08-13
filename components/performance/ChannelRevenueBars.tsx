@@ -10,10 +10,18 @@ export type ChannelRevenueDatum = {
 
 type ChannelRevenueBarsProps = {
   data: ChannelRevenueDatum[];
+  // Percentuale commissione per canale (es. 15 = 15%), solo per i canali
+  // con una riga in channel_commission_rates per il mese in corso - i
+  // canali assenti da questa mappa non mostrano la seconda barra, mai un
+  // netto inventato.
+  commissionRates?: Map<string, number>;
+  showNet?: boolean;
 };
 
 const POSITIVE_COLOR = "#017A92";
 const NEGATIVE_COLOR = "#b6423f";
+const NET_COLOR = "#017A92";
+const COMMISSION_COLOR = "#e07a5f";
 
 // Loghi reali forniti in public/images/logos/. CRM e le due varianti di
 // Booking Engine condividono booking-designer.png perché gestiti dallo
@@ -67,7 +75,7 @@ function ChannelBadge({ channel, leftPct }: { channel: string; leftPct: number }
   );
 }
 
-export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
+export function ChannelRevenueBars({ data, commissionRates, showNet = false }: ChannelRevenueBarsProps) {
   if (data.length === 0) {
     return (
       <p className="rounded-[12px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-6 text-center text-sm text-[#6a6d70]">
@@ -81,6 +89,19 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
 
   return (
     <div className="space-y-2">
+      {showNet && (
+        <div className="mb-1 flex items-center gap-4 text-[12px] text-[#6a6d70]">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: NET_COLOR }} />
+            Netto
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COMMISSION_COLOR }} />
+            Commissione
+          </span>
+        </div>
+      )}
+
       {sorted.map((row) => {
         const isNegative = row.revenue < 0;
         // Larghezza proporzionale alla quota sul TOTALE, non sul canale
@@ -98,32 +119,68 @@ export function ChannelRevenueBars({ data }: ChannelRevenueBarsProps) {
         // un tetto per non sovrapporsi al testo dell'importo a destra.
         const badgeLeftPct = isNegative ? 4 : Math.min(barWidthPct, 94);
 
-        return (
-          <div key={row.channel} className="flex items-center gap-3">
-            <TruncatedLabelWithTooltip text={row.channel} />
+        const commissionPct = commissionRates?.get(row.channel);
+        // Nessuna seconda barra se il canale non ha una riga di commissione
+        // nota per il periodo - mai un netto inventato per un canale senza
+        // dato. netAmount + commissionAmount = row.revenue esattamente (la
+        // seconda somma sempre il complementare della prima), quindi le due
+        // larghezze sommate combaciano sempre con barWidthPct, nessuno
+        // scarto visivo possibile.
+        const showChannelNet = showNet && !isNegative && commissionPct !== undefined && row.revenue > 0;
+        const commissionAmount = showChannelNet ? row.revenue * (commissionPct! / 100) : 0;
+        const netAmount = showChannelNet ? row.revenue - commissionAmount : 0;
+        const netSegmentPct = showChannelNet ? (netAmount / row.revenue) * 100 : 0;
+        const commissionSegmentPct = showChannelNet ? (commissionAmount / row.revenue) * 100 : 0;
 
-            <div className="relative h-6 flex-1 rounded-full bg-[#f0ece6]">
-              {!isNegative && (
-                <div
-                  className="h-6 rounded-full"
-                  style={{ width: `${barWidthPct}%`, backgroundColor: POSITIVE_COLOR }}
-                />
-              )}
-              <ChannelBadge channel={row.channel} leftPct={badgeLeftPct} />
+        return (
+          <div key={row.channel} className="space-y-1">
+            <div className="flex items-center gap-3">
+              <TruncatedLabelWithTooltip text={row.channel} />
+
+              <div className="relative h-6 flex-1 rounded-full bg-[#f0ece6]">
+                {!isNegative && (
+                  <div
+                    className="h-6 rounded-full"
+                    style={{ width: `${barWidthPct}%`, backgroundColor: POSITIVE_COLOR }}
+                  />
+                )}
+                <ChannelBadge channel={row.channel} leftPct={badgeLeftPct} />
+              </div>
+
+              <span
+                className={`w-24 shrink-0 text-right text-sm font-semibold tabular-nums ${
+                  isNegative ? "text-[#8a3a3a]" : "text-[#2B2D2F]"
+                }`}
+                style={isNegative ? { color: NEGATIVE_COLOR } : undefined}
+              >
+                {formatCurrency(row.revenue)}
+              </span>
+
+              <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
+                {formatPercent1(percentOfTotal)}
+              </span>
             </div>
 
-            <span
-              className={`w-24 shrink-0 text-right text-sm font-semibold tabular-nums ${
-                isNegative ? "text-[#8a3a3a]" : "text-[#2B2D2F]"
-              }`}
-              style={isNegative ? { color: NEGATIVE_COLOR } : undefined}
-            >
-              {formatCurrency(row.revenue)}
-            </span>
+            {showChannelNet && (
+              <div className="flex items-center gap-3">
+                <span className="w-36 shrink-0" />
 
-            <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
-              {formatPercent1(percentOfTotal)}
-            </span>
+                <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-[#f0ece6]">
+                  <div className="flex h-2" style={{ width: `${barWidthPct}%` }}>
+                    <div style={{ width: `${netSegmentPct}%`, backgroundColor: NET_COLOR }} />
+                    <div style={{ width: `${commissionSegmentPct}%`, backgroundColor: COMMISSION_COLOR }} />
+                  </div>
+                </div>
+
+                <span className="w-24 shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
+                  {formatCurrency(netAmount)}
+                </span>
+
+                <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
+                  {formatCurrency(commissionAmount)}
+                </span>
+              </div>
+            )}
           </div>
         );
       })}

@@ -20,6 +20,7 @@ import {
   todayString,
   sdlyDate,
   monthRange,
+  pad,
   formatCurrency,
   formatNumber,
   formatPercent,
@@ -70,6 +71,57 @@ type DailyDetailRow = {
   previousExtractionDate: string | null;
 };
 
+// Righe grezze da performance_daily_snapshot -> DailyDetailRow, con calcolo
+// pickup (ultima estrazione vs precedente). Condivisa tra loadDailyDetail
+// (scoped al periodo del calendario) e loadYearlyDetail (scoped all'anno,
+// per la vista Mensile "tutto l'anno") - stessa logica, fonti diverse.
+function toDailyDetailRows(
+  data: {
+    stay_date: string;
+    extraction_date: string;
+    revenue_total: number | string;
+    rooms_sold: number | string;
+    rooms_available: number | string;
+  }[]
+): DailyDetailRow[] {
+  const byDay = new Map<
+    string,
+    { extraction_date: string; revenue_total: number; rooms_sold: number; rooms_available: number }[]
+  >();
+
+  data.forEach((r) => {
+    const key = r.stay_date;
+    const list = byDay.get(key) || [];
+    list.push({
+      extraction_date: r.extraction_date,
+      revenue_total: Number(r.revenue_total),
+      rooms_sold: Number(r.rooms_sold),
+      rooms_available: Number(r.rooms_available),
+    });
+    byDay.set(key, list);
+  });
+
+  return Array.from(byDay.entries())
+    .map(([stayDate, extractions]) => {
+      const latest = extractions[0];
+      const previous = extractions[1];
+
+      return {
+        stayDate,
+        revenue: latest.revenue_total,
+        adr: adr(latest.revenue_total, latest.rooms_sold),
+        revPar: revPar(latest.revenue_total, latest.rooms_available),
+        occupancy: occupancy(latest.rooms_sold, latest.rooms_available),
+        roomsSold: latest.rooms_sold,
+        roomsAvailable: latest.rooms_available,
+        pickupRooms: previous ? latest.rooms_sold - previous.rooms_sold : null,
+        pickupRevenue: previous ? latest.revenue_total - previous.revenue_total : null,
+        previousExtractionDate: previous ? previous.extraction_date : null,
+      };
+    })
+    .sort((a, b) => a.stayDate.localeCompare(b.stayDate));
+}
+
 type DetailGranularity = "day" | "week" | "month";
 
 // Riga visualizzata nella tabella "Dettaglio giornaliero", indipendente
@@ -89,6 +141,10 @@ type DetailRow = {
   pickupRooms: number | null;
   pickupRevenue: number | null;
   pickupTooltip: string;
+  // false solo per i mesi senza alcun dato nella vista Mensile "tutto
+  // l'anno" (vedi buildFullYearMonthRows) - riga mostrata comunque, con ND
+  // nelle celle, mai omessa: l'utente deve vedere tutti i 12 mesi.
+  hasData: boolean;
 };
 
 // Lunedi' della settimana ISO contenente dateStr, in "YYYY-MM-DD".
@@ -115,6 +171,7 @@ function buildDetailRows(rows: DailyDetailRow[], granularity: DetailGranularity)
       pickupRooms: r.pickupRooms,
       pickupRevenue: r.pickupRevenue,
       pickupTooltip: `vs ultimo aggiornamento: ${r.previousExtractionDate ? formatDateIt(r.previousExtractionDate) : ND}`,
+      hasData: true,
     }));
   }
 
@@ -160,9 +217,69 @@ function buildDetailRows(rows: DailyDetailRow[], granularity: DetailGranularity)
         pickupRevenue:
           pickupRevenueRows.length > 0 ? pickupRevenueRows.reduce((sum, r) => sum + (r.pickupRevenue || 0), 0) : null,
         pickupTooltip: `Somma dei pickup giornalieri ${pickupTooltipSuffix}`,
+        hasData: true,
       };
     })
     .sort((a, b) => a.key.localeCompare(b.key));
+}
+
+// Vista Mensile "tutto l'anno": sempre 12 righe (Gennaio-Dicembre), mai solo
+// i mesi del periodo selezionato nel calendario - i mesi senza alcun dato
+// restano in elenco con hasData:false (ND in tabella), non vengono omessi.
+function buildFullYearMonthRows(rows: DailyDetailRow[], year: number): DetailRow[] {
+  const buckets = new Map<string, DailyDetailRow[]>();
+  rows.forEach((r) => {
+    const key = r.stayDate.slice(0, 7);
+    const list = buckets.get(key) || [];
+    list.push(r);
+    buckets.set(key, list);
+  });
+
+  return Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
+    const key = `${year}-${pad(monthNum)}`;
+    const bucketRows = buckets.get(key);
+    const label = `${MONTH_LABELS[monthNum - 1]} ${year}`;
+
+    if (!bucketRows || bucketRows.length === 0) {
+      return {
+        key,
+        label,
+        revenue: 0,
+        adr: null,
+        revPar: null,
+        occupancy: null,
+        roomsSold: 0,
+        roomsAvailable: 0,
+        pickupRooms: null,
+        pickupRevenue: null,
+        pickupTooltip: "Nessun dato per questo mese",
+        hasData: false,
+      };
+    }
+
+    const sorted = [...bucketRows].sort((a, b) => a.stayDate.localeCompare(b.stayDate));
+    const revenue = sorted.reduce((sum, r) => sum + r.revenue, 0);
+    const roomsSold = sorted.reduce((sum, r) => sum + r.roomsSold, 0);
+    const roomsAvailable = sorted.reduce((sum, r) => sum + r.roomsAvailable, 0);
+    const pickupRoomsRows = sorted.filter((r) => r.pickupRooms !== null);
+    const pickupRevenueRows = sorted.filter((r) => r.pickupRevenue !== null);
+
+    return {
+      key,
+      label,
+      revenue,
+      adr: adr(revenue, roomsSold),
+      revPar: revPar(revenue, roomsAvailable),
+      occupancy: occupancy(roomsSold, roomsAvailable),
+      roomsSold,
+      roomsAvailable,
+      pickupRooms: pickupRoomsRows.length > 0 ? pickupRoomsRows.reduce((sum, r) => sum + (r.pickupRooms || 0), 0) : null,
+      pickupRevenue:
+        pickupRevenueRows.length > 0 ? pickupRevenueRows.reduce((sum, r) => sum + (r.pickupRevenue || 0), 0) : null,
+      pickupTooltip: "Somma dei pickup giornalieri del mese",
+      hasData: true,
+    };
+  });
 }
 
 const DETAIL_GRANULARITY_OPTIONS: { value: DetailGranularity; label: string }[] = [
@@ -277,6 +394,12 @@ export default function PerformanceStructureDrilldownPage({
   const [dailyDetailRows, setDailyDetailRows] = useState<DailyDetailRow[] | null>(null);
   const [dailyDetailLoading, setDailyDetailLoading] = useState(false);
   const [detailGranularity, setDetailGranularity] = useState<DetailGranularity>("day");
+  // Vista Mensile: sempre tutti i 12 mesi dell'anno del periodo selezionato
+  // nel calendario, non solo il periodo attivo - fonte dati separata da
+  // dailyDetailRows (che resta scoped al periodo del calendario per
+  // Giornaliero/Settimanale).
+  const [yearlyDetailRows, setYearlyDetailRows] = useState<DailyDetailRow[] | null>(null);
+  const [yearlyDetailLoading, setYearlyDetailLoading] = useState(false);
 
   const periodStart = confirmedStart;
   const periodEnd = confirmedEnd;
@@ -284,6 +407,9 @@ export default function PerformanceStructureDrilldownPage({
   // primo giorno del periodo attivo come ancora (di default e' gia' il
   // mese corrente, dato che il periodo di default e' il mese intero).
   const budgetAnchorDate = periodStart;
+  // Anno della vista Mensile "tutto l'anno": segue l'anno del periodo
+  // selezionato nel calendario, non e' un selettore separato.
+  const detailYear = Number(periodStart.slice(0, 4));
 
   useEffect(() => {
     void checkAccessAndLoadStructure();
@@ -565,47 +691,35 @@ export default function PerformanceStructureDrilldownPage({
       return;
     }
 
-    // Per ogni stay_date, le righe arrivano gia' ordinate per extraction_date
-    // decrescente: la prima e' l'ultima estrazione disponibile, la seconda
-    // (se c'e') e' l'upload precedente - il pickup e' la differenza tra le due.
-    const byDay = new Map<
-      string,
-      { extraction_date: string; revenue_total: number; rooms_sold: number; rooms_available: number }[]
-    >();
-    (data || []).forEach((r) => {
-      const key = r.stay_date as string;
-      const list = byDay.get(key) || [];
-      list.push({
-        extraction_date: r.extraction_date as string,
-        revenue_total: Number(r.revenue_total),
-        rooms_sold: Number(r.rooms_sold),
-        rooms_available: Number(r.rooms_available),
-      });
-      byDay.set(key, list);
-    });
-
-    const rows: DailyDetailRow[] = Array.from(byDay.entries())
-      .map(([stayDate, extractions]) => {
-        const latest = extractions[0];
-        const previous = extractions[1];
-
-        return {
-          stayDate,
-          revenue: latest.revenue_total,
-          adr: adr(latest.revenue_total, latest.rooms_sold),
-          revPar: revPar(latest.revenue_total, latest.rooms_available),
-          occupancy: occupancy(latest.rooms_sold, latest.rooms_available),
-          roomsSold: latest.rooms_sold,
-          roomsAvailable: latest.rooms_available,
-          pickupRooms: previous ? latest.rooms_sold - previous.rooms_sold : null,
-          pickupRevenue: previous ? latest.revenue_total - previous.revenue_total : null,
-          previousExtractionDate: previous ? previous.extraction_date : null,
-        };
-      })
-      .sort((a, b) => a.stayDate.localeCompare(b.stayDate));
-
-    setDailyDetailRows(rows);
+    setDailyDetailRows(toDailyDetailRows((data || []) as never[]));
     setDailyDetailLoading(false);
+  }
+
+  useEffect(() => {
+    if (dailyDetailOpen && detailGranularity === "month") void loadYearlyDetail();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dailyDetailOpen, detailGranularity, detailYear]);
+
+  async function loadYearlyDetail() {
+    setYearlyDetailLoading(true);
+
+    const { data, error } = await supabase
+      .from("performance_daily_snapshot")
+      .select("stay_date, extraction_date, revenue_total, rooms_sold, rooms_available")
+      .eq("structure_id", structureId)
+      .gte("stay_date", `${detailYear}-01-01`)
+      .lte("stay_date", `${detailYear}-12-31`)
+      .order("stay_date", { ascending: true })
+      .order("extraction_date", { ascending: false });
+
+    if (error) {
+      setLoadError(error.message);
+      setYearlyDetailLoading(false);
+      return;
+    }
+
+    setYearlyDetailRows(toDailyDetailRows((data || []) as never[]));
+    setYearlyDetailLoading(false);
   }
 
   const periodAgg = useMemo(() => sumSnapshots(periodSnapshots), [periodSnapshots]);
@@ -631,8 +745,11 @@ export default function PerformanceStructureDrilldownPage({
   }, [monthToDate.revenue, budgets]);
 
   const displayedDetailRows = useMemo(
-    () => buildDetailRows(dailyDetailRows || [], detailGranularity),
-    [dailyDetailRows, detailGranularity]
+    () =>
+      detailGranularity === "month"
+        ? buildFullYearMonthRows(yearlyDetailRows || [], detailYear)
+        : buildDetailRows(dailyDetailRows || [], detailGranularity),
+    [dailyDetailRows, yearlyDetailRows, detailGranularity, detailYear]
   );
 
   const { daysInMonth } = monthRange(budgetAnchorDate);
@@ -925,9 +1042,13 @@ export default function PerformanceStructureDrilldownPage({
 
       <AppCard
         title="Dettaglio giornaliero"
-        subtitle={`Una riga per ${
-          detailGranularity === "day" ? "ogni giorno" : detailGranularity === "week" ? "ogni settimana" : "ogni mese"
-        } di ${periodLabel} con dato disponibile`}
+        subtitle={
+          detailGranularity === "month"
+            ? `Tutti i 12 mesi di ${detailYear} — i mesi senza dati mostrano ND`
+            : `Una riga per ${
+                detailGranularity === "day" ? "ogni giorno" : "ogni settimana"
+              } di ${periodLabel} con dato disponibile`
+        }
       >
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -960,7 +1081,7 @@ export default function PerformanceStructureDrilldownPage({
 
         {dailyDetailOpen && (
           <div className="mt-4 overflow-x-auto">
-            {dailyDetailLoading ? (
+            {(detailGranularity === "month" ? yearlyDetailLoading : dailyDetailLoading) ? (
               <p className="text-sm text-[#6a6d70]">Caricamento...</p>
             ) : displayedDetailRows.length > 0 ? (
               <table className="w-full min-w-[920px] border-collapse text-sm">
@@ -993,14 +1114,14 @@ export default function PerformanceStructureDrilldownPage({
                   {displayedDetailRows.map((row) => (
                     <tr key={row.key} className="border-b border-[#f0ece6] last:border-0">
                       <td className="py-2 pr-4 text-[#2B2D2F]">{row.label}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revenue)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.adr)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatCurrency(row.revPar)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatPercent(row.occupancy)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsSold)}</td>
-                      <td className="py-2 pr-4 text-[#2B2D2F]">{formatNumber(row.roomsAvailable)}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.hasData ? formatCurrency(row.revenue) : ND}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.hasData ? formatCurrency(row.adr) : ND}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.hasData ? formatCurrency(row.revPar) : ND}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.hasData ? formatPercent(row.occupancy) : ND}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.hasData ? formatNumber(row.roomsSold) : ND}</td>
+                      <td className="py-2 pr-4 text-[#2B2D2F]">{row.hasData ? formatNumber(row.roomsAvailable) : ND}</td>
                       <td className="py-2 pr-4 text-[#2B2D2F]">
-                        {formatNumber(row.roomsAvailable - row.roomsSold)}
+                        {row.hasData ? formatNumber(row.roomsAvailable - row.roomsSold) : ND}
                       </td>
                       <td className="py-2 pr-4">
                         {row.pickupRooms === null ? (

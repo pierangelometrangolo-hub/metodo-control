@@ -1,7 +1,7 @@
-export type CrmClientType = "consulenza" | "formazione" | "pdo";
 export type CrmClientStatus = "prospect" | "attivo" | "ex_cliente";
 export type CrmContractStatus = "attivo" | "non_definito" | "scaduto" | "disdetto";
 export type CrmBadgeStatus = "attivo" | "da_definire" | "prospect" | "ex_cliente";
+export type CrmCommissionType = "percentuale" | "fisso_piu_override";
 
 // Riga di v_crm_clients_badge - badge_status e' sempre calcolato li', mai
 // ricalcolato lato componente (stessa logica gia' centralizzata nella view
@@ -18,7 +18,10 @@ export type CrmClient = {
   phone: string | null;
   email: string | null;
   website: string | null;
-  client_type: CrmClientType;
+  is_consulenza: boolean;
+  is_formazione: boolean;
+  is_eventi: boolean;
+  is_fornitore: boolean;
   status: CrmClientStatus;
   assigned_consultant_id: string | null;
   contract_start_date: string | null;
@@ -29,6 +32,15 @@ export type CrmClient = {
   structure_id: string | null;
   source_event: string | null;
   acquired_at: string | null;
+  cin: string | null;
+  cis: string | null;
+  notes: string | null;
+  commission_type: CrmCommissionType | null;
+  commission_percentage: number | null;
+  commission_fixed_amount: number | null;
+  commission_fixed_months: number | null;
+  commission_override_percentage: number | null;
+  commission_override_threshold: number | null;
   created_at: string;
   updated_at: string;
   badge_status: CrmBadgeStatus;
@@ -42,12 +54,6 @@ export type CrmContact = {
   phone: string | null;
   email: string | null;
   created_at: string;
-};
-
-export const clientTypeLabels: Record<CrmClientType, string> = {
-  consulenza: "Consulenza",
-  formazione: "Formazione",
-  pdo: "PDO",
 };
 
 export const badgeStatusLabels: Record<CrmBadgeStatus, string> = {
@@ -72,6 +78,27 @@ export const contractStatusLabels: Record<CrmContractStatus, string> = {
   scaduto: "Scaduto",
   disdetto: "Disdetto",
 };
+
+// Etichette dei tre tipi indipendenti (checkbox multiple, non piu' un
+// enum singolo). "Eventi" e' il nuovo nome di cio' che a DB/nel codice
+// storico si chiamava PDO - nessun riferimento a "PDO" resta in UI.
+export const typeFlagLabels = {
+  is_consulenza: "Consulenza",
+  is_formazione: "Formazione",
+  is_eventi: "Eventi",
+} as const;
+
+export type TypeFlagKey = keyof typeof typeFlagLabels;
+
+// Etichette dei tipi di un cliente, in ordine fisso Consulenza/Formazione/
+// Eventi, per badge e sottotitoli nell'elenco e nel dettaglio.
+export function clientTypeLabels(client: Pick<CrmClient, "is_consulenza" | "is_formazione" | "is_eventi">): string {
+  const labels: string[] = [];
+  if (client.is_consulenza) labels.push(typeFlagLabels.is_consulenza);
+  if (client.is_formazione) labels.push(typeFlagLabels.is_formazione);
+  if (client.is_eventi) labels.push(typeFlagLabels.is_eventi);
+  return labels.join(" · ") || "ND";
+}
 
 // Iniziali per l'avatar: prime lettere delle prime due parole del nome
 // business, o le prime due lettere se una sola parola.
@@ -114,4 +141,15 @@ export function isExpiringWithinMonths(
   limit.setUTCMonth(limit.getUTCMonth() + months);
 
   return end >= todayUTC && end <= limit.getTime();
+}
+
+// Testo esplicativo del blocco commissioni per il tipo "fisso_piu_override"
+// - solo termini contrattuali salvati, nessun calcolo su un fatturato reale
+// (quel collegamento e' del futuro modulo Finance).
+export function commissionFixedOverrideText(client: CrmClient): string {
+  const fixed = client.commission_fixed_amount ?? 0;
+  const months = client.commission_fixed_months ?? 0;
+  const overridePct = client.commission_override_percentage ?? 0;
+  const threshold = client.commission_override_threshold ?? 0;
+  return `€${fixed}/mese per ${months} mesi, poi ${overridePct}% oltre €${threshold} di consuntivo`;
 }

@@ -57,6 +57,18 @@ function todayString() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Un valore storico per un dato anno/mese e' "OTB" (On The Books, non
+// ancora consuntivo chiuso) quando quell'anno e' l'anno reale corrente e
+// il mese non e' ancora terminato - fn_month_snapshot_asof restituisce in
+// quel caso lo stato delle prenotazioni ad oggi, non il risultato finale.
+// Per anni passati (< anno corrente) e' sempre consuntivo chiuso.
+function isOtbYearMonth(year: number, month: number): boolean {
+  const now = new Date();
+  const currentYear = now.getUTCFullYear();
+  const currentMonth = now.getUTCMonth() + 1;
+  return year === currentYear && month >= currentMonth;
+}
+
 // Riga "attiva" per (mese, livello): una bozza/proposta in corso (draft o
 // pending) ha priorita' su un budget gia' confermato - e' quella su cui si
 // continua a lavorare. Se non c'e' nessuna riga non confermata, la riga
@@ -841,6 +853,8 @@ export default function BudgetPage() {
                       const lastYearMetrics = metricsFromActual(lastYearByMonth[m] || null);
                       const bestEntry = bestByMonth[m];
                       const bestMetrics = metricsFromActual(bestEntry?.metrics || null);
+                      const lastYearIsOtb = isOtbYearMonth(selectedYear - 1, m);
+                      const bestIsOtb = bestEntry ? isOtbYearMonth(bestEntry.year, m) : false;
 
                       return (
                         <TableRow key={m}>
@@ -874,8 +888,10 @@ export default function BudgetPage() {
                               }
                               otherLevelValues={otherLevelMetrics.map((mm) => mm[key])}
                               lastYearValue={lastYearMetrics[key]}
+                              lastYearIsOtb={lastYearIsOtb}
                               bestValue={bestMetrics[key]}
                               bestYear={bestEntry?.year ?? null}
+                              bestIsOtb={bestIsOtb}
                             />
                           ))}
                         </TableRow>
@@ -896,8 +912,14 @@ export default function BudgetPage() {
               </div>
             )}
 
+            <p className="mt-4 flex items-center gap-2 text-[12px] text-[#6a6d70]">
+              <span className="inline-block h-3 w-3 rounded-sm bg-[#fff3d6]" />
+              Nelle colonne Storico anno prec. / Miglior storico: sfondo evidenziato = mese ancora in corso o
+              futuro (dato OTB, prenotazioni ad oggi, non consuntivo chiuso).
+            </p>
+
             {structuresWithoutHistory.size > 0 && (
-              <p className="mt-4 text-[12px] text-[#6a6d70]">
+              <p className="mt-2 text-[12px] text-[#6a6d70]">
                 Nessuno storico sufficiente per il confronto su: {[...structuresWithoutHistory].join(", ")}.
               </p>
             )}
@@ -994,8 +1016,10 @@ function MetricCellGroup({
   onChange,
   otherLevelValues,
   lastYearValue,
+  lastYearIsOtb,
   bestValue,
   bestYear,
+  bestIsOtb,
 }: {
   metricKey: MetricKey;
   expanded: boolean;
@@ -1005,8 +1029,10 @@ function MetricCellGroup({
   onChange?: (value: string) => void;
   otherLevelValues: (number | null)[];
   lastYearValue: number | null;
+  lastYearIsOtb: boolean;
   bestValue: number | null;
   bestYear: number | null;
+  bestIsOtb: boolean;
 }) {
   return (
     <>
@@ -1027,10 +1053,14 @@ function MetricCellGroup({
         <>
           <TableCell className="text-[12px] text-[#6a6d70]">{formatMetric(metricKey, otherLevelValues[0])}</TableCell>
           <TableCell className="text-[12px] text-[#6a6d70]">{formatMetric(metricKey, otherLevelValues[1])}</TableCell>
-          <TableCell className="text-[12px] text-[#6a6d70]">
+          <TableCell
+            className={`text-[12px] text-[#6a6d70] ${lastYearValue !== null && lastYearIsOtb ? "bg-[#fff3d6]" : ""}`}
+          >
             {lastYearValue !== null ? formatMetric(metricKey, lastYearValue) : "—"}
           </TableCell>
-          <TableCell className="text-[12px] text-[#6a6d70]">
+          <TableCell
+            className={`text-[12px] text-[#6a6d70] ${bestValue !== null && bestIsOtb ? "bg-[#fff3d6]" : ""}`}
+          >
             {bestValue !== null ? `${formatMetric(metricKey, bestValue)}${bestYear ? ` (${bestYear})` : ""}` : "—"}
           </TableCell>
         </>

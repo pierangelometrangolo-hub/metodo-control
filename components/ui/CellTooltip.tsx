@@ -5,13 +5,18 @@ import { useEffect, useState } from "react";
 type CellTooltipProps = {
   trigger: React.ReactNode;
   children: React.ReactNode;
+  // Default invariato per i chiamanti esistenti (celle di tabella a piena
+  // larghezza). Passare "inline-flex" per un trigger inline accanto ad
+  // altro testo (es. un badge accanto a un'etichetta), non solo dentro una
+  // cella di tabella.
+  className?: string;
 };
 
 // Stesso pattern hover/tap di InfoTooltip, ma pensato per avvolgere il
 // contenuto compatto di una cella (non una sola icona "i") dentro righe di
 // tabella cliccabili: lo stopPropagation sul trigger evita che un tap per
 // aprire il tooltip su mobile navighi anche verso il drill-down.
-export function CellTooltip({ trigger, children }: CellTooltipProps) {
+export function CellTooltip({ trigger, children, className = "block w-full" }: CellTooltipProps) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -26,7 +31,7 @@ export function CellTooltip({ trigger, children }: CellTooltipProps) {
   }, [open]);
 
   return (
-    <span className="group relative block w-full cursor-help">
+    <span className={`group relative cursor-help ${className}`}>
       <span
         onClick={(e) => {
           e.stopPropagation();

@@ -2,19 +2,29 @@
 
 import { formatCurrency, ND } from "@/lib/performanceMetrics";
 import { TruncatedLabelWithTooltip } from "@/components/ui/TruncatedLabelWithTooltip";
+import { AppBadge } from "@/components/ui/AppBadge";
+import { CellTooltip } from "@/components/ui/CellTooltip";
 
 export type ChannelRevenueDatum = {
   channel: string;
   revenue: number;
 };
 
+export type ChannelCommissionInfo = {
+  // commission_pct e' gia' definito come commissione/lordo*100 (stessa
+  // formula usata dal form di import) - e' direttamente la % di incidenza
+  // da mostrare, nessun ricalcolo separato serve.
+  pct: number;
+  source: "fattura" | "stima";
+  sourceReference: string | null;
+};
+
 type ChannelRevenueBarsProps = {
   data: ChannelRevenueDatum[];
-  // Percentuale commissione per canale (es. 15 = 15%), solo per i canali
-  // con una riga in channel_commission_rates per il mese in corso - i
-  // canali assenti da questa mappa non mostrano la seconda barra, mai un
-  // netto inventato.
-  commissionRates?: Map<string, number>;
+  // Solo per i canali con una riga in channel_commission_rates per il mese
+  // in corso - i canali assenti da questa mappa non mostrano la seconda
+  // barra, mai un netto o una percentuale inventati.
+  commissionRates?: Map<string, ChannelCommissionInfo>;
   showNet?: boolean;
 };
 
@@ -119,15 +129,15 @@ export function ChannelRevenueBars({ data, commissionRates, showNet = false }: C
         // un tetto per non sovrapporsi al testo dell'importo a destra.
         const badgeLeftPct = isNegative ? 4 : Math.min(barWidthPct, 94);
 
-        const commissionPct = commissionRates?.get(row.channel);
+        const commissionInfo = commissionRates?.get(row.channel);
         // Nessuna seconda barra se il canale non ha una riga di commissione
         // nota per il periodo - mai un netto inventato per un canale senza
         // dato. netAmount + commissionAmount = row.revenue esattamente (la
         // seconda somma sempre il complementare della prima), quindi le due
         // larghezze sommate combaciano sempre con barWidthPct, nessuno
         // scarto visivo possibile.
-        const showChannelNet = showNet && !isNegative && commissionPct !== undefined && row.revenue > 0;
-        const commissionAmount = showChannelNet ? row.revenue * (commissionPct! / 100) : 0;
+        const showChannelNet = showNet && !isNegative && commissionInfo !== undefined && row.revenue > 0;
+        const commissionAmount = showChannelNet ? row.revenue * (commissionInfo!.pct / 100) : 0;
         const netAmount = showChannelNet ? row.revenue - commissionAmount : 0;
         const netSegmentPct = showChannelNet ? (netAmount / row.revenue) * 100 : 0;
         const commissionSegmentPct = showChannelNet ? (commissionAmount / row.revenue) * 100 : 0;
@@ -136,6 +146,19 @@ export function ChannelRevenueBars({ data, commissionRates, showNet = false }: C
           <div key={row.channel} className="space-y-1">
             <div className="flex items-center gap-3">
               <TruncatedLabelWithTooltip text={row.channel} />
+
+              {showChannelNet && commissionInfo!.source === "stima" && (
+                <CellTooltip
+                  className="inline-flex shrink-0"
+                  trigger={
+                    <AppBadge variant="warning" className="whitespace-nowrap">
+                      Stima
+                    </AppBadge>
+                  }
+                >
+                  {commissionInfo!.sourceReference || "Percentuale commissione stimata, non ancora da fattura."}
+                </CellTooltip>
+              )}
 
               <div className="relative h-6 flex-1 rounded-full bg-[#f0ece6]">
                 {!isNegative && (
@@ -172,12 +195,9 @@ export function ChannelRevenueBars({ data, commissionRates, showNet = false }: C
                   </div>
                 </div>
 
-                <span className="w-24 shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
-                  {formatCurrency(netAmount)}
-                </span>
-
-                <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
-                  {formatCurrency(commissionAmount)}
+                <span className="shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
+                  {formatCurrency(netAmount)} · {formatCurrency(commissionAmount)} commissione (
+                  {formatPercent1(commissionInfo!.pct)})
                 </span>
               </div>
             )}

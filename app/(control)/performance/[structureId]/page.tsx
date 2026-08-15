@@ -11,7 +11,7 @@ import { CellTooltip } from "@/components/ui/CellTooltip";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule, getUserLevelRank } from "@/lib/permissions";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
-import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
+import { ChannelRevenueBars, ChannelRevenueDatum, ChannelCommissionInfo } from "@/components/performance/ChannelRevenueBars";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import {
   ND,
@@ -393,7 +393,7 @@ export default function PerformanceStructureDrilldownPage({
   // selezionato (stesso mese usato da "Mese in corso vs budget") - solo i
   // canali con una riga in channel_commission_rates per quel mese finiscono
   // in questa mappa, gli altri restano senza netto calcolato.
-  const [channelCommissionRates, setChannelCommissionRates] = useState<Map<string, number>>(new Map());
+  const [channelCommissionRates, setChannelCommissionRates] = useState<Map<string, ChannelCommissionInfo>>(new Map());
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
   const [hasNationalityData, setHasNationalityData] = useState(false);
   const [nationalityData, setNationalityData] = useState<NationalityDatum[]>([]);
@@ -625,7 +625,7 @@ export default function PerformanceStructureDrilldownPage({
       hasChannelData && canManage
         ? supabase
             .from("channel_commission_rates")
-            .select("channel, commission_pct")
+            .select("channel, commission_pct, source, source_reference")
             .eq("structure_id", structureId)
             .eq("period_year", year)
             .eq("period_month", month)
@@ -657,9 +657,13 @@ export default function PerformanceStructureDrilldownPage({
 
     setChannelCommissionRates(
       new Map(
-        ((commissionRatesRes.data as { channel: string; commission_pct: number }[] | null) || []).map((r) => [
+        (
+          (commissionRatesRes.data as
+            | { channel: string; commission_pct: number; source: "fattura" | "stima"; source_reference: string | null }[]
+            | null) || []
+        ).map((r) => [
           r.channel,
-          Number(r.commission_pct),
+          { pct: Number(r.commission_pct), source: r.source, sourceReference: r.source_reference },
         ])
       )
     );

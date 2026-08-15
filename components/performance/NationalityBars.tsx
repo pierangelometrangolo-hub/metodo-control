@@ -1,4 +1,4 @@
-import { formatNumber, ND } from "@/lib/performanceMetrics";
+import { formatDelta, formatNumber, ND } from "@/lib/performanceMetrics";
 import { flagForNationality } from "@/lib/nationalityFlags";
 import { TruncatedLabelWithTooltip } from "@/components/ui/TruncatedLabelWithTooltip";
 
@@ -9,6 +9,18 @@ export type NationalityDatum = {
 
 type NationalityBarsProps = {
   data: NationalityDatum[];
+  // Confronto vs anno precedente, stesso periodo (SDLY). Assente/vuoto per
+  // costruzione se sdlyAvailable e' false - mai un delta calcolato su dati
+  // che non esistono.
+  sdlyData?: NationalityDatum[];
+  // Anno del confronto, solo per l'etichetta (es. "2025").
+  sdlyYearLabel?: string;
+  // false = nessuno storico Nazionalita' importato per questa struttura
+  // per l'intero anno del confronto (non solo questo periodo) - va
+  // mostrato un avviso esplicito "non disponibile", mai un delta a zero:
+  // zero e' un dato reale (nessun ospite di quella nazionalita'), assenza
+  // di copertura e' un'altra cosa.
+  sdlyAvailable?: boolean;
 };
 
 const BAR_COLOR = "#017A92";
@@ -45,7 +57,7 @@ function NationalityBadge({ nationality, leftPct }: { nationality: string; leftP
   );
 }
 
-export function NationalityBars({ data }: NationalityBarsProps) {
+export function NationalityBars({ data, sdlyData, sdlyYearLabel, sdlyAvailable = false }: NationalityBarsProps) {
   if (data.length === 0) {
     return (
       <p className="rounded-[12px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-6 text-center text-sm text-[#6a6d70]">
@@ -64,8 +76,25 @@ export function NationalityBars({ data }: NationalityBarsProps) {
 
   const total = sorted.reduce((sum, row) => sum + row.presences, 0);
 
+  // "Altri" nel confronto SDLY: stessa definizione dell'anno corrente
+  // (tutto cio' che non e' tra le nazionalita' nominate qui sopra), non un
+  // tentativo di far coincidere le liste "Altri" dei due anni - la
+  // composizione dei mercati minori puo' essere diversa, la definizione
+  // "non tra i nominati" resta invece coerente in entrambi i casi.
+  const namedNationalities = new Set(top10.map((r) => r.nationality));
+  const sdlyByNationality = new Map((sdlyData || []).map((r) => [r.nationality, r.presences]));
+  const sdlyTotal = (sdlyData || []).reduce((sum, r) => sum + r.presences, 0);
+  const sdlyNamedTotal = top10.reduce((sum, r) => sum + (sdlyByNationality.get(r.nationality) || 0), 0);
+
   return (
     <div className="space-y-2">
+      {sdlyAvailable === false && (
+        <p className="mb-1 rounded-[12px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-3 text-[12px] text-[#6a6d70]">
+          Confronto storico {sdlyYearLabel ? sdlyYearLabel + " " : ""}non disponibile per questa struttura — non è un
+          valore pari a zero.
+        </p>
+      )}
+
       {rows.map((row) => {
         const barWidthPct = total > 0 ? Math.min(100, Math.max(2, (row.presences / total) * 100)) : 0;
         const percentOfTotal = total !== 0 ? (row.presences / total) * 100 : 0;
@@ -73,6 +102,10 @@ export function NationalityBars({ data }: NationalityBarsProps) {
         // punta della barra, nessun pavimento minimo che lo stacchi dal
         // bordo reale quando la barra è piccola.
         const badgeLeftPct = Math.min(barWidthPct, 94);
+
+        const sdlyValue =
+          row.nationality === OTHERS_LABEL ? Math.max(0, sdlyTotal - sdlyNamedTotal) : sdlyByNationality.get(row.nationality) ?? 0;
+        const delta = sdlyAvailable ? formatDelta(row.presences, sdlyValue) : null;
 
         return (
           <div key={row.nationality} className="flex items-center gap-3">
@@ -93,6 +126,13 @@ export function NationalityBars({ data }: NationalityBarsProps) {
             <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
               {formatPercent1(percentOfTotal)}
             </span>
+
+            {sdlyAvailable && delta && (
+              <span className="w-40 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
+                ({sdlyYearLabel ? `${sdlyYearLabel}: ` : ""}
+                {formatNumber(sdlyValue)} · <span className={delta.colorClass}>{delta.text}</span>)
+              </span>
+            )}
           </div>
         );
       })}
@@ -104,6 +144,13 @@ export function NationalityBars({ data }: NationalityBarsProps) {
           {formatNumber(total)}
         </span>
         <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">100,0%</span>
+        {sdlyAvailable && (
+          <span className="w-40 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
+            ({sdlyYearLabel ? `${sdlyYearLabel}: ` : ""}
+            {formatNumber(sdlyTotal)} ·{" "}
+            <span className={formatDelta(total, sdlyTotal).colorClass}>{formatDelta(total, sdlyTotal).text}</span>)
+          </span>
+        )}
       </div>
     </div>
   );

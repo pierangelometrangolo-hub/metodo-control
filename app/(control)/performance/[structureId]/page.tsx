@@ -397,6 +397,12 @@ export default function PerformanceStructureDrilldownPage({
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
   const [hasNationalityData, setHasNationalityData] = useState(false);
   const [nationalityData, setNationalityData] = useState<NationalityDatum[]>([]);
+  const [nationalityDataSdly, setNationalityDataSdly] = useState<NationalityDatum[]>([]);
+  // false = nessun dato Nazionalita' importato per questa struttura per
+  // l'intero anno del confronto SDLY (es. Sangiorgio Resort, Dimora De
+  // Belli, Montecallini) - va distinto da "0 presenze in questo periodo",
+  // che e' un dato reale, non un'assenza di copertura.
+  const [nationalitySdlyAvailable, setNationalitySdlyAvailable] = useState(false);
 
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -565,6 +571,8 @@ export default function PerformanceStructureDrilldownPage({
       channelSdlyRes,
       commissionRatesRes,
       nationalityRes,
+      nationalitySdlyRes,
+      nationalitySdlyYearCountRes,
     ] = await Promise.all([
       supabase
         .from("v_snapshot_latest")
@@ -638,6 +646,31 @@ export default function PerformanceStructureDrilldownPage({
             .gte("stay_date", periodStart)
             .lte("stay_date", periodEnd)
         : Promise.resolve({ data: [], error: null }),
+      // Confronto Nazionalità 2026 vs 2025: stesso periodo SDLY gia'
+      // calcolato per le altre sezioni della pagina.
+      hasNationalityData
+        ? supabase
+            .from("guest_nationality")
+            .select("nationality, presences")
+            .eq("structure_id", structureId)
+            .gte("stay_date", sdlyStart)
+            .lte("stay_date", sdlyEnd)
+        : Promise.resolve({ data: [], error: null }),
+      // Disponibilita' storico Nazionalita' per l'ANNO del periodo SDLY
+      // (non solo il periodo specifico): distingue "nessun dato importato
+      // per questa struttura quell'anno" (es. Sangiorgio, migrazione BD nel
+      // 2026 - dati precedenti non attendibili, mai importati) da "importato,
+      // ma zero presenze in questo specifico periodo" (0 e' un dato reale,
+      // non un'assenza di copertura). Verificato una volta sull'intero anno,
+      // non sul singolo periodo scelto nel calendario.
+      hasNationalityData
+        ? supabase
+            .from("guest_nationality")
+            .select("id", { count: "exact", head: true })
+            .eq("structure_id", structureId)
+            .gte("stay_date", `${sdlyStart.slice(0, 4)}-01-01`)
+            .lte("stay_date", `${sdlyStart.slice(0, 4)}-12-31`)
+        : Promise.resolve({ count: 0, error: null }),
     ]);
 
     if (periodRes.error) setLoadError(periodRes.error.message);
@@ -649,6 +682,8 @@ export default function PerformanceStructureDrilldownPage({
     if (channelSdlyRes.error) setLoadError(channelSdlyRes.error.message);
     if (commissionRatesRes.error) setLoadError(commissionRatesRes.error.message);
     if (nationalityRes.error) setLoadError(nationalityRes.error.message);
+    if (nationalitySdlyRes.error) setLoadError(nationalitySdlyRes.error.message);
+    if (nationalitySdlyYearCountRes.error) setLoadError(nationalitySdlyYearCountRes.error.message);
 
     setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
@@ -718,6 +753,16 @@ export default function PerformanceStructureDrilldownPage({
       nationalityTotals.set(key, (nationalityTotals.get(key) || 0) + Number(r.presences));
     });
     setNationalityData(Array.from(nationalityTotals, ([nationality, presences]) => ({ nationality, presences })));
+
+    const nationalitySdlyTotals = new Map<string, number>();
+    (nationalitySdlyRes.data || []).forEach((r) => {
+      const key = r.nationality as string;
+      nationalitySdlyTotals.set(key, (nationalitySdlyTotals.get(key) || 0) + Number(r.presences));
+    });
+    setNationalityDataSdly(
+      Array.from(nationalitySdlyTotals, ([nationality, presences]) => ({ nationality, presences }))
+    );
+    setNationalitySdlyAvailable((nationalitySdlyYearCountRes.count || 0) > 0);
 
     setLoadingMetrics(false);
   }
@@ -1104,9 +1149,14 @@ export default function PerformanceStructureDrilldownPage({
       {hasNationalityData && (
         <AppCard
           title="Presenze per nazionalità"
-          subtitle={`Top 10 nazionalità per presenze sul periodo visualizzato (${periodLabel}), le restanti aggregate in "Altri" — la riga Totale deve coincidere con la somma delle barre`}
+          subtitle={`Top 10 nazionalità per presenze sul periodo visualizzato (${periodLabel}), le restanti aggregate in "Altri" — confronto vs ${sdlyLabel} dove disponibile — la riga Totale deve coincidere con la somma delle barre`}
         >
-          <NationalityBars data={nationalityData} />
+          <NationalityBars
+            data={nationalityData}
+            sdlyData={nationalityDataSdly}
+            sdlyYearLabel={sdlyDate(periodStart).slice(0, 4)}
+            sdlyAvailable={nationalitySdlyAvailable}
+          />
         </AppCard>
       )}
 

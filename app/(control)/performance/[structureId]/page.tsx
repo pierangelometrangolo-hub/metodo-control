@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { use as usePromise } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
@@ -340,6 +340,21 @@ export default function PerformanceStructureDrilldownPage({
 }) {
   const { structureId } = usePromise(params);
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Link rapido da Budget: ?anno=YYYY preseleziona l'intero anno invece
+  // del mese corrente di default - solo all'arrivo sulla pagina, non
+  // riletto ad ogni render (l'utente puo' poi cambiare periodo a mano dal
+  // calendario come sempre).
+  const annoParam = searchParams.get("anno");
+  const initialRange = useMemo(() => {
+    const year = annoParam ? Number(annoParam) : null;
+    if (year && !Number.isNaN(year)) {
+      return { start: `${year}-01-01`, end: `${year}-12-31` };
+    }
+    return DEFAULT_MONTH;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [accessState, setAccessState] = useState<"checking" | "granted" | "denied">(
     "checking"
@@ -355,15 +370,15 @@ export default function PerformanceStructureDrilldownPage({
   // secondo). Nessuna modalita'/toggle esplicita: il calendario e' sempre
   // in questo comportamento, un giorno singolo e' semplicemente un
   // intervallo con inizio e fine coincidenti (due click sulla stessa data).
-  const [rangeStart, setRangeStart] = useState<string>(DEFAULT_MONTH.start);
-  const [rangeEnd, setRangeEnd] = useState<string | null>(DEFAULT_MONTH.end);
+  const [rangeStart, setRangeStart] = useState<string>(initialRange.start);
+  const [rangeEnd, setRangeEnd] = useState<string | null>(initialRange.end);
 
   // Periodo "confermato": si aggiorna solo quando la selezione e'
   // completa (rangeEnd non nullo), cosi' il primo click di un nuovo
   // intervallo non fa sparire i dati del periodo precedente mentre si
   // attende il secondo click.
-  const [confirmedStart, setConfirmedStart] = useState(DEFAULT_MONTH.start);
-  const [confirmedEnd, setConfirmedEnd] = useState(DEFAULT_MONTH.end);
+  const [confirmedStart, setConfirmedStart] = useState(initialRange.start);
+  const [confirmedEnd, setConfirmedEnd] = useState(initialRange.end);
 
   useEffect(() => {
     if (rangeEnd) {

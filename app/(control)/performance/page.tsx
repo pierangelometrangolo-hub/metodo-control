@@ -406,6 +406,9 @@ export default function PerformanceOverviewPage() {
           >
             Vai all'inserimento manuale (Montecallini) →
           </Link>
+          <Link href="/performance/budget" className="text-sm font-medium text-[#017A92] hover:underline">
+            Vai a Budget →
+          </Link>
         </div>
       </PageHeader>
 

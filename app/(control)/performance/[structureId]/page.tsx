@@ -403,6 +403,7 @@ export default function PerformanceStructureDrilldownPage({
   // Belli, Montecallini) - va distinto da "0 presenze in questo periodo",
   // che e' un dato reale, non un'assenza di copertura.
   const [nationalitySdlyAvailable, setNationalitySdlyAvailable] = useState(false);
+  const [showNationalityComparison, setShowNationalityComparison] = useState(false);
 
   const [loadingMetrics, setLoadingMetrics] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -1149,13 +1150,24 @@ export default function PerformanceStructureDrilldownPage({
       {hasNationalityData && (
         <AppCard
           title="Presenze per nazionalità"
-          subtitle={`Top 10 nazionalità per presenze sul periodo visualizzato (${periodLabel}), le restanti aggregate in "Altri" — confronto vs ${sdlyLabel} dove disponibile — la riga Totale deve coincidere con la somma delle barre`}
+          subtitle={`Top 10 nazionalità per presenze sul periodo visualizzato (${periodLabel}), le restanti aggregate in "Altri" — la riga Totale deve coincidere con la somma delle barre`}
+          action={
+            <label className="flex items-center gap-2 text-sm text-[#2B2D2F]">
+              <input
+                type="checkbox"
+                checked={showNationalityComparison}
+                onChange={(e) => setShowNationalityComparison(e.target.checked)}
+              />
+              Confronta con {sdlyDate(periodStart).slice(0, 4)}
+            </label>
+          }
         >
           <NationalityBars
             data={nationalityData}
             sdlyData={nationalityDataSdly}
             sdlyYearLabel={sdlyDate(periodStart).slice(0, 4)}
             sdlyAvailable={nationalitySdlyAvailable}
+            showComparison={showNationalityComparison}
           />
         </AppCard>
       )}

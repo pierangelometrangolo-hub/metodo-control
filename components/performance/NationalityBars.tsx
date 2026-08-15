@@ -21,9 +21,14 @@ type NationalityBarsProps = {
   // zero e' un dato reale (nessun ospite di quella nazionalita'), assenza
   // di copertura e' un'altra cosa.
   sdlyAvailable?: boolean;
+  // Flag spento (default): nessuna modifica, solo la barra dell'anno
+  // corrente - stesso principio del toggle "Mostra netto" su Revenue per
+  // canale.
+  showComparison?: boolean;
 };
 
 const BAR_COLOR = "#017A92";
+const COMPARISON_COLOR = "#8aa9ae";
 const OTHERS_LABEL = "Altri";
 
 function formatPercent1(value: number) {
@@ -57,7 +62,13 @@ function NationalityBadge({ nationality, leftPct }: { nationality: string; leftP
   );
 }
 
-export function NationalityBars({ data, sdlyData, sdlyYearLabel, sdlyAvailable = false }: NationalityBarsProps) {
+export function NationalityBars({
+  data,
+  sdlyData,
+  sdlyYearLabel,
+  sdlyAvailable = false,
+  showComparison = false,
+}: NationalityBarsProps) {
   if (data.length === 0) {
     return (
       <p className="rounded-[12px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-6 text-center text-sm text-[#6a6d70]">
@@ -81,14 +92,29 @@ export function NationalityBars({ data, sdlyData, sdlyYearLabel, sdlyAvailable =
   // tentativo di far coincidere le liste "Altri" dei due anni - la
   // composizione dei mercati minori puo' essere diversa, la definizione
   // "non tra i nominati" resta invece coerente in entrambi i casi.
-  const namedNationalities = new Set(top10.map((r) => r.nationality));
   const sdlyByNationality = new Map((sdlyData || []).map((r) => [r.nationality, r.presences]));
   const sdlyTotal = (sdlyData || []).reduce((sum, r) => sum + r.presences, 0);
   const sdlyNamedTotal = top10.reduce((sum, r) => sum + (sdlyByNationality.get(r.nationality) || 0), 0);
 
+  const showBanner = showComparison && !sdlyAvailable;
+  const showRowsComparison = showComparison && sdlyAvailable;
+
   return (
     <div className="space-y-2">
-      {sdlyAvailable === false && (
+      {showRowsComparison && (
+        <div className="mb-1 flex items-center gap-4 text-[12px] text-[#6a6d70]">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: BAR_COLOR }} />
+            Anno corrente
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COMPARISON_COLOR }} />
+            {sdlyYearLabel || "Anno precedente"}
+          </span>
+        </div>
+      )}
+
+      {showBanner && (
         <p className="mb-1 rounded-[12px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 py-3 text-[12px] text-[#6a6d70]">
           Confronto storico {sdlyYearLabel ? sdlyYearLabel + " " : ""}non disponibile per questa struttura — non è un
           valore pari a zero.
@@ -104,52 +130,84 @@ export function NationalityBars({ data, sdlyData, sdlyYearLabel, sdlyAvailable =
         const badgeLeftPct = Math.min(barWidthPct, 94);
 
         const sdlyValue =
-          row.nationality === OTHERS_LABEL ? Math.max(0, sdlyTotal - sdlyNamedTotal) : sdlyByNationality.get(row.nationality) ?? 0;
-        const delta = sdlyAvailable ? formatDelta(row.presences, sdlyValue) : null;
+          row.nationality === OTHERS_LABEL
+            ? Math.max(0, sdlyTotal - sdlyNamedTotal)
+            : sdlyByNationality.get(row.nationality) ?? 0;
+        // Larghezza della barra di confronto in proporzione al TOTALE
+        // dell'anno di confronto (stessa logica della barra principale sul
+        // proprio totale) - cosi' entrambe le barre leggono "quota sul
+        // totale di quell'anno", direttamente confrontabili come mix,
+        // non solo come volume assoluto (gia' mostrato a fianco in cifre).
+        const sdlyBarWidthPct = sdlyTotal > 0 ? Math.min(100, Math.max(2, (sdlyValue / sdlyTotal) * 100)) : 0;
+        const delta = formatDelta(row.presences, sdlyValue);
 
         return (
-          <div key={row.nationality} className="flex items-center gap-3">
-            <TruncatedLabelWithTooltip text={row.nationality} />
+          <div key={row.nationality} className="space-y-1">
+            <div className="flex items-center gap-3">
+              <TruncatedLabelWithTooltip text={row.nationality} />
 
-            <div className="relative h-6 flex-1 rounded-full bg-[#f0ece6]">
-              <div
-                className="h-6 rounded-full"
-                style={{ width: `${barWidthPct}%`, backgroundColor: BAR_COLOR }}
-              />
-              <NationalityBadge nationality={row.nationality} leftPct={badgeLeftPct} />
+              <div className="relative h-6 flex-1 rounded-full bg-[#f0ece6]">
+                <div
+                  className="h-6 rounded-full"
+                  style={{ width: `${barWidthPct}%`, backgroundColor: BAR_COLOR }}
+                />
+                <NationalityBadge nationality={row.nationality} leftPct={badgeLeftPct} />
+              </div>
+
+              <span className="w-20 shrink-0 text-right text-sm font-semibold tabular-nums text-[#2B2D2F]">
+                {formatNumber(row.presences)}
+              </span>
+
+              <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
+                {formatPercent1(percentOfTotal)}
+              </span>
             </div>
 
-            <span className="w-20 shrink-0 text-right text-sm font-semibold tabular-nums text-[#2B2D2F]">
-              {formatNumber(row.presences)}
-            </span>
+            {showRowsComparison && (
+              <div className="flex items-center gap-3">
+                <span className="w-36 shrink-0" />
 
-            <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
-              {formatPercent1(percentOfTotal)}
-            </span>
+                <div className="relative h-2 flex-1 rounded-full bg-[#f0ece6]">
+                  <div
+                    className="h-2 rounded-full"
+                    style={{ width: `${sdlyBarWidthPct}%`, backgroundColor: COMPARISON_COLOR }}
+                  />
+                </div>
 
-            {sdlyAvailable && delta && (
-              <span className="w-40 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
-                ({sdlyYearLabel ? `${sdlyYearLabel}: ` : ""}
-                {formatNumber(sdlyValue)} · <span className={delta.colorClass}>{delta.text}</span>)
-              </span>
+                <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
+                  {formatNumber(sdlyValue)}
+                </span>
+
+                <span className={`w-16 shrink-0 text-right text-[11px] tabular-nums ${delta.colorClass}`}>
+                  {delta.text}
+                </span>
+              </div>
             )}
           </div>
         );
       })}
 
-      <div className="flex items-center gap-3 border-t border-[#e7dfd8] pt-2">
-        <span className="w-36 shrink-0 text-sm font-semibold text-[#2B2D2F]">Totale</span>
-        <div className="flex-1" />
-        <span className="w-20 shrink-0 text-right text-sm font-semibold tabular-nums text-[#2B2D2F]">
-          {formatNumber(total)}
-        </span>
-        <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">100,0%</span>
-        {sdlyAvailable && (
-          <span className="w-40 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">
-            ({sdlyYearLabel ? `${sdlyYearLabel}: ` : ""}
-            {formatNumber(sdlyTotal)} ·{" "}
-            <span className={formatDelta(total, sdlyTotal).colorClass}>{formatDelta(total, sdlyTotal).text}</span>)
+      <div className="space-y-1 border-t border-[#e7dfd8] pt-2">
+        <div className="flex items-center gap-3">
+          <span className="w-36 shrink-0 text-sm font-semibold text-[#2B2D2F]">Totale</span>
+          <div className="flex-1" />
+          <span className="w-20 shrink-0 text-right text-sm font-semibold tabular-nums text-[#2B2D2F]">
+            {formatNumber(total)}
           </span>
+          <span className="w-16 shrink-0 text-right text-[12px] tabular-nums text-[#6a6d70]">100,0%</span>
+        </div>
+
+        {showRowsComparison && (
+          <div className="flex items-center gap-3">
+            <span className="w-36 shrink-0" />
+            <div className="flex-1" />
+            <span className="w-20 shrink-0 text-right text-[11px] tabular-nums text-[#6a6d70]">
+              {formatNumber(sdlyTotal)}
+            </span>
+            <span className={`w-16 shrink-0 text-right text-[11px] tabular-nums ${formatDelta(total, sdlyTotal).colorClass}`}>
+              {formatDelta(total, sdlyTotal).text}
+            </span>
+          </div>
         )}
       </div>
     </div>

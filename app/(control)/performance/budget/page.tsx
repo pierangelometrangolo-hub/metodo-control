@@ -25,9 +25,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Calendar } from "@/components/performance/Calendar";
 import { supabase } from "@/lib/supabaseClient";
 import { getUserLevelRank } from "@/lib/permissions";
-import { adr as adrOf, occupancy, revPar, formatCurrency, formatNumber, formatPercent } from "@/lib/performanceMetrics";
+import { adr as adrOf, occupancy, revPar, formatCurrency, formatNumber, formatPercent, pad } from "@/lib/performanceMetrics";
 import {
   BUDGET_LEVELS,
   BudgetLevel,
@@ -53,6 +62,8 @@ type OpeningOverride = { id: string; daysOpen: number };
 
 type ActualMetrics = { revenue: number | null; rns: number | null; rnav: number | null };
 
+type StructureClosure = { id: string; start_date: string; end_date: string; note: string | null };
+
 function todayString() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -67,6 +78,63 @@ function isOtbYearMonth(year: number, month: number): boolean {
   const currentYear = now.getUTCFullYear();
   const currentMonth = now.getUTCMonth() + 1;
   return year === currentYear && month >= currentMonth;
+}
+
+// Elenco (anno, mese) toccati da un intervallo di date - una chiusura puo'
+// attraversare piu' mesi o anche il capodanno.
+function monthsTouchedByRange(startDate: string, endDate: string): { year: number; month: number }[] {
+  const result: { year: number; month: number }[] = [];
+  const [sy, sm] = startDate.split("-").map(Number);
+  const [ey, em] = endDate.split("-").map(Number);
+  let y = sy;
+  let m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    result.push({ year: y, month: m });
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return result;
+}
+
+// Elenco di tutte le date (stringa YYYY-MM-DD) comprese in un intervallo,
+// usato per evidenziare nel calendario i giorni gia' coperti da una
+// chiusura registrata.
+function expandDateRange(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  let cursor = new Date(`${startDate}T00:00:00Z`);
+  const endD = new Date(`${endDate}T00:00:00Z`);
+  while (cursor <= endD) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return dates;
+}
+
+// Giorni chiusi in un dato mese secondo l'unione di tutte le chiusure
+// registrate (evita di contare due volte un giorno coperto da due
+// intervalli sovrapposti).
+function closedDaysInMonth(allClosures: { start_date: string; end_date: string }[], year: number, month: number): number {
+  const monthStart = `${year}-${pad(month)}-01`;
+  const monthEnd = `${year}-${pad(month)}-${pad(daysInMonth(year, month))}`;
+  const closedSet = new Set<string>();
+
+  for (const c of allClosures) {
+    const start = c.start_date < monthStart ? monthStart : c.start_date;
+    const end = c.end_date > monthEnd ? monthEnd : c.end_date;
+    if (start > end) continue;
+
+    let cursor = new Date(`${start}T00:00:00Z`);
+    const endDate = new Date(`${end}T00:00:00Z`);
+    while (cursor <= endDate) {
+      closedSet.add(cursor.toISOString().slice(0, 10));
+      cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+    }
+  }
+
+  return closedSet.size;
 }
 
 // Riga "attiva" per (mese, livello): una bozza/proposta in corso (draft o
@@ -143,6 +211,14 @@ export default function BudgetPage() {
   const [form, setForm] = useState<Record<number, MonthForm>>({});
   const [rnavByMonth, setRnavByMonth] = useState<Record<number, string>>({});
   const [openingOverrides, setOpeningOverrides] = useState<Record<number, OpeningOverride | null>>({});
+
+  const [closures, setClosures] = useState<StructureClosure[]>([]);
+  const [closureDialogOpen, setClosureDialogOpen] = useState(false);
+  const [closureRangeStart, setClosureRangeStart] = useState<string | null>(null);
+  const [closureRangeEnd, setClosureRangeEnd] = useState<string | null>(null);
+  const [closureNote, setClosureNote] = useState("");
+  const [closureSaving, setClosureSaving] = useState(false);
+  const [closureCalendarMonth, setClosureCalendarMonth] = useState(`${new Date().getFullYear()}-01`);
 
   const [lastYearByMonth, setLastYearByMonth] = useState<Record<number, ActualMetrics | null>>({});
   const [bestByMonth, setBestByMonth] = useState<Record<number, { metrics: ActualMetrics; year: number } | null>>({});
@@ -264,6 +340,111 @@ export default function BudgetPage() {
     setLoading(false);
 
     void loadComparisonData();
+    void loadClosures();
+  }
+
+  async function loadClosures() {
+    if (!selectedStructureId) return;
+    const { data, error } = await supabase
+      .from("structure_closures")
+      .select("id, start_date, end_date, note")
+      .eq("structure_id", selectedStructureId)
+      .order("start_date", { ascending: false });
+    if (!error) setClosures((data as StructureClosure[]) || []);
+  }
+
+  // Ricalcola i "giorni di apertura nel mese" salvati in
+  // structure_opening_calendar (la cache aggregata gia' usata dal calcolo
+  // di RN.AV) per i soli mesi toccati da una chiusura appena aggiunta o
+  // rimossa - non tocca mesi non coinvolti, per non sovrascrivere override
+  // manuali indipendenti su RN.AV lasciati su altri mesi.
+  async function recomputeOpeningCalendarForMonths(
+    structureId: string,
+    months: { year: number; month: number }[],
+    userId: string
+  ) {
+    const { data } = await supabase
+      .from("structure_closures")
+      .select("start_date, end_date")
+      .eq("structure_id", structureId);
+    const allClosures = (data as { start_date: string; end_date: string }[]) || [];
+
+    for (const { year, month } of months) {
+      const total = daysInMonth(year, month);
+      const closed = closedDaysInMonth(allClosures, year, month);
+
+      if (closed === 0) {
+        await supabase
+          .from("structure_opening_calendar")
+          .delete()
+          .eq("structure_id", structureId)
+          .eq("season_year", year)
+          .eq("month", month);
+        continue;
+      }
+
+      await supabase.from("structure_opening_calendar").upsert(
+        {
+          structure_id: structureId,
+          season_year: year,
+          month,
+          days_open: Math.max(0, total - closed),
+          created_by: userId,
+        },
+        { onConflict: "structure_id,season_year,month" }
+      );
+    }
+  }
+
+  async function registerClosure() {
+    if (!closureRangeStart || !closureRangeEnd || !selectedStructureId) return;
+    setClosureSaving(true);
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      setClosureSaving(false);
+      return;
+    }
+
+    const { error } = await supabase.from("structure_closures").insert({
+      structure_id: selectedStructureId,
+      start_date: closureRangeStart,
+      end_date: closureRangeEnd,
+      note: closureNote.trim() || null,
+      created_by: user.id,
+    });
+
+    if (error) {
+      setLoadError(error.message);
+      setClosureSaving(false);
+      return;
+    }
+
+    await recomputeOpeningCalendarForMonths(selectedStructureId, monthsTouchedByRange(closureRangeStart, closureRangeEnd), user.id);
+
+    setClosureRangeStart(null);
+    setClosureRangeEnd(null);
+    setClosureNote("");
+    setClosureSaving(false);
+    setClosureDialogOpen(false);
+
+    await loadClosures();
+    if (!dirty) await loadAll();
+  }
+
+  async function removeClosure(closure: StructureClosure) {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user || !selectedStructureId) return;
+
+    await supabase.from("structure_closures").delete().eq("id", closure.id);
+    await recomputeOpeningCalendarForMonths(selectedStructureId, monthsTouchedByRange(closure.start_date, closure.end_date), user.id);
+
+    await loadClosures();
+    if (!dirty) await loadAll();
   }
 
   // Ricostruisce il form (e RN.AV) quando cambia il livello selezionato,
@@ -801,6 +982,16 @@ export default function BudgetPage() {
                 <AppButton variant="secondary" onClick={handleExport} disabled={loading}>
                   Esporta Excel
                 </AppButton>
+                <AppButton
+                  variant="secondary"
+                  onClick={() => {
+                    setClosureCalendarMonth(`${selectedYear}-01`);
+                    setClosureDialogOpen(true);
+                  }}
+                  disabled={loading || !selectedStructureId}
+                >
+                  Segnala chiusura
+                </AppButton>
                 <AppButton variant="secondary" onClick={saveDraft} disabled={saving || loading}>
                   {saving ? "Salvataggio..." : "Salva bozza"}
                 </AppButton>
@@ -972,6 +1163,84 @@ export default function BudgetPage() {
           </AppCard>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={closureDialogOpen} onOpenChange={setClosureDialogOpen}>
+        <DialogContent className="sm:max-w-[380px]">
+          <DialogHeader>
+            <DialogTitle>Segnala chiusura — {selectedStructure?.name}</DialogTitle>
+            <DialogDescription>
+              Clicca il primo giorno di chiusura, poi l&apos;ultimo. Solo chiusure pianificate reali (ristrutturazioni,
+              stagionalita&apos; nota) — mai per rispecchiare dati BD.
+            </DialogDescription>
+          </DialogHeader>
+
+          <Calendar
+            value={closureCalendarMonth}
+            onChange={setClosureCalendarMonth}
+            highlightedDates={new Set(closures.flatMap((c) => expandDateRange(c.start_date, c.end_date)))}
+            legendLabel="giorno gia' coperto da una chiusura registrata"
+            rangeMode
+            rangeStart={closureRangeStart}
+            rangeEnd={closureRangeEnd}
+            onRangeChange={(start, end) => {
+              setClosureRangeStart(start);
+              setClosureRangeEnd(end);
+            }}
+          />
+
+          <div className="space-y-1">
+            <label className="text-[12px] font-medium text-[#6a6d70]">Nota (facoltativa)</label>
+            <AppInput
+              value={closureNote}
+              onChange={(e) => setClosureNote(e.target.value)}
+              placeholder="es. ristrutturazione ala nord"
+            />
+          </div>
+
+          {closures.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[12px] font-medium text-[#6a6d70]">Chiusure gia' registrate</p>
+              <div className="max-h-32 space-y-1 overflow-y-auto">
+                {closures.map((c) => (
+                  <div
+                    key={c.id}
+                    className="flex items-center justify-between rounded-[10px] border border-[#e7dfd8] bg-[#fcfbf9] px-2 py-1 text-[12px] text-[#2B2D2F]"
+                  >
+                    <span>
+                      {c.start_date} → {c.end_date}
+                      {c.note ? ` — ${c.note}` : ""}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeClosure(c)}
+                      className="ml-2 shrink-0 text-[#8a3a3a] hover:underline"
+                    >
+                      Rimuovi
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <AppButton
+              variant="secondary"
+              onClick={() => {
+                setClosureRangeStart(null);
+                setClosureRangeEnd(null);
+                setClosureNote("");
+                setClosureDialogOpen(false);
+              }}
+            >
+              Annulla
+            </AppButton>
+            <AppButton onClick={registerClosure} disabled={!closureRangeStart || !closureRangeEnd || closureSaving}>
+              {closureSaving ? "Salvataggio..." : "Registra chiusura"}
+            </AppButton>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

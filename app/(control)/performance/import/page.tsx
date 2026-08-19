@@ -47,6 +47,10 @@ type FileEntry = {
   structureId: string;
   rows: ParsedMonthRow[];
   parseErrors: string[];
+  // Doppia conferma manuale quando il nome file non permette un match
+  // automatico univoco con nessuna struttura (vedi matchFileNameToStructure)
+  // - irrilevante/ignorato negli altri casi (match/mismatch).
+  structureConfirmed: boolean;
 };
 
 type ImportSummary = {
@@ -59,10 +63,40 @@ function todayString() {
   return new Date().toISOString().split("T")[0];
 }
 
-function guessStructureId(fileName: string, structures: StructureOption[]): string {
+// Verificato sul file reale di un incidente (export BD, nome completo:
+// "ADR - RevPAR (01 Gen 2026 - 31 Dic 2026) - Sangiorgio Resort ... .xls"):
+// il CONTENUTO del file (foglio Excel, proprieta' del workbook) non porta
+// nessun identificativo di struttura - la riga 0 e' gia' l'intestazione
+// tabellare (Data/Unita' occupate/...), nessuna riga titolo, nessuna
+// proprieta' custom. Il nome file e' l'UNICO segnale disponibile, generato
+// dall'export BD stesso (non digitato a mano) - affidabile in pratica, ma
+// comunque rinominabile per errore, quindi mai trattato come prova quanto
+// un identificativo nel contenuto lo sarebbe stato.
+function guessStructureFromFileName(fileName: string, structures: StructureOption[]): StructureOption | null {
   const lower = fileName.toLowerCase();
   const matches = structures.filter((s) => lower.includes(s.name.toLowerCase()));
-  return matches.length === 1 ? matches[0].id : "";
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function guessStructureId(fileName: string, structures: StructureOption[]): string {
+  return guessStructureFromFileName(fileName, structures)?.id ?? "";
+}
+
+type StructureMatch = { kind: "match" } | { kind: "mismatch"; guessedName: string } | { kind: "unknown" };
+
+// Confronta il nome del file con la struttura selezionata - "unknown" copre
+// sia il caso "nessun nome struttura riconoscibile nel nome file" sia
+// "structureId non ancora selezionato" (nulla con cui confrontare).
+function matchFileNameToStructure(fileName: string, selectedStructureId: string, structures: StructureOption[]): StructureMatch {
+  if (!selectedStructureId) return { kind: "unknown" };
+  const guessed = guessStructureFromFileName(fileName, structures);
+  if (!guessed) return { kind: "unknown" };
+  if (guessed.id === selectedStructureId) return { kind: "match" };
+  return { kind: "mismatch", guessedName: guessed.name };
+}
+
+function structureMismatchMessage(guessedName: string, selectedName: string): string {
+  return `Il file selezionato sembra appartenere a "${guessedName}", ma hai selezionato "${selectedName}". Import bloccato. (verifica basata sul nome del file: l'export BD non contiene un identificativo di struttura nel contenuto)`;
 }
 
 async function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
@@ -169,7 +203,11 @@ export default function PerformanceImportPage() {
   const [canManage, setCanManage] = useState(false);
   const [structures, setStructures] = useState<StructureOption[]>([]);
   const [importType, setImportType] = useState<"adr_revpar" | "commissioni" | "nazionalita">("adr_revpar");
-  const [activeTab, setActiveTab] = useState<"storico" | "actual">("storico");
+  // "Import actual" e' il flusso ricorrente settimanale (5 strutture, una
+  // dopo l'altra) - deve essere la tab aperta di default. "Import storico"
+  // e' un'operazione occasionale (batch multi-file storico), non quella con
+  // cui l'utente interagisce piu' spesso.
+  const [activeTab, setActiveTab] = useState<"storico" | "actual">("actual");
 
   useEffect(() => {
     void checkAccessAndLoadStructures();
@@ -332,6 +370,7 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
           structureId: guessStructureId(file.name, structures),
           rows,
           parseErrors: errors,
+          structureConfirmed: false,
         });
       } catch (err) {
         newEntries.push({
@@ -339,6 +378,7 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
           structureId: "",
           rows: [],
           parseErrors: [err instanceof Error ? err.message : String(err)],
+          structureConfirmed: false,
         });
       }
     }
@@ -347,19 +387,31 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
   }
 
   function updateEntryStructure(fileIndex: number, structureId: string) {
+    // Cambiare struttura invalida sempre una conferma precedente - non deve
+    // mai restare "valida" per una struttura diversa da quella confermata.
     setEntries((prev) =>
-      prev.map((entry, i) => (i === fileIndex ? { ...entry, structureId } : entry))
+      prev.map((entry, i) => (i === fileIndex ? { ...entry, structureId, structureConfirmed: false } : entry))
     );
+  }
+
+  function updateEntryConfirmed(fileIndex: number, confirmed: boolean) {
+    setEntries((prev) => prev.map((entry, i) => (i === fileIndex ? { ...entry, structureConfirmed: confirmed } : entry)));
   }
 
   function removeEntry(fileIndex: number) {
     setEntries((prev) => prev.filter((_, i) => i !== fileIndex));
   }
 
+  const entryMatches = entries.map((e) => matchFileNameToStructure(e.file.name, e.structureId, structures));
+  const hasMismatch = entryMatches.some((m) => m.kind === "mismatch");
+  const hasUnconfirmedUnknown = entries.some((e, i) => e.structureId !== "" && entryMatches[i].kind === "unknown" && !e.structureConfirmed);
+
   const canSubmit =
     entries.length > 0 &&
     extractionDate !== "" &&
-    entries.every((e) => e.structureId !== "" && e.rows.length > 0);
+    entries.every((e) => e.structureId !== "" && e.rows.length > 0) &&
+    !hasMismatch &&
+    !hasUnconfirmedUnknown;
 
   async function handleSubmit() {
     setGlobalError("");
@@ -383,6 +435,19 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
 
     for (const entry of entries) {
       allErrors.push(...entry.parseErrors.map((e) => `${entry.file.name}: ${e}`));
+
+      // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato
+      // (difesa in profondita' - vedi canSubmit sopra).
+      const match = matchFileNameToStructure(entry.file.name, entry.structureId, structures);
+      const selectedName = structures.find((s) => s.id === entry.structureId)?.name ?? entry.structureId;
+      if (match.kind === "mismatch") {
+        allErrors.push(`${entry.file.name}: ${structureMismatchMessage(match.guessedName, selectedName)} File saltato.`);
+        continue;
+      }
+      if (match.kind === "unknown" && !entry.structureConfirmed) {
+        allErrors.push(`${entry.file.name}: corrispondenza struttura non confermata - file saltato.`);
+        continue;
+      }
 
       const result = await processFileImport({
         file: entry.file,
@@ -424,53 +489,74 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
 
         {entries.length > 0 && (
           <div className="space-y-3">
-            {entries.map((entry, i) => (
-              <div key={i} className="rounded-[14px] border border-[#e7dfd8] bg-white p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-[#2B2D2F]">{entry.file.name}</p>
-                    <p className="mt-1 text-[12px] text-[#6a6d70]">
-                      {entry.rows.length} periodi riconosciuti
-                      {entry.parseErrors.length > 0 && `, ${entry.parseErrors.length} righe con errori`}
-                    </p>
+            {entries.map((entry, i) => {
+              const match = entryMatches[i];
+              const selectedName = structures.find((s) => s.id === entry.structureId)?.name;
+              return (
+                <div key={i} className="rounded-[14px] border border-[#e7dfd8] bg-white p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#2B2D2F]">{entry.file.name}</p>
+                      <p className="mt-1 text-[12px] text-[#6a6d70]">
+                        {entry.rows.length} periodi riconosciuti
+                        {entry.parseErrors.length > 0 && `, ${entry.parseErrors.length} righe con errori`}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => removeEntry(i)}
+                      className="text-[12px] font-semibold text-[#8a3a3a] hover:underline"
+                    >
+                      Rimuovi
+                    </button>
                   </div>
-                  <button
-                    onClick={() => removeEntry(i)}
-                    className="text-[12px] font-semibold text-[#8a3a3a] hover:underline"
-                  >
-                    Rimuovi
-                  </button>
-                </div>
 
-                <div className="mt-3">
-                  <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                    Struttura
-                  </label>
-                  <select
-                    value={entry.structureId}
-                    onChange={(e) => updateEntryStructure(i, e.target.value)}
-                    className={`h-10 w-full max-w-xs rounded-[12px] border px-3 text-sm outline-none ${
-                      entry.structureId ? "border-[#e7dfd8]" : "border-[#e9c9c9] bg-[#fbf1f1]"
-                    }`}
-                  >
-                    <option value="">— seleziona struttura —</option>
-                    {structures.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                  <div className="mt-3">
+                    <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                      Struttura
+                    </label>
+                    <select
+                      value={entry.structureId}
+                      onChange={(e) => updateEntryStructure(i, e.target.value)}
+                      className={`h-10 w-full max-w-xs rounded-[12px] border px-3 text-sm outline-none ${
+                        entry.structureId ? "border-[#e7dfd8]" : "border-[#e9c9c9] bg-[#fbf1f1]"
+                      }`}
+                    >
+                      <option value="">— seleziona struttura —</option>
+                      {structures.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                {entry.parseErrors.length > 0 && (
-                  <ul className="mt-2 list-disc pl-5 text-[12px] text-[#8a3a3a]">
-                    {entry.parseErrors.map((err, ei) => (
-                      <li key={ei}>{err}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ))}
+                  {match.kind === "mismatch" && (
+                    <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">
+                      {structureMismatchMessage(match.guessedName, selectedName ?? entry.structureId)}
+                    </p>
+                  )}
+
+                  {match.kind === "unknown" && entry.structureId !== "" && (
+                    <label className="mt-2 flex items-center gap-2 text-[12px] text-[#6b625c]">
+                      <input
+                        type="checkbox"
+                        checked={entry.structureConfirmed}
+                        onChange={(e) => updateEntryConfirmed(i, e.target.checked)}
+                      />
+                      Confermo che questo file corrisponde a &quot;{selectedName}&quot; (nome file non riconosciuto automaticamente)
+                    </label>
+                  )}
+
+                  {entry.parseErrors.length > 0 && (
+                    <ul className="mt-2 list-disc pl-5 text-[12px] text-[#8a3a3a]">
+                      {entry.parseErrors.map((err, ei) => (
+                        <li key={ei}>{err}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -517,9 +603,15 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
   const [submittingCurrent, setSubmittingCurrent] = useState(false);
   const [currentSummary, setCurrentSummary] = useState<ImportSummary | null>(null);
   const [currentError, setCurrentError] = useState("");
+  // Incrementata dopo ogni import riuscito per forzare il remount del
+  // <input type="file"> nativo - senza questo, il nome del file gia'
+  // caricato resterebbe visibile nell'input anche dopo il reset dello
+  // stato React (gli input file sono non controllati).
+  const [currentFileInputKey, setCurrentFileInputKey] = useState(0);
 
   const [submittingHistorical, setSubmittingHistorical] = useState(false);
   const [historicalSummary, setHistoricalSummary] = useState<ImportSummary | null>(null);
+  const [historicalFileInputKey, setHistoricalFileInputKey] = useState(0);
   const [historicalError, setHistoricalError] = useState("");
 
   const today = useMemo(() => todayString(), []);
@@ -536,7 +628,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
     try {
       const buffer = await readFileAsArrayBuffer(file);
       const { rows, errors } = parseBdExportWorkbook(buffer);
-      const entry: FileEntry = { file, structureId: "", rows, parseErrors: errors };
+      const entry: FileEntry = { file, structureId: "", rows, parseErrors: errors, structureConfirmed: false };
 
       if (target === "current") setCurrentFile(entry);
       else setHistoricalFile(entry);
@@ -547,10 +639,23 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
     }
   }
 
-  const canSubmitCurrent = structureId !== "" && currentFile !== null && currentFile.rows.length > 0;
+  const currentMatch = currentFile ? matchFileNameToStructure(currentFile.file.name, structureId, structures) : null;
+  const historicalMatch = historicalFile ? matchFileNameToStructure(historicalFile.file.name, structureId, structures) : null;
+
+  const canSubmitCurrent =
+    structureId !== "" &&
+    currentFile !== null &&
+    currentFile.rows.length > 0 &&
+    currentMatch?.kind !== "mismatch" &&
+    !(currentMatch?.kind === "unknown" && !currentFile.structureConfirmed);
 
   const canSubmitHistorical =
-    structureId !== "" && historicalFile !== null && historicalFile.rows.length > 0 && historicalDate !== "";
+    structureId !== "" &&
+    historicalFile !== null &&
+    historicalFile.rows.length > 0 &&
+    historicalDate !== "" &&
+    historicalMatch?.kind !== "mismatch" &&
+    !(historicalMatch?.kind === "unknown" && !historicalFile.structureConfirmed);
 
   async function handleSubmitCurrent() {
     setCurrentError("");
@@ -563,6 +668,18 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
     if (userError || !user || !currentFile) {
       setCurrentError("Sessione non valida o file mancante");
+      return;
+    }
+
+    // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato.
+    const selectedName = structures.find((s) => s.id === structureId)?.name ?? structureId;
+    const match = matchFileNameToStructure(currentFile.file.name, structureId, structures);
+    if (match.kind === "mismatch") {
+      setCurrentError(structureMismatchMessage(match.guessedName, selectedName));
+      return;
+    }
+    if (match.kind === "unknown" && !currentFile.structureConfirmed) {
+      setCurrentError("Conferma che il file corrisponde alla struttura selezionata prima di procedere.");
       return;
     }
 
@@ -583,6 +700,11 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
       errors: [...currentFile.parseErrors.map((e) => `${currentFile.file.name}: ${e}`), ...result.dbErrors],
     });
     setCurrentFile(null);
+    setCurrentFileInputKey((k) => k + 1);
+    // Il selettore struttura torna pronto per la prossima struttura del
+    // flusso settimanale - mai lasciato sulla selezione precedente (e'
+    // proprio questo il pattern che ha causato l'incidente Rollo/Sangiorgio).
+    setStructureId("");
   }
 
   async function handleSubmitHistorical() {
@@ -596,6 +718,17 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
     if (userError || !user || !historicalFile) {
       setHistoricalError("Sessione non valida o file mancante");
+      return;
+    }
+
+    const selectedName = structures.find((s) => s.id === structureId)?.name ?? structureId;
+    const match = matchFileNameToStructure(historicalFile.file.name, structureId, structures);
+    if (match.kind === "mismatch") {
+      setHistoricalError(structureMismatchMessage(match.guessedName, selectedName));
+      return;
+    }
+    if (match.kind === "unknown" && !historicalFile.structureConfirmed) {
+      setHistoricalError("Conferma che il file corrisponde alla struttura selezionata prima di procedere.");
       return;
     }
 
@@ -617,6 +750,8 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
     });
     setHistoricalFile(null);
     setHistoricalDate("");
+    setHistoricalFileInputKey((k) => k + 1);
+    setStructureId("");
   }
 
   return (
@@ -652,6 +787,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
               File
             </label>
             <input
+              key={currentFileInputKey}
               type="file"
               accept=".xls,.xlsx"
               onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0], "current")}
@@ -661,6 +797,23 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
                 {currentFile.file.name} — {currentFile.rows.length} periodi riconosciuti
                 {currentFile.parseErrors.length > 0 && `, ${currentFile.parseErrors.length} errori`}
               </p>
+            )}
+
+            {currentMatch?.kind === "mismatch" && (
+              <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">
+                {structureMismatchMessage(currentMatch.guessedName, structures.find((s) => s.id === structureId)?.name ?? structureId)}
+              </p>
+            )}
+
+            {currentMatch?.kind === "unknown" && structureId !== "" && currentFile && (
+              <label className="mt-2 flex items-center gap-2 text-[12px] text-[#6b625c]">
+                <input
+                  type="checkbox"
+                  checked={currentFile.structureConfirmed}
+                  onChange={(e) => setCurrentFile((prev) => (prev ? { ...prev, structureConfirmed: e.target.checked } : prev))}
+                />
+                Confermo che questo file corrisponde a &quot;{structures.find((s) => s.id === structureId)?.name}&quot; (nome file non riconosciuto automaticamente)
+              </label>
             )}
           </div>
 
@@ -709,6 +862,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
                 File
               </label>
               <input
+                key={historicalFileInputKey}
                 type="file"
                 accept=".xls,.xlsx"
                 onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0], "historical")}
@@ -720,6 +874,23 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
               {historicalFile.file.name} — {historicalFile.rows.length} periodi riconosciuti
               {historicalFile.parseErrors.length > 0 && `, ${historicalFile.parseErrors.length} errori`}
             </p>
+          )}
+
+          {historicalMatch?.kind === "mismatch" && (
+            <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">
+              {structureMismatchMessage(historicalMatch.guessedName, structures.find((s) => s.id === structureId)?.name ?? structureId)}
+            </p>
+          )}
+
+          {historicalMatch?.kind === "unknown" && structureId !== "" && historicalFile && (
+            <label className="mt-2 flex items-center gap-2 text-[12px] text-[#6b625c]">
+              <input
+                type="checkbox"
+                checked={historicalFile.structureConfirmed}
+                onChange={(e) => setHistoricalFile((prev) => (prev ? { ...prev, structureConfirmed: e.target.checked } : prev))}
+              />
+              Confermo che questo file corrisponde a &quot;{structures.find((s) => s.id === structureId)?.name}&quot; (nome file non riconosciuto automaticamente)
+            </label>
           )}
 
           {historicalError && <p className="mt-3 text-sm text-[#8a3a3a]">{historicalError}</p>}

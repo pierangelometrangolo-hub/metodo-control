@@ -229,64 +229,10 @@ function buildDetailRows(rows: DailyDetailRow[], granularity: DetailGranularity)
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-// Vista Mensile "tutto l'anno": sempre 12 righe (Gennaio-Dicembre), mai solo
-// i mesi del periodo selezionato nel calendario - i mesi senza alcun dato
-// restano in elenco con hasData:false (ND in tabella), non vengono omessi.
-function buildFullYearMonthRows(rows: DailyDetailRow[], year: number): DetailRow[] {
-  const buckets = new Map<string, DailyDetailRow[]>();
-  rows.forEach((r) => {
-    const key = r.stayDate.slice(0, 7);
-    const list = buckets.get(key) || [];
-    list.push(r);
-    buckets.set(key, list);
-  });
-
-  return Array.from({ length: 12 }, (_, i) => i + 1).map((monthNum) => {
-    const key = `${year}-${pad(monthNum)}`;
-    const bucketRows = buckets.get(key);
-    const label = `${MONTH_LABELS[monthNum - 1]} ${year}`;
-
-    if (!bucketRows || bucketRows.length === 0) {
-      return {
-        key,
-        label,
-        revenue: 0,
-        adr: null,
-        revPar: null,
-        occupancy: null,
-        roomsSold: 0,
-        roomsAvailable: 0,
-        pickupRooms: null,
-        pickupRevenue: null,
-        pickupTooltip: "Nessun dato per questo mese",
-        hasData: false,
-      };
-    }
-
-    const sorted = [...bucketRows].sort((a, b) => a.stayDate.localeCompare(b.stayDate));
-    const revenue = sorted.reduce((sum, r) => sum + r.revenue, 0);
-    const roomsSold = sorted.reduce((sum, r) => sum + r.roomsSold, 0);
-    const roomsAvailable = sorted.reduce((sum, r) => sum + r.roomsAvailable, 0);
-    const pickupRoomsRows = sorted.filter((r) => r.pickupRooms !== null);
-    const pickupRevenueRows = sorted.filter((r) => r.pickupRevenue !== null);
-
-    return {
-      key,
-      label,
-      revenue,
-      adr: adr(revenue, roomsSold),
-      revPar: revPar(revenue, roomsAvailable),
-      occupancy: occupancy(roomsSold, roomsAvailable),
-      roomsSold,
-      roomsAvailable,
-      pickupRooms: pickupRoomsRows.length > 0 ? pickupRoomsRows.reduce((sum, r) => sum + (r.pickupRooms || 0), 0) : null,
-      pickupRevenue:
-        pickupRevenueRows.length > 0 ? pickupRevenueRows.reduce((sum, r) => sum + (r.pickupRevenue || 0), 0) : null,
-      pickupTooltip: "Somma dei pickup giornalieri del mese",
-      hasData: true,
-    };
-  });
-}
+// Vista Mensile "tutto l'anno": costruita direttamente in loadYearlyDetail()
+// via fn_month_snapshot_asof (12 chiamate, una per mese, stesso cutoff) -
+// nessuna aggregazione lato client da righe giornaliere, per non reintrodurre
+// una seconda implementazione che diverga dalla RPC canonica.
 
 const DETAIL_GRANULARITY_OPTIONS: { value: DetailGranularity; label: string }[] = [
   { value: "day", label: "Giornaliero" },
@@ -433,7 +379,7 @@ export default function PerformanceStructureDrilldownPage({
   // nel calendario, non solo il periodo attivo - fonte dati separata da
   // dailyDetailRows (che resta scoped al periodo del calendario per
   // Giornaliero/Settimanale).
-  const [yearlyDetailRows, setYearlyDetailRows] = useState<DailyDetailRow[] | null>(null);
+  const [yearlyDetailRows, setYearlyDetailRows] = useState<DetailRow[] | null>(null);
   const [yearlyDetailLoading, setYearlyDetailLoading] = useState(false);
 
   const periodStart = confirmedStart;
@@ -815,25 +761,124 @@ export default function PerformanceStructureDrilldownPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dailyDetailOpen, detailGranularity, detailYear]);
 
+  // Vista Mensile "tutto l'anno": stessa fonte canonica di ogni altro punto
+  // di Performance, mai una query diretta su performance_daily_snapshot -
+  // un'unica implementazione (fn_month_snapshot_asof), non due che
+  // potrebbero divergere di nuovo in futuro (vedi fix daily-priority in
+  // 20260817110000_fix_fn_month_snapshot_asof_daily_priority.sql).
+  //
+  // Pickup mensile reale: fn_month_snapshot_asof resta invariata, il
+  // pickup si costruisce sopra con due chiamate a cutoff diversi (ultima e
+  // penultima estrazione disponibile per la struttura, via
+  // fn_available_extractions - 20260817120000). Nessuna nuova logica di
+  // aggregazione lato client: la differenza e' tra due valori gia'
+  // calcolati dalla stessa RPC canonica.
   async function loadYearlyDetail() {
     setYearlyDetailLoading(true);
 
-    const { data, error } = await supabase
-      .from("performance_daily_snapshot")
-      .select("stay_date, extraction_date, revenue_total, rooms_sold, rooms_available")
-      .eq("structure_id", structureId)
-      .gte("stay_date", `${detailYear}-01-01`)
-      .lte("stay_date", `${detailYear}-12-31`)
-      .order("stay_date", { ascending: true })
-      .order("extraction_date", { ascending: false });
+    const { data: extractionsData, error: extractionsError } = await supabase.rpc("fn_available_extractions", {
+      p_structure_id: structureId,
+    });
 
-    if (error) {
-      setLoadError(error.message);
+    if (extractionsError) {
+      setLoadError(extractionsError.message);
       setYearlyDetailLoading(false);
       return;
     }
 
-    setYearlyDetailRows(toDailyDetailRows((data || []) as never[]));
+    const extractions = ((extractionsData || []) as { extraction_date: string }[]).map((r) => r.extraction_date);
+    const latestExtraction = extractions[0] ?? null;
+    const previousExtraction = extractions[1] ?? null;
+    const cutoffCurrent = latestExtraction ?? todayString();
+
+    const months = Array.from({ length: 12 }, (_, i) => i + 1);
+
+    const [currentResults, previousResults] = await Promise.all([
+      Promise.all(
+        months.map((month) =>
+          supabase.rpc("fn_month_snapshot_asof", {
+            p_structure_ids: [structureId],
+            p_period_year: detailYear,
+            p_period_month: month,
+            p_cutoff_date: cutoffCurrent,
+          })
+        )
+      ),
+      previousExtraction
+        ? Promise.all(
+            months.map((month) =>
+              supabase.rpc("fn_month_snapshot_asof", {
+                p_structure_ids: [structureId],
+                p_period_year: detailYear,
+                p_period_month: month,
+                p_cutoff_date: previousExtraction,
+              })
+            )
+          )
+        : Promise.resolve(null),
+    ]);
+
+    const firstError =
+      currentResults.find((r) => r.error)?.error || previousResults?.find((r) => r.error)?.error;
+    if (firstError) {
+      setLoadError(firstError.message);
+      setYearlyDetailLoading(false);
+      return;
+    }
+
+    const rows: DetailRow[] = currentResults.map((res, i) => {
+      const month = i + 1;
+      const key = `${detailYear}-${pad(month)}`;
+      const label = `${MONTH_LABELS[month - 1]} ${detailYear}`;
+      const row = res.data && res.data[0];
+
+      if (!row) {
+        return {
+          key,
+          label,
+          revenue: 0,
+          adr: null,
+          revPar: null,
+          occupancy: null,
+          roomsSold: 0,
+          roomsAvailable: 0,
+          pickupRooms: null,
+          pickupRevenue: null,
+          pickupTooltip: "Nessun dato per questo mese",
+          hasData: false,
+        };
+      }
+
+      const revenue = Number(row.revenue_total);
+      const roomsSold = Number(row.rooms_sold);
+      const roomsAvailable = Number(row.rooms_available);
+
+      const previousRow = previousResults ? previousResults[i]?.data?.[0] : null;
+      const pickupRooms = previousRow ? roomsSold - Number(previousRow.rooms_sold) : null;
+      const pickupRevenue = previousRow ? revenue - Number(previousRow.revenue_total) : null;
+      const pickupTooltip = !previousExtraction
+        ? "Pickup non disponibile (prima estrazione per questa struttura)"
+        : !previousRow
+        ? "Pickup non disponibile per questo mese (nessun dato all'estrazione precedente)"
+        : `vs estrazione del ${formatDateIt(previousExtraction)}`;
+
+      return {
+        key,
+        label,
+        revenue,
+        adr: adr(revenue, roomsSold),
+        revPar: revPar(revenue, roomsAvailable),
+        occupancy: occupancy(roomsSold, roomsAvailable),
+        roomsSold,
+        roomsAvailable,
+        pickupRooms,
+        pickupRevenue,
+        pickupTooltip,
+        hasData: true,
+      };
+    });
+
+    setYearlyDetailRows(rows);
     setYearlyDetailLoading(false);
   }
 
@@ -862,9 +907,9 @@ export default function PerformanceStructureDrilldownPage({
   const displayedDetailRows = useMemo(
     () =>
       detailGranularity === "month"
-        ? buildFullYearMonthRows(yearlyDetailRows || [], detailYear)
+        ? yearlyDetailRows || []
         : buildDetailRows(dailyDetailRows || [], detailGranularity),
-    [dailyDetailRows, yearlyDetailRows, detailGranularity, detailYear]
+    [dailyDetailRows, yearlyDetailRows, detailGranularity]
   );
 
   const { daysInMonth } = monthRange(budgetAnchorDate);
@@ -1272,7 +1317,7 @@ export default function PerformanceStructureDrilldownPage({
                       </td>
                       <td className="py-2 pr-4">
                         {row.pickupRooms === null ? (
-                          <span className="text-[#2B2D2F]">{ND}</span>
+                          <CellTooltip trigger={<span className="text-[#2B2D2F]">{ND}</span>}>{row.pickupTooltip}</CellTooltip>
                         ) : (
                           <CellTooltip
                             trigger={
@@ -1296,7 +1341,7 @@ export default function PerformanceStructureDrilldownPage({
                       </td>
                       <td className="py-2">
                         {row.pickupRevenue === null ? (
-                          <span className="text-[#2B2D2F]">{ND}</span>
+                          <CellTooltip trigger={<span className="text-[#2B2D2F]">{ND}</span>}>{row.pickupTooltip}</CellTooltip>
                         ) : (
                           <CellTooltip
                             trigger={

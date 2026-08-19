@@ -40,3 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 data/
+
+# batch fatture/import locali - dati reali, mai committati
+.local-imports/

@@ -509,15 +509,29 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
   const [currentFile, setCurrentFile] = useState<FileEntry | null>(null);
   const [historicalFile, setHistoricalFile] = useState<FileEntry | null>(null);
   const [historicalDate, setHistoricalDate] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [summary, setSummary] = useState<ImportSummary | null>(null);
-  const [globalError, setGlobalError] = useState("");
+
+  // Due azioni indipendenti (import corrente settimanale vs import storico
+  // SDLY occasionale) - stato separato per ciascuna, non piu' un'unica
+  // submit/summary/error condivisa: l'una non deve mai bloccare ne'
+  // dipendere dall'altra.
+  const [submittingCurrent, setSubmittingCurrent] = useState(false);
+  const [currentSummary, setCurrentSummary] = useState<ImportSummary | null>(null);
+  const [currentError, setCurrentError] = useState("");
+
+  const [submittingHistorical, setSubmittingHistorical] = useState(false);
+  const [historicalSummary, setHistoricalSummary] = useState<ImportSummary | null>(null);
+  const [historicalError, setHistoricalError] = useState("");
 
   const today = useMemo(() => todayString(), []);
 
   async function handleFile(file: File, target: "current" | "historical") {
-    setGlobalError("");
-    setSummary(null);
+    if (target === "current") {
+      setCurrentError("");
+      setCurrentSummary(null);
+    } else {
+      setHistoricalError("");
+      setHistoricalSummary(null);
+    }
 
     try {
       const buffer = await readFileAsArrayBuffer(file);
@@ -527,66 +541,80 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
       if (target === "current") setCurrentFile(entry);
       else setHistoricalFile(entry);
     } catch (err) {
-      setGlobalError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      if (target === "current") setCurrentError(message);
+      else setHistoricalError(message);
     }
   }
 
-  const canSubmit =
-    structureId !== "" &&
-    currentFile !== null &&
-    currentFile.rows.length > 0 &&
-    historicalFile !== null &&
-    historicalFile.rows.length > 0 &&
-    historicalDate !== "";
+  const canSubmitCurrent = structureId !== "" && currentFile !== null && currentFile.rows.length > 0;
 
-  async function handleSubmit() {
-    setGlobalError("");
-    setSummary(null);
+  const canSubmitHistorical =
+    structureId !== "" && historicalFile !== null && historicalFile.rows.length > 0 && historicalDate !== "";
+
+  async function handleSubmitCurrent() {
+    setCurrentError("");
+    setCurrentSummary(null);
 
     const {
       data: { user },
       error: userError,
     } = await supabase.auth.getUser();
 
-    if (userError || !user || !currentFile || !historicalFile) {
-      setGlobalError("Sessione non valida o file mancanti");
+    if (userError || !user || !currentFile) {
+      setCurrentError("Sessione non valida o file mancante");
       return;
     }
 
-    setSubmitting(true);
+    setSubmittingCurrent(true);
 
-    let totalImported = 0;
-    let totalDuplicatesSkipped = 0;
-    const allErrors: string[] = [
-      ...currentFile.parseErrors.map((e) => `${currentFile.file.name}: ${e}`),
-      ...historicalFile.parseErrors.map((e) => `${historicalFile.file.name}: ${e}`),
-    ];
-
-    const currentResult = await processFileImport({
+    const result = await processFileImport({
       file: currentFile.file,
       structureId,
       rows: currentFile.rows,
       extractionDate: today,
       uploadedBy: user.id,
     });
-    totalImported += currentResult.imported;
-    totalDuplicatesSkipped += currentResult.duplicatesSkipped;
-    allErrors.push(...currentResult.dbErrors);
 
-    const historicalResult = await processFileImport({
+    setSubmittingCurrent(false);
+    setCurrentSummary({
+      imported: result.imported,
+      duplicatesSkipped: result.duplicatesSkipped,
+      errors: [...currentFile.parseErrors.map((e) => `${currentFile.file.name}: ${e}`), ...result.dbErrors],
+    });
+    setCurrentFile(null);
+  }
+
+  async function handleSubmitHistorical() {
+    setHistoricalError("");
+    setHistoricalSummary(null);
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user || !historicalFile) {
+      setHistoricalError("Sessione non valida o file mancante");
+      return;
+    }
+
+    setSubmittingHistorical(true);
+
+    const result = await processFileImport({
       file: historicalFile.file,
       structureId,
       rows: historicalFile.rows,
       extractionDate: historicalDate,
       uploadedBy: user.id,
     });
-    totalImported += historicalResult.imported;
-    totalDuplicatesSkipped += historicalResult.duplicatesSkipped;
-    allErrors.push(...historicalResult.dbErrors);
 
-    setSubmitting(false);
-    setSummary({ imported: totalImported, duplicatesSkipped: totalDuplicatesSkipped, errors: allErrors });
-    setCurrentFile(null);
+    setSubmittingHistorical(false);
+    setHistoricalSummary({
+      imported: result.imported,
+      duplicatesSkipped: result.duplicatesSkipped,
+      errors: [...historicalFile.parseErrors.map((e) => `${historicalFile.file.name}: ${e}`), ...result.dbErrors],
+    });
     setHistoricalFile(null);
     setHistoricalDate("");
   }
@@ -635,6 +663,32 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
               </p>
             )}
           </div>
+
+          {currentError && <p className="mt-3 text-sm text-[#8a3a3a]">{currentError}</p>}
+
+          {currentSummary && (
+            <div className="mt-3 rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
+              <p className="font-semibold">Import completato</p>
+              <p className="mt-1">Righe importate: {currentSummary.imported}</p>
+              <p>Duplicati saltati: {currentSummary.duplicatesSkipped}</p>
+              {currentSummary.errors.length > 0 && (
+                <>
+                  <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
+                  <ul className="list-disc pl-5 text-[#8a3a3a]">
+                    {currentSummary.errors.map((err, i) => (
+                      <li key={i}>{err}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 flex justify-end">
+            <AppButton variant="primary" disabled={!canSubmitCurrent || submittingCurrent} onClick={handleSubmitCurrent}>
+              {submittingCurrent ? "Import in corso..." : "Importa corrente"}
+            </AppButton>
+          </div>
         </div>
 
         <div className="rounded-[14px] border border-[#e7dfd8] p-4">
@@ -667,32 +721,36 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
               {historicalFile.parseErrors.length > 0 && `, ${historicalFile.parseErrors.length} errori`}
             </p>
           )}
-        </div>
 
-        {globalError && <p className="text-sm text-[#8a3a3a]">{globalError}</p>}
+          {historicalError && <p className="mt-3 text-sm text-[#8a3a3a]">{historicalError}</p>}
 
-        {summary && (
-          <div className="rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
-            <p className="font-semibold">Import completato</p>
-            <p className="mt-1">Righe importate: {summary.imported}</p>
-            <p>Duplicati saltati: {summary.duplicatesSkipped}</p>
-            {summary.errors.length > 0 && (
-              <>
-                <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
-                <ul className="list-disc pl-5 text-[#8a3a3a]">
-                  {summary.errors.map((err, i) => (
-                    <li key={i}>{err}</li>
-                  ))}
-                </ul>
-              </>
-            )}
+          {historicalSummary && (
+            <div className="mt-3 rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
+              <p className="font-semibold">Import completato</p>
+              <p className="mt-1">Righe importate: {historicalSummary.imported}</p>
+              <p>Duplicati saltati: {historicalSummary.duplicatesSkipped}</p>
+              {historicalSummary.errors.length > 0 && (
+                <>
+                  <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
+                  <ul className="list-disc pl-5 text-[#8a3a3a]">
+                    {historicalSummary.errors.map((err, i) => (
+                      <li key={i}>{err}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 flex justify-end">
+            <AppButton
+              variant="primary"
+              disabled={!canSubmitHistorical || submittingHistorical}
+              onClick={handleSubmitHistorical}
+            >
+              {submittingHistorical ? "Import in corso..." : "Importa storico"}
+            </AppButton>
           </div>
-        )}
-
-        <div className="flex justify-end">
-          <AppButton variant="primary" disabled={!canSubmit || submitting} onClick={handleSubmit}>
-            {submitting ? "Import in corso..." : "Importa entrambi"}
-          </AppButton>
         </div>
       </div>
     </AppCard>

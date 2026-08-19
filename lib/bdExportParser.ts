@@ -30,6 +30,24 @@ const ITALIAN_MONTHS: Record<string, number> = {
   dic: 12,
 };
 
+// ATTENZIONE se in futuro aggiungi qui una nuova colonna in formato valuta
+// o percentuale (es. ADR, RevPAR, IMO - oggi non lette, ricalcolate lato
+// client da revenue/camere gia' validati): l'export BD scrive quasi sempre
+// queste colonne come testo formattato ("€ 1.234,56"), ma occasionalmente
+// una singola cella perde la formattazione e arriva come numero Excel
+// grezzo (es. 30325 invece di "€ 303,25" - o "€ 168,63" diventato 22828
+// solo nella colonna RevPAR, osservato nello stesso file dell'incidente
+// che ha colpito Revenue Totale, mai letto da questo parser). Un numero
+// grezzo per una colonna valuta NON e' mai un valore attendibile - usa
+// parseEuroCurrency (sotto), che rifiuta esplicitamente i number, MAI
+// toNumber() ne' un accesso diretto alla cella per una colonna di questo
+// tipo: toNumber() accetta i number perche' e' corretto per le colonne
+// di conteggio (Unita' occupate/in vendita/Arrivi/Presenze, che l'export
+// scrive sempre come numero puro) - per una colonna valuta lo stesso
+// comportamento riprodurrebbe l'incidente reale del 2026-08-19 (19 celle
+// corrotte su 5 strutture, fatturato mensile gonfiato fino a 5x su una
+// struttura), mascherato allo stesso modo finche' qualcuno non nota un
+// numero implausibile in produzione.
 const REQUIRED_COLUMNS = {
   data: "Data",
   roomsSold: "Unità occupate",
@@ -39,8 +57,19 @@ const REQUIRED_COLUMNS = {
   revenue: "Revenue Totale",
 } as const;
 
+// "Revenue Totale" nell'export BD arriva sempre come testo formattato
+// ("€ 1.234,56") - verificato su piu' export reali di piu' strutture.
+// Quando una cella arriva invece come numero Excel grezzo, e' un difetto
+// del file sorgente (la cella ha perso la formattazione testo lato BD),
+// MAI un valore attendibile da accettare cosi' com'e': un caso reale ha
+// prodotto revenue_total=30325 al posto di circa 300 euro per un solo
+// giorno, gonfiando il fatturato dell'intero mese di ~5x (altri casi
+// reali confermati su Villa Neviera, Palazzo Rollo, Palazzo Arco Cadura,
+// Sangiorgio Resort - 19 celle isolate in totale su un'unica estrazione).
+// Un numero grezzo qui viene quindi trattato come riga non parsabile,
+// mai accettato silenziosamente - stessa regola di "mai un dato indovinato
+// o inventato" gia' in uso nel resto di questo parser.
 function parseEuroCurrency(value: unknown): number | null {
-  if (typeof value === "number") return value;
   if (typeof value !== "string") return null;
 
   const cleaned = value.replace(/[€\s]/g, "").replace(/\./g, "").replace(",", ".");
@@ -48,6 +77,8 @@ function parseEuroCurrency(value: unknown): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
+// Solo per colonne di CONTEGGIO (camere/arrivi/presenze), mai per colonne
+// valuta/percentuale - vedi il commento sopra REQUIRED_COLUMNS.
 function toNumber(value: unknown): number | null {
   if (typeof value === "number") return value;
   if (typeof value === "string" && value.trim() !== "") {
@@ -137,7 +168,15 @@ export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
     const roomsAvailable = toNumber(row[colIndex.roomsAvailable]);
     const arrivals = toNumber(row[colIndex.arrivals]);
     const presences = toNumber(row[colIndex.presences]);
-    const revenueTotal = parseEuroCurrency(row[colIndex.revenue]);
+    const revenueCell = row[colIndex.revenue];
+    const revenueTotal = parseEuroCurrency(revenueCell);
+
+    if (revenueTotal === null && typeof revenueCell === "number") {
+      errors.push(
+        `Riga ${i + 1} (${periodLabel}): "Revenue Totale" e' un numero Excel grezzo (${revenueCell}) invece del testo formattato atteso ("€ X,XX") - cella probabilmente corrotta nel file sorgente, riga scartata anziche' importata con un valore inattendibile.`
+      );
+      continue;
+    }
 
     if (
       roomsSold === null ||

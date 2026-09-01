@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import { parseNationalityWorkbook, ParsedNationalityRow } from "../nationalityParser";
+import { resolveBdStructureFromFileName, StructureOption } from "../performanceImportRouting";
+
+const STRUCTURES: StructureOption[] = [
+  { id: "s-rollo", name: "Palazzo Rollo" },
+  { id: "s-neviera", name: "Villa Neviera" },
+  { id: "s-cadura", name: "Palazzo Arco Cadura" },
+  { id: "s-sangiorgio", name: "Sangiorgio Resort" },
+  { id: "s-belli", name: "Dimora De Belli" },
+];
 
 // Test di regressione sul file REALE export BD "Ospiti per provenienza"
 // (Nazionalità) di Palazzo De' Belli, estrazione 2026-09-01 - stesso
@@ -62,6 +71,25 @@ describe.skipIf(!filesAvailable)("parseNationalityWorkbook - regressione sul fil
   it("nazionalità distinte riconosciute dinamicamente corrispondono a quelle realmente presenti nel file (20, nessuna hardcoded)", () => {
     const distinct = new Set(csvResult.rows.map((r) => r.nationality));
     expect(distinct.size).toBe(20);
+  });
+
+  it("test fondamentale richiesto: 220 righe, 629 presenze totali, 20 nazionalità", () => {
+    expect(csvResult.rows).toHaveLength(220);
+    expect(csvResult.rows.reduce((s, r) => s + r.presences, 0)).toBe(629);
+    expect(new Set(csvResult.rows.map((r) => r.nationality)).size).toBe(20);
+  });
+
+  it("guardrail struttura-file: il filename reale risolve su 'Dimora De Belli' (alias PMS->DB), import consentito selezionando quella struttura", () => {
+    const match = resolveBdStructureFromFileName(CSV_FILE, STRUCTURES);
+    expect(match).toEqual({ kind: "resolved", structureId: "s-belli", structureName: "Dimora De Belli" });
+  });
+
+  it("guardrail struttura-file: lo stesso filename reale NON risolve su nessun'altra struttura (mai un mismatch falso positivo)", () => {
+    const match = resolveBdStructureFromFileName(CSV_FILE, STRUCTURES);
+    expect(match.kind).toBe("resolved");
+    if (match.kind === "resolved") {
+      expect(["s-rollo", "s-neviera", "s-cadura", "s-sangiorgio"]).not.toContain(match.structureId);
+    }
   });
 });
 

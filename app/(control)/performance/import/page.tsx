@@ -25,6 +25,8 @@ import {
   guessStructureId,
   matchFileToStructure,
   structureMismatchMessage,
+  resolveBdStructureFromFileName,
+  bdStructureMismatchMessage,
 } from "@/lib/performanceImportRouting";
 
 // channel_commission_rates ha RLS insert/update a rank >= 2 - il form
@@ -1532,7 +1534,19 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
     }
   }
 
-  const canSubmit = structureId !== "" && extractionDate !== "" && fileEntry !== null && fileEntry.rows.length > 0;
+  // Guardrail BLOCCANTE struttura-file vs struttura selezionata (mai un
+  // warning: un mismatch qui salverebbe righe di nazionalità/bd_imports
+  // formalmente valide ma sulla struttura sbagliata, un errore di qualita'
+  // dati non piu' rilevabile a posteriori). Ricalcolato reattivamente da
+  // fileEntry/structures ad ogni render, stesso pattern gia' in uso per
+  // matchFileToStructure in ImportStorico/ImportActual - mai salvato in
+  // uno stato separato che potrebbe disallinearsi.
+  const structureMatch = fileEntry ? resolveBdStructureFromFileName(fileEntry.file.name, structures) : null;
+  const structureMatchOk = structureMatch !== null && structureMatch.kind === "resolved" && structureMatch.structureId === structureId;
+  const selectedStructureName = structures.find((s) => s.id === structureId)?.name ?? structureId;
+
+  const canSubmit =
+    structureId !== "" && extractionDate !== "" && fileEntry !== null && fileEntry.rows.length > 0 && structureMatchOk;
 
   async function handleSubmit() {
     setGlobalError("");
@@ -1545,6 +1559,14 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
 
     if (userError || !user || !fileEntry) {
       setGlobalError("Sessione non valida o file mancante");
+      return;
+    }
+
+    // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato
+    // (difesa in profondita' - stesso principio gia' in uso per ADR/RevPAR).
+    const match = resolveBdStructureFromFileName(fileEntry.file.name, structures);
+    if (match.kind !== "resolved" || match.structureId !== structureId) {
+      setGlobalError(bdStructureMismatchMessage(match, selectedStructureName));
       return;
     }
 
@@ -1615,6 +1637,30 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
                   <li key={i}>{err}</li>
                 ))}
               </ul>
+            )}
+
+            {structureMatch && structureMatch.kind === "resolved" && (
+              <div className="mt-3 rounded-[10px] border border-[#e7dfd8] bg-[#fcfbf9] p-3 text-[12px]">
+                <p className="text-[#6a6d70]">Struttura rilevata dal file: {structureMatch.structureName}</p>
+                {structureId === "" ? (
+                  <p className="mt-1 text-[#6a6d70]">Seleziona la struttura per verificare la corrispondenza.</p>
+                ) : structureMatchOk ? (
+                  <p className="mt-1 font-semibold text-[#2f6b3a]">✓ Corrispondenza verificata</p>
+                ) : (
+                  <>
+                    <p className="text-[#6a6d70]">Struttura selezionata: {selectedStructureName}</p>
+                    <p className="mt-1 font-semibold text-[#8a3a3a]">
+                      ✕ {bdStructureMismatchMessage(structureMatch, selectedStructureName)}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+
+            {structureMatch && structureMatch.kind !== "resolved" && (
+              <div className="mt-3 rounded-[10px] border border-[#e9c9c9] bg-[#fbf1f1] p-3 text-[12px]">
+                <p className="font-semibold text-[#8a3a3a]">✕ {bdStructureMismatchMessage(structureMatch, selectedStructureName)}</p>
+              </div>
             )}
           </div>
         )}

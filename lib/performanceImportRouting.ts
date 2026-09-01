@@ -207,3 +207,59 @@ export function matchFileToStructure(
 export function structureMismatchMessage(guessedName: string, selectedName: string): string {
   return `Il file selezionato sembra appartenere a "${guessedName}", ma hai selezionato "${selectedName}". Import bloccato. (verifica basata sul nome del file: l'export BD non contiene un identificativo di struttura nel contenuto)`;
 }
+
+// Alias esplicito PMS(BD) -> nome structures.name, SOLO per le strutture il
+// cui nome nel filename BD non e' gia' trovabile come sottostringa del
+// nome DB (il caso che guessStructureFromFileName sopra copre da solo).
+// Verificato sui filename reali dei report BD gia' supportati (ADR/RevPAR,
+// Ospiti per provenienza - stesso nome struttura in entrambi, generato da
+// BD stesso): "Palazzo Arco Cadura Hotel & SPA", "Palazzo Rollo",
+// "Sangiorgio Resort _____", "Villa Neviera Wine Resort" contengono TUTTI
+// gia' il rispettivo structures.name come sottostringa (case-insensitive)
+// - nessun alias necessario per queste 4. Solo "Palazzo De' Belli" (nome
+// che BD scrive nel filename) non ha alcuna relazione di sottostringa con
+// "Dimora De Belli" (nome in structures.name) - qui l'alias e'
+// indispensabile. Centralizzato qui (mai sparso nei singoli componenti
+// UI) cosi' resta riusabile da qualunque importer futuro basato su
+// filename BD, non solo da quello che lo richiede oggi (Nazionalita').
+const BD_STRUCTURE_NAME_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  "Dimora De Belli": ["Palazzo De' Belli"],
+};
+
+function structureSearchNames(structure: StructureOption): string[] {
+  return [structure.name, ...(BD_STRUCTURE_NAME_ALIASES[structure.name] ?? [])];
+}
+
+export type BdStructureResolution =
+  | { kind: "resolved"; structureId: string; structureName: string }
+  | { kind: "not_found" }
+  | { kind: "ambiguous"; candidateNames: string[] };
+
+// Risoluzione BLOCCANTE struttura-da-filename per report BD, con supporto
+// alias PMS->DB (vedi sopra) - a differenza di guessStructureFromFileName
+// (usata per il confronto "soft" di ADR/RevPAR, dove "unknown" e' ammesso
+// con conferma manuale), qui "non trovata"/"ambigua" sono esiti distinti e
+// SEMPRE bloccanti, mai un fallback su "nessuna struttura riconosciuta ma
+// procedi comunque": vedi lib/nationalityParser.ts e il commento su
+// ImportNazionalita per l'uso. Stesso algoritmo di scansione per
+// sottostringa di guessStructureFromFileName (non duplicato per caso: e'
+// l'unico modo di comporre correttamente candidati-da-alias e
+// candidati-da-nome-diretto in un solo controllo di ambiguita').
+export function resolveBdStructureFromFileName(fileName: string, structures: StructureOption[]): BdStructureResolution {
+  const lower = fileName.toLowerCase();
+  const matches = structures.filter((s) => structureSearchNames(s).some((name) => lower.includes(name.toLowerCase())));
+
+  if (matches.length === 0) return { kind: "not_found" };
+  if (matches.length > 1) return { kind: "ambiguous", candidateNames: matches.map((s) => s.name) };
+  return { kind: "resolved", structureId: matches[0].id, structureName: matches[0].name };
+}
+
+// Messaggio bloccante unico per il guardrail struttura-file (Nazionalita'),
+// riusato sia nell'anteprima file sia nella riverifica prima della
+// scrittura DB - mai due formulazioni diverse per lo stesso esito.
+export function bdStructureMismatchMessage(resolution: BdStructureResolution, selectedName: string): string {
+  if (resolution.kind === "resolved") {
+    return `Il file appartiene a "${resolution.structureName}", ma hai selezionato "${selectedName}". Seleziona la struttura corretta prima di procedere.`;
+  }
+  return "Impossibile identificare con sicurezza la struttura del file Booking Designer. Verifica il file prima di procedere.";
+}

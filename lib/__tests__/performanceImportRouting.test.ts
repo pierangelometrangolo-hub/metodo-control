@@ -11,6 +11,8 @@ import {
   computeMontecalliniGroupExtractionDate,
   resolveGroupExtractionDate,
   MONTECALLINI_STRUCTURE_NAME,
+  resolveBdStructureFromFileName,
+  bdStructureMismatchMessage,
   StructureOption,
   ImportableRow,
 } from "../performanceImportRouting";
@@ -235,5 +237,92 @@ describe("resolveGroupExtractionDate", () => {
     expect(resolveGroupExtractionDate("montecallini_pms", "cy", [row("2026-08-05")], "1999-01-01", "2026-08-19")).toBe("2026-08-19");
     expect(resolveGroupExtractionDate("montecallini_pms", "sdly", [row("2025-08-05")], "1999-01-01", "2026-08-19")).toBe("2025-08-19");
     expect(resolveGroupExtractionDate("montecallini_pms", "ly", [row("2025-09-15")], "1999-01-01", "2026-08-19")).toBe("2025-10-01");
+  });
+});
+
+describe("resolveBdStructureFromFileName - guardrail bloccante struttura-file per import BD (Nazionalità)", () => {
+  it("[match diretto] file Palazzo Rollo, nessun alias necessario -> resolved su Palazzo Rollo", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Palazzo Rollo - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result).toEqual({ kind: "resolved", structureId: "s-rollo", structureName: "Palazzo Rollo" });
+  });
+
+  it("[mismatch] file Palazzo Rollo confrontato con selezione Villa Neviera -> BLOCK (kind resolved ma structureId diverso)", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Palazzo Rollo - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result.kind).toBe("resolved");
+    if (result.kind === "resolved") {
+      expect(result.structureId).not.toBe("s-neviera"); // "Villa Neviera" selezionata dall'utente in questo scenario
+    }
+  });
+
+  it("[mapping PMS] file 'Palazzo De' Belli' -> resolved su Dimora De Belli (alias esplicito, nessuna relazione di sottostringa)", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Palazzo De' Belli - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result).toEqual({ kind: "resolved", structureId: "s-belli", structureName: "Dimora De Belli" });
+  });
+
+  it("[mapping PMS] file 'Villa Neviera Wine Resort' -> resolved su Villa Neviera (gia' sottostringa, nessun alias richiesto)", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Villa Neviera Wine Resort - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result).toEqual({ kind: "resolved", structureId: "s-neviera", structureName: "Villa Neviera" });
+  });
+
+  it("[mapping PMS] file 'Palazzo Arco Cadura Hotel & SPA' -> resolved su Palazzo Arco Cadura (gia' sottostringa, nessun alias richiesto)", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Palazzo Arco Cadura Hotel & SPA - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result).toEqual({ kind: "resolved", structureId: "s-cadura", structureName: "Palazzo Arco Cadura" });
+  });
+
+  it("[caso reale] file 'Sangiorgio Resort _____' (caratteri spuri BD) -> resolved su Sangiorgio Resort", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Sangiorgio Resort _____ - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result).toEqual({ kind: "resolved", structureId: "s-sangiorgio", structureName: "Sangiorgio Resort" });
+  });
+
+  it("[mapping errato] file 'Palazzo De' Belli' confrontato con selezione Palazzo Rollo -> mai un match su Palazzo Rollo", () => {
+    const result = resolveBdStructureFromFileName(
+      "Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Palazzo De' Belli - 2026-09-01.csv",
+      STRUCTURES
+    );
+    expect(result.kind).toBe("resolved");
+    if (result.kind === "resolved") expect(result.structureId).toBe("s-belli");
+  });
+
+  it("[struttura non riconosciuta] filename senza nessun nome/alias struttura -> not_found (BLOCCANTE, mai un fallback)", () => {
+    const result = resolveBdStructureFromFileName("Ospiti per provenienza (01 Gen 2026 - 31 Dic 2026) - Struttura Sconosciuta - 2026-09-01.csv", STRUCTURES);
+    expect(result).toEqual({ kind: "not_found" });
+  });
+
+  it("filename che contiene due nomi struttura distinti -> ambiguous (BLOCCANTE, mai 'la piu' probabile')", () => {
+    const result = resolveBdStructureFromFileName("Confronto Palazzo Rollo e Villa Neviera.csv", STRUCTURES);
+    expect(result.kind).toBe("ambiguous");
+    if (result.kind === "ambiguous") {
+      expect(result.candidateNames.sort()).toEqual(["Palazzo Rollo", "Villa Neviera"]);
+    }
+  });
+
+  it("bdStructureMismatchMessage: caso resolved-ma-diverso nomina sia la struttura rilevata sia quella selezionata", () => {
+    const resolved = resolveBdStructureFromFileName("... - Palazzo Rollo - ...csv", STRUCTURES);
+    const msg = bdStructureMismatchMessage(resolved, "Villa Neviera");
+    expect(msg).toContain("Palazzo Rollo");
+    expect(msg).toContain("Villa Neviera");
+  });
+
+  it("bdStructureMismatchMessage: caso not_found/ambiguous usa il messaggio 'impossibile identificare con sicurezza'", () => {
+    const notFound = resolveBdStructureFromFileName("report.csv", STRUCTURES);
+    expect(bdStructureMismatchMessage(notFound, "Villa Neviera")).toContain("Impossibile identificare con sicurezza");
   });
 });

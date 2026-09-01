@@ -279,8 +279,15 @@ function toNumber(value: unknown): number | null {
 }
 
 // Esempio atteso: "Mercoledì, 01 Gen - 31 Gen 2025" -> "2025-01-01"
-// (riga di un mese aggregato: prendiamo solo l'inizio del periodo)
-function parsePeriodStartDate(label: string): string | null {
+// (riga di un mese aggregato: prendiamo solo l'inizio del periodo). Gestisce
+// anche l'etichetta di un singolo giorno con mese per esteso, es.
+// "Giovedì, 01 Gennaio 2026" -> "2026-01-01" (il match si ferma alle prime
+// 3 lettere del mese, quindi "Gennaio"/"Gen" risolvono allo stesso modo) -
+// stesso identico formato usato dall'export "Ospiti per provenienza"
+// (Nazionalità), verificato su file reali .xls e .csv: esportata perche'
+// riusata da lib/nationalityParser.ts invece di duplicare il parsing data,
+// comportamento e firma invariati per l'uso esistente in questo file.
+export function parsePeriodStartDate(label: string): string | null {
   const afterComma = label.includes(",") ? label.split(",")[1] : label;
   const dayMonthMatch = afterComma?.match(/(\d{1,2})\s+([A-Za-zàèìòù]+)/i);
   const yearMatch = label.match(/(\d{4})/);

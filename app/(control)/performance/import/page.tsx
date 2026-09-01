@@ -1570,7 +1570,7 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
   return (
     <AppCard
       title="Nazionalità"
-      subtitle='Report "Ospiti per Nazione" (colonna Data + una colonna per nazionalità). Formato non ancora validato su un file reale — se il file viene rifiutato, verifica le intestazioni riportate nell’errore.'
+      subtitle='Report "Ospiti per provenienza" BD (.xls/.xlsx/.csv, intestazione a due righe: gruppo nazionalità + Presenze/Arrivi/Partenze). Importa solo le combinazioni giorno × nazionalità con presenze effettive.'
     >
       <div className="space-y-5">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:max-w-lg">

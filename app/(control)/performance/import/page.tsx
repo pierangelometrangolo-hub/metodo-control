@@ -9,9 +9,23 @@ import { AppButton } from "@/components/ui/AppButton";
 import { AppInput } from "@/components/ui/AppInput";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule, getUserLevelRank } from "@/lib/permissions";
-import { parseBdExportWorkbook, ParsedMonthRow } from "@/lib/bdExportParser";
+import { parseBdExportWorkbook, parseBdExportCsv } from "@/lib/bdExportParser";
+import { parseMontecalliniPmsCsv } from "@/lib/montecalliniPmsParser";
 import { parseNationalityWorkbook, ParsedNationalityRow } from "@/lib/nationalityParser";
 import { MONTH_LABELS } from "@/components/performance/Calendar";
+import {
+  StructureOption,
+  ImportableRow,
+  FileFormat,
+  GroupKind,
+  MONTECALLINI_STRUCTURE_NAME,
+  detectFileFormat,
+  detectCsvFormat,
+  resolveGroupExtractionDate,
+  guessStructureId,
+  matchFileToStructure,
+  structureMismatchMessage,
+} from "@/lib/performanceImportRouting";
 
 // channel_commission_rates ha RLS insert/update a rank >= 2 - il form
 // Commissioni va nascosto del tutto per level=user, non solo disabilitato
@@ -37,67 +51,117 @@ const KNOWN_CHANNELS = [
 
 const CURRENT_YEAR = new Date().getFullYear();
 
-type StructureOption = {
-  id: string;
-  name: string;
+// MONTECALLINI_STRUCTURE_NAME, StructureOption, ImportableRow, FileFormat,
+// GroupKind: spostati in lib/performanceImportRouting.ts (vedi import in
+// cima al file) - stessa definizione, refactor puro senza cambio di
+// comportamento.
+
+type ParsedGroup = {
+  kind: GroupKind;
+  rows: ImportableRow[];
 };
 
 type FileEntry = {
   file: File;
   structureId: string;
-  rows: ParsedMonthRow[];
+  groups: ParsedGroup[];
   parseErrors: string[];
+  // Warning di coerenza (mai bloccanti) del parser PMS Montecallini - lista
+  // vuota per l'export BD, che non li produce.
+  parseWarnings: string[];
   // Doppia conferma manuale quando il nome file non permette un match
-  // automatico univoco con nessuna struttura (vedi matchFileNameToStructure)
-  // - irrilevante/ignorato negli altri casi (match/mismatch).
+  // automatico univoco con nessuna struttura (vedi matchFileToStructure)
+  // - irrilevante/ignorato negli altri casi (match/mismatch/format_mismatch).
   structureConfirmed: boolean;
+  format: FileFormat;
+};
+
+function totalRowsInEntry(entry: FileEntry): number {
+  return entry.groups.reduce((sum, g) => sum + g.rows.length, 0);
+}
+
+type FileImportSummary = {
+  fileName: string;
+  imported: number;
+  duplicatesSkipped: number;
+  errors: string[];
 };
 
 type ImportSummary = {
   imported: number;
   duplicatesSkipped: number;
   errors: string[];
+  // Popolato solo per il flusso multi-file Montecallini (Import actual) -
+  // un file PMS puo' generare piu' scritture (CY/SDLY/LY), il riepilogo
+  // per file resta comunque UNA riga per file caricato, non per scrittura.
+  perFile?: FileImportSummary[];
 };
 
 function todayString() {
   return new Date().toISOString().split("T")[0];
 }
 
-// Verificato sul file reale di un incidente (export BD, nome completo:
-// "ADR - RevPAR (01 Gen 2026 - 31 Dic 2026) - Sangiorgio Resort ... .xls"):
-// il CONTENUTO del file (foglio Excel, proprieta' del workbook) non porta
-// nessun identificativo di struttura - la riga 0 e' gia' l'intestazione
-// tabellare (Data/Unita' occupate/...), nessuna riga titolo, nessuna
-// proprieta' custom. Il nome file e' l'UNICO segnale disponibile, generato
-// dall'export BD stesso (non digitato a mano) - affidabile in pratica, ma
-// comunque rinominabile per errore, quindi mai trattato come prova quanto
-// un identificativo nel contenuto lo sarebbe stato.
-function guessStructureFromFileName(fileName: string, structures: StructureOption[]): StructureOption | null {
-  const lower = fileName.toLowerCase();
-  const matches = structures.filter((s) => lower.includes(s.name.toLowerCase()));
-  return matches.length === 1 ? matches[0] : null;
+// detectFileFormat: spostata in lib/performanceImportRouting.ts.
+
+async function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file, "UTF-8");
+  });
 }
 
-function guessStructureId(fileName: string, structures: StructureOption[]): string {
-  return guessStructureFromFileName(fileName, structures)?.id ?? "";
+// Punto unico di parsing per tutti i formati - branch sul formato
+// rilevato, mai duplicato nei singoli componenti (ImportStorico/ImportActual
+// chiamano sempre e solo questa funzione, non i parser direttamente). Per
+// l'export BD (.xls/.xlsx o CSV) produce sempre un solo gruppo "cy"
+// (comportamento invariato). Per il PMS Montecallini separa le righe gia'
+// classificate dal parser in fino a 3 gruppi (cy/sdly/ly), ciascuno scritto
+// poi con la propria extraction_date (vedi resolveGroupExtractionDate).
+//
+// Un file .csv non e' piu' un segnale univoco (BD ora esporta anche CSV,
+// oltre a Montecallini) - per un .csv il formato reale viene sempre
+// determinato dal CONTENUTO (detectCsvFormat, mai dalla sola estensione,
+// che qui serve solo a scegliere COME leggere il file: come testo per i
+// due dialetti CSV, come binario per .xls/.xlsx).
+async function parseImportFile(
+  file: File
+): Promise<{ groups: ParsedGroup[]; errors: string[]; warnings: string[]; format: FileFormat }> {
+  const isCsv = file.name.toLowerCase().endsWith(".csv");
+
+  if (isCsv) {
+    const text = await readFileAsText(file);
+    const csvFormat = detectCsvFormat(text);
+
+    if (csvFormat === "montecallini_pms") {
+      const { rows, errors, warnings } = parseMontecalliniPmsCsv(text);
+
+      const groups: ParsedGroup[] = (["cy", "sdly", "ly"] as const)
+        .map((kind) => ({ kind, rows: rows.filter((r) => r.kind === kind) }))
+        .filter((g) => g.rows.length > 0);
+
+      return {
+        groups,
+        errors,
+        warnings: warnings.map((w) => `Riga ${w.line}: ${w.message}`),
+        format: csvFormat,
+      };
+    }
+
+    const { rows, errors, warnings } = parseBdExportCsv(text);
+    return { groups: rows.length > 0 ? [{ kind: "cy", rows }] : [], errors, warnings, format: csvFormat };
+  }
+
+  const buffer = await readFileAsArrayBuffer(file);
+  const { rows, errors, warnings } = parseBdExportWorkbook(buffer);
+  return { groups: rows.length > 0 ? [{ kind: "cy", rows }] : [], errors, warnings, format: "bd_export" };
 }
 
-type StructureMatch = { kind: "match" } | { kind: "mismatch"; guessedName: string } | { kind: "unknown" };
-
-// Confronta il nome del file con la struttura selezionata - "unknown" copre
-// sia il caso "nessun nome struttura riconoscibile nel nome file" sia
-// "structureId non ancora selezionato" (nulla con cui confrontare).
-function matchFileNameToStructure(fileName: string, selectedStructureId: string, structures: StructureOption[]): StructureMatch {
-  if (!selectedStructureId) return { kind: "unknown" };
-  const guessed = guessStructureFromFileName(fileName, structures);
-  if (!guessed) return { kind: "unknown" };
-  if (guessed.id === selectedStructureId) return { kind: "match" };
-  return { kind: "mismatch", guessedName: guessed.name };
-}
-
-function structureMismatchMessage(guessedName: string, selectedName: string): string {
-  return `Il file selezionato sembra appartenere a "${guessedName}", ma hai selezionato "${selectedName}". Import bloccato. (verifica basata sul nome del file: l'export BD non contiene un identificativo di struttura nel contenuto)`;
-}
+// firstDayOfMonthAfter, oneYearBefore, computeMontecalliniGroupExtractionDate,
+// resolveGroupExtractionDate, guessStructureFromFileName, guessStructureId,
+// StructureMatch, matchFileToStructure, structureMismatchMessage: tutte
+// spostate in lib/performanceImportRouting.ts (vedi import in cima al file).
 
 async function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
@@ -111,7 +175,7 @@ async function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
 async function processFileImport(params: {
   file: File;
   structureId: string;
-  rows: ParsedMonthRow[];
+  rows: ImportableRow[];
   extractionDate: string;
   uploadedBy: string;
 }): Promise<{ imported: number; duplicatesSkipped: number; dbErrors: string[] }> {
@@ -297,6 +361,13 @@ export default function PerformanceImportPage() {
           ) : (
             <ImportActual structures={structures} />
           )}
+
+          <Link
+            href="/performance/inserimento-manuale"
+            className="block text-[12px] font-medium text-[#017A92] hover:underline"
+          >
+            Montecallini: nessun export PMS disponibile per un mese specifico? Inserimento manuale (opzione secondaria) →
+          </Link>
         </>
       )}
 
@@ -333,13 +404,15 @@ function DropZone({ onFiles }: { onFiles: (files: File[]) => void }) {
         dragOver ? "border-[#017A92] bg-[#f3f8fa]" : "border-[#e7dfd8] bg-[#fcfbf9]"
       }`}
     >
-      <p className="text-sm text-[#6a6d70]">Trascina qui i file Excel, oppure</p>
+      <p className="text-sm text-[#6a6d70]">
+        Trascina qui i file export BD (.xls/.xlsx/.csv) o export PMS Montecallini (.csv), oppure
+      </p>
       <label className="mt-3 cursor-pointer rounded-[14px] bg-[#017A92] px-4 py-2 text-sm font-semibold text-white hover:opacity-90">
         Scegli file
         <input
           type="file"
           multiple
-          accept=".xls,.xlsx"
+          accept=".xls,.xlsx,.csv"
           className="hidden"
           onChange={(e) => onFiles(Array.from(e.target.files || []))}
         />
@@ -363,22 +436,30 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
 
     for (const file of files) {
       try {
-        const buffer = await readFileAsArrayBuffer(file);
-        const { rows, errors } = parseBdExportWorkbook(buffer);
+        const { groups, errors, warnings, format } = await parseImportFile(file);
         newEntries.push({
           file,
+          // Il formato PMS non ha (per ora) evidenza di un nome file da cui
+          // indovinare la struttura - guessStructureId non trova nulla e
+          // structureId resta vuoto, correttamente: il controllo che conta
+          // per Montecallini e' quello di formato (vedi matchFileToStructure),
+          // non il nome file.
           structureId: guessStructureId(file.name, structures),
-          rows,
+          groups,
           parseErrors: errors,
+          parseWarnings: warnings,
           structureConfirmed: false,
+          format,
         });
       } catch (err) {
         newEntries.push({
           file,
           structureId: "",
-          rows: [],
+          groups: [],
           parseErrors: [err instanceof Error ? err.message : String(err)],
+          parseWarnings: [],
           structureConfirmed: false,
+          format: detectFileFormat(file.name),
         });
       }
     }
@@ -402,15 +483,15 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
     setEntries((prev) => prev.filter((_, i) => i !== fileIndex));
   }
 
-  const entryMatches = entries.map((e) => matchFileNameToStructure(e.file.name, e.structureId, structures));
-  const hasMismatch = entryMatches.some((m) => m.kind === "mismatch");
+  const entryMatches = entries.map((e) => matchFileToStructure(e.file.name, e.format, e.structureId, structures));
+  const hasBlockingMismatch = entryMatches.some((m) => m.kind === "mismatch" || m.kind === "format_mismatch");
   const hasUnconfirmedUnknown = entries.some((e, i) => e.structureId !== "" && entryMatches[i].kind === "unknown" && !e.structureConfirmed);
 
   const canSubmit =
     entries.length > 0 &&
     extractionDate !== "" &&
-    entries.every((e) => e.structureId !== "" && e.rows.length > 0) &&
-    !hasMismatch &&
+    entries.every((e) => e.structureId !== "" && totalRowsInEntry(e) > 0) &&
+    !hasBlockingMismatch &&
     !hasUnconfirmedUnknown;
 
   async function handleSubmit() {
@@ -433,13 +514,20 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
     let totalDuplicatesSkipped = 0;
     const allErrors: string[] = [];
 
+    const today = todayString();
+
     for (const entry of entries) {
       allErrors.push(...entry.parseErrors.map((e) => `${entry.file.name}: ${e}`));
+      allErrors.push(...entry.parseWarnings.map((w) => `${entry.file.name}: ${w}`));
 
       // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato
       // (difesa in profondita' - vedi canSubmit sopra).
-      const match = matchFileNameToStructure(entry.file.name, entry.structureId, structures);
+      const match = matchFileToStructure(entry.file.name, entry.format, entry.structureId, structures);
       const selectedName = structures.find((s) => s.id === entry.structureId)?.name ?? entry.structureId;
+      if (match.kind === "format_mismatch") {
+        allErrors.push(`${entry.file.name}: ${match.reason} File saltato.`);
+        continue;
+      }
       if (match.kind === "mismatch") {
         allErrors.push(`${entry.file.name}: ${structureMismatchMessage(match.guessedName, selectedName)} File saltato.`);
         continue;
@@ -449,17 +537,26 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
         continue;
       }
 
-      const result = await processFileImport({
-        file: entry.file,
-        structureId: entry.structureId,
-        rows: entry.rows,
-        extractionDate,
-        uploadedBy: user.id,
-      });
+      // Un file PMS Montecallini puo' generare fino a 3 scritture (CY/SDLY/LY),
+      // ciascuna con la propria extraction_date - mai la stessa data scelta
+      // manualmente per il batch, che resta valida solo per i file BD delle
+      // altre strutture (dove c'e' sempre un solo gruppo "cy").
+      for (const group of entry.groups) {
+        if (group.rows.length === 0) continue;
+        const groupExtractionDate = resolveGroupExtractionDate(entry.format, group.kind, group.rows, extractionDate, today);
 
-      totalImported += result.imported;
-      totalDuplicatesSkipped += result.duplicatesSkipped;
-      allErrors.push(...result.dbErrors);
+        const result = await processFileImport({
+          file: entry.file,
+          structureId: entry.structureId,
+          rows: group.rows,
+          extractionDate: groupExtractionDate,
+          uploadedBy: user.id,
+        });
+
+        totalImported += result.imported;
+        totalDuplicatesSkipped += result.duplicatesSkipped;
+        allErrors.push(...result.dbErrors.map((e) => `${entry.file.name} [${group.kind}]: ${e}`));
+      }
     }
 
     setSubmitting(false);
@@ -470,7 +567,7 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
   return (
     <AppCard
       title="Import storico"
-      subtitle="Carica uno o più export BD (anche aggregati mensili/annuali). La data di estrazione va scelta manualmente per l'intero batch."
+      subtitle="Carica uno o più export BD (.xls/.xlsx/.csv, anche aggregati mensili/annuali) o export PMS Montecallini (.csv, un file per mese). La data di estrazione va scelta manualmente per l'intero batch, tranne per i file PMS Montecallini (calcolata automaticamente dal mese coperto)."
     >
       <div className="space-y-5">
         <div>
@@ -498,8 +595,11 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
                     <div>
                       <p className="text-sm font-semibold text-[#2B2D2F]">{entry.file.name}</p>
                       <p className="mt-1 text-[12px] text-[#6a6d70]">
-                        {entry.rows.length} periodi riconosciuti
+                        {totalRowsInEntry(entry)} periodi riconosciuti
+                        {entry.groups.length > 1 &&
+                          ` (${entry.groups.map((g) => `${g.kind.toUpperCase()}: ${g.rows.length}`).join(", ")})`}
                         {entry.parseErrors.length > 0 && `, ${entry.parseErrors.length} righe con errori`}
+                        {entry.parseWarnings.length > 0 && `, ${entry.parseWarnings.length} avvisi di coerenza`}
                       </p>
                     </div>
                     <button
@@ -530,6 +630,10 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
                     </select>
                   </div>
 
+                  {match.kind === "format_mismatch" && (
+                    <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">{match.reason}</p>
+                  )}
+
                   {match.kind === "mismatch" && (
                     <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">
                       {structureMismatchMessage(match.guessedName, selectedName ?? entry.structureId)}
@@ -545,6 +649,14 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
                       />
                       Confermo che questo file corrisponde a &quot;{selectedName}&quot; (nome file non riconosciuto automaticamente)
                     </label>
+                  )}
+
+                  {entry.parseWarnings.length > 0 && (
+                    <ul className="mt-2 list-disc pl-5 text-[12px] text-[#8a6a1f]">
+                      {entry.parseWarnings.map((warn, wi) => (
+                        <li key={wi}>{warn}</li>
+                      ))}
+                    </ul>
                   )}
 
                   {entry.parseErrors.length > 0 && (
@@ -592,7 +704,11 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
 
 function ImportActual({ structures }: { structures: StructureOption[] }) {
   const [structureId, setStructureId] = useState("");
-  const [currentFile, setCurrentFile] = useState<FileEntry | null>(null);
+  // Array anche per l'export BD (dove contiene sempre 0 o 1 elemento, dato
+  // che l'input file per le altre 5 strutture non ha l'attributo multiple)
+  // - solo Montecallini puo' selezionare piu' file PlanningForecast in un
+  // solo passaggio (stagione maggio-ottobre, piu' mesi ancora aperti).
+  const [currentFiles, setCurrentFiles] = useState<FileEntry[]>([]);
   const [historicalFile, setHistoricalFile] = useState<FileEntry | null>(null);
   const [historicalDate, setHistoricalDate] = useState("");
 
@@ -615,46 +731,73 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
   const [historicalError, setHistoricalError] = useState("");
 
   const today = useMemo(() => todayString(), []);
+  const isMontecalliniSelected = structures.find((s) => s.id === structureId)?.name === MONTECALLINI_STRUCTURE_NAME;
 
-  async function handleFile(file: File, target: "current" | "historical") {
-    if (target === "current") {
-      setCurrentError("");
-      setCurrentSummary(null);
-    } else {
-      setHistoricalError("");
-      setHistoricalSummary(null);
+  async function handleCurrentFiles(files: File[]) {
+    setCurrentError("");
+    setCurrentSummary(null);
+
+    const newEntries: FileEntry[] = [];
+    for (const file of files) {
+      try {
+        const { groups, errors, warnings, format } = await parseImportFile(file);
+        newEntries.push({ file, structureId: "", groups, parseErrors: errors, parseWarnings: warnings, structureConfirmed: false, format });
+      } catch (err) {
+        newEntries.push({
+          file,
+          structureId: "",
+          groups: [],
+          parseErrors: [err instanceof Error ? err.message : String(err)],
+          parseWarnings: [],
+          structureConfirmed: false,
+          format: detectFileFormat(file.name),
+        });
+      }
     }
+    setCurrentFiles((prev) => [...prev, ...newEntries]);
+  }
+
+  function removeCurrentFile(index: number) {
+    setCurrentFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function updateCurrentFileConfirmed(index: number, confirmed: boolean) {
+    setCurrentFiles((prev) => prev.map((e, i) => (i === index ? { ...e, structureConfirmed: confirmed } : e)));
+  }
+
+  async function handleHistoricalFile(file: File) {
+    setHistoricalError("");
+    setHistoricalSummary(null);
 
     try {
-      const buffer = await readFileAsArrayBuffer(file);
-      const { rows, errors } = parseBdExportWorkbook(buffer);
-      const entry: FileEntry = { file, structureId: "", rows, parseErrors: errors, structureConfirmed: false };
-
-      if (target === "current") setCurrentFile(entry);
-      else setHistoricalFile(entry);
+      const { groups, errors, warnings, format } = await parseImportFile(file);
+      setHistoricalFile({ file, structureId: "", groups, parseErrors: errors, parseWarnings: warnings, structureConfirmed: false, format });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (target === "current") setCurrentError(message);
-      else setHistoricalError(message);
+      setHistoricalError(err instanceof Error ? err.message : String(err));
     }
   }
 
-  const currentMatch = currentFile ? matchFileNameToStructure(currentFile.file.name, structureId, structures) : null;
-  const historicalMatch = historicalFile ? matchFileNameToStructure(historicalFile.file.name, structureId, structures) : null;
+  const currentMatches = currentFiles.map((f) => matchFileToStructure(f.file.name, f.format, structureId, structures));
+  const historicalMatch = historicalFile
+    ? matchFileToStructure(historicalFile.file.name, historicalFile.format, structureId, structures)
+    : null;
+
+  const currentHasBlockingMismatch = currentMatches.some((m) => m.kind === "mismatch" || m.kind === "format_mismatch");
+  const currentHasUnconfirmedUnknown = currentFiles.some(
+    (f, i) => structureId !== "" && currentMatches[i].kind === "unknown" && !f.structureConfirmed
+  );
+  const currentHasRows = currentFiles.some((f) => totalRowsInEntry(f) > 0);
 
   const canSubmitCurrent =
-    structureId !== "" &&
-    currentFile !== null &&
-    currentFile.rows.length > 0 &&
-    currentMatch?.kind !== "mismatch" &&
-    !(currentMatch?.kind === "unknown" && !currentFile.structureConfirmed);
+    structureId !== "" && currentFiles.length > 0 && currentHasRows && !currentHasBlockingMismatch && !currentHasUnconfirmedUnknown;
 
   const canSubmitHistorical =
     structureId !== "" &&
     historicalFile !== null &&
-    historicalFile.rows.length > 0 &&
+    totalRowsInEntry(historicalFile) > 0 &&
     historicalDate !== "" &&
     historicalMatch?.kind !== "mismatch" &&
+    historicalMatch?.kind !== "format_mismatch" &&
     !(historicalMatch?.kind === "unknown" && !historicalFile.structureConfirmed);
 
   async function handleSubmitCurrent() {
@@ -666,40 +809,68 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
       error: userError,
     } = await supabase.auth.getUser();
 
-    if (userError || !user || !currentFile) {
-      setCurrentError("Sessione non valida o file mancante");
-      return;
-    }
-
-    // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato.
-    const selectedName = structures.find((s) => s.id === structureId)?.name ?? structureId;
-    const match = matchFileNameToStructure(currentFile.file.name, structureId, structures);
-    if (match.kind === "mismatch") {
-      setCurrentError(structureMismatchMessage(match.guessedName, selectedName));
-      return;
-    }
-    if (match.kind === "unknown" && !currentFile.structureConfirmed) {
-      setCurrentError("Conferma che il file corrisponde alla struttura selezionata prima di procedere.");
+    if (userError || !user || currentFiles.length === 0) {
+      setCurrentError("Sessione non valida o nessun file selezionato");
       return;
     }
 
     setSubmittingCurrent(true);
 
-    const result = await processFileImport({
-      file: currentFile.file,
-      structureId,
-      rows: currentFile.rows,
-      extractionDate: today,
-      uploadedBy: user.id,
-    });
+    const selectedName = structures.find((s) => s.id === structureId)?.name ?? structureId;
+    const perFile: FileImportSummary[] = [];
+    let totalImported = 0;
+    let totalDuplicatesSkipped = 0;
+    const allErrors: string[] = [];
+
+    for (const entry of currentFiles) {
+      // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato.
+      const match = matchFileToStructure(entry.file.name, entry.format, structureId, structures);
+      if (match.kind === "format_mismatch" || match.kind === "mismatch") {
+        const msg = match.kind === "format_mismatch" ? match.reason : structureMismatchMessage(match.guessedName, selectedName);
+        perFile.push({ fileName: entry.file.name, imported: 0, duplicatesSkipped: 0, errors: [msg] });
+        allErrors.push(`${entry.file.name}: ${msg} File saltato.`);
+        continue;
+      }
+      if (match.kind === "unknown" && !entry.structureConfirmed) {
+        const msg = "corrispondenza struttura non confermata";
+        perFile.push({ fileName: entry.file.name, imported: 0, duplicatesSkipped: 0, errors: [msg] });
+        allErrors.push(`${entry.file.name}: ${msg} - file saltato.`);
+        continue;
+      }
+
+      let fileImported = 0;
+      let fileDuplicatesSkipped = 0;
+      const fileErrors: string[] = [...entry.parseErrors, ...entry.parseWarnings];
+
+      // Un file PMS Montecallini puo' generare fino a 3 scritture (CY/SDLY/LY),
+      // ciascuna con la propria extraction_date - per l'export BD c'e' sempre
+      // un solo gruppo "cy" con extraction_date = oggi, invariato.
+      for (const group of entry.groups) {
+        if (group.rows.length === 0) continue;
+        const groupExtractionDate = resolveGroupExtractionDate(entry.format, group.kind, group.rows, today, today);
+
+        const result = await processFileImport({
+          file: entry.file,
+          structureId,
+          rows: group.rows,
+          extractionDate: groupExtractionDate,
+          uploadedBy: user.id,
+        });
+
+        fileImported += result.imported;
+        fileDuplicatesSkipped += result.duplicatesSkipped;
+        fileErrors.push(...result.dbErrors);
+      }
+
+      perFile.push({ fileName: entry.file.name, imported: fileImported, duplicatesSkipped: fileDuplicatesSkipped, errors: fileErrors });
+      totalImported += fileImported;
+      totalDuplicatesSkipped += fileDuplicatesSkipped;
+      allErrors.push(...fileErrors.map((e) => `${entry.file.name}: ${e}`));
+    }
 
     setSubmittingCurrent(false);
-    setCurrentSummary({
-      imported: result.imported,
-      duplicatesSkipped: result.duplicatesSkipped,
-      errors: [...currentFile.parseErrors.map((e) => `${currentFile.file.name}: ${e}`), ...result.dbErrors],
-    });
-    setCurrentFile(null);
+    setCurrentSummary({ imported: totalImported, duplicatesSkipped: totalDuplicatesSkipped, errors: allErrors, perFile });
+    setCurrentFiles([]);
     setCurrentFileInputKey((k) => k + 1);
     // Il selettore struttura torna pronto per la prossima struttura del
     // flusso settimanale - mai lasciato sulla selezione precedente (e'
@@ -722,7 +893,11 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
     }
 
     const selectedName = structures.find((s) => s.id === structureId)?.name ?? structureId;
-    const match = matchFileNameToStructure(historicalFile.file.name, structureId, structures);
+    const match = matchFileToStructure(historicalFile.file.name, historicalFile.format, structureId, structures);
+    if (match.kind === "format_mismatch") {
+      setHistoricalError(match.reason);
+      return;
+    }
     if (match.kind === "mismatch") {
       setHistoricalError(structureMismatchMessage(match.guessedName, selectedName));
       return;
@@ -734,20 +909,29 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
     setSubmittingHistorical(true);
 
-    const result = await processFileImport({
-      file: historicalFile.file,
-      structureId,
-      rows: historicalFile.rows,
-      extractionDate: historicalDate,
-      uploadedBy: user.id,
-    });
+    let totalImported = 0;
+    let totalDuplicatesSkipped = 0;
+    const allErrors: string[] = [...historicalFile.parseErrors.map((e) => `${historicalFile.file.name}: ${e}`), ...historicalFile.parseWarnings.map((w) => `${historicalFile.file.name}: ${w}`)];
+
+    for (const group of historicalFile.groups) {
+      if (group.rows.length === 0) continue;
+      const groupExtractionDate = resolveGroupExtractionDate(historicalFile.format, group.kind, group.rows, historicalDate, today);
+
+      const result = await processFileImport({
+        file: historicalFile.file,
+        structureId,
+        rows: group.rows,
+        extractionDate: groupExtractionDate,
+        uploadedBy: user.id,
+      });
+
+      totalImported += result.imported;
+      totalDuplicatesSkipped += result.duplicatesSkipped;
+      allErrors.push(...result.dbErrors.map((e) => `${historicalFile.file.name} [${group.kind}]: ${e}`));
+    }
 
     setSubmittingHistorical(false);
-    setHistoricalSummary({
-      imported: result.imported,
-      duplicatesSkipped: result.duplicatesSkipped,
-      errors: [...historicalFile.parseErrors.map((e) => `${historicalFile.file.name}: ${e}`), ...result.dbErrors],
-    });
+    setHistoricalSummary({ imported: totalImported, duplicatesSkipped: totalDuplicatesSkipped, errors: allErrors });
     setHistoricalFile(null);
     setHistoricalDate("");
     setHistoricalFileInputKey((k) => k + 1);
@@ -757,7 +941,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
   return (
     <AppCard
       title="Import actual"
-      subtitle="Flusso ricorrente (tipicamente ogni martedì): export BD corrente + uno storico di riferimento per il confronto SDLY."
+      subtitle="Flusso ricorrente (tipicamente ogni martedì): export BD corrente + uno storico di riferimento per il confronto SDLY. Per Montecallini usa l'export PMS PlanningForecast (.csv)."
     >
       <div className="space-y-6">
         <div>
@@ -780,40 +964,97 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
         <div className="rounded-[14px] border border-[#e7dfd8] p-4">
           <p className="text-sm font-semibold text-[#2B2D2F]">
-            Export BD corrente — data di estrazione: {today} (oggi, non modificabile)
+            {isMontecalliniSelected ? (
+              <>
+                Export corrente PMS — per ciascun file la data di estrazione è calcolata singolarmente (mese in corso = oggi, mese
+                chiuso = primo giorno del mese successivo; per le righe SDLY/LY vedi il riepilogo dopo l&apos;import)
+              </>
+            ) : (
+              <>Export BD corrente — data di estrazione: {today} (oggi, non modificabile)</>
+            )}
           </p>
           <div className="mt-3">
             <label className="mb-1 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-              File
+              File (export BD .xls/.xlsx/.csv, o export PMS Montecallini .csv
+              {isMontecalliniSelected ? " — è possibile selezionare più file PlanningForecast insieme" : ""})
             </label>
             <input
               key={currentFileInputKey}
               type="file"
-              accept=".xls,.xlsx"
-              onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0], "current")}
+              accept=".xls,.xlsx,.csv"
+              multiple={isMontecalliniSelected}
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  handleCurrentFiles(Array.from(e.target.files));
+                  e.target.value = "";
+                }
+              }}
             />
-            {currentFile && (
-              <p className="mt-2 text-[12px] text-[#6a6d70]">
-                {currentFile.file.name} — {currentFile.rows.length} periodi riconosciuti
-                {currentFile.parseErrors.length > 0 && `, ${currentFile.parseErrors.length} errori`}
-              </p>
-            )}
 
-            {currentMatch?.kind === "mismatch" && (
-              <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">
-                {structureMismatchMessage(currentMatch.guessedName, structures.find((s) => s.id === structureId)?.name ?? structureId)}
-              </p>
-            )}
+            {currentFiles.length > 0 && (
+              <ul className="mt-2 space-y-2">
+                {currentFiles.map((entry, i) => {
+                  const match = currentMatches[i];
+                  return (
+                    <li key={i} className="rounded-[10px] border border-[#e7dfd8] bg-[#fcfbf9] p-2 text-[12px] text-[#6a6d70]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span>
+                          {entry.file.name} — {totalRowsInEntry(entry)} periodi riconosciuti
+                          {entry.parseErrors.length > 0 && `, ${entry.parseErrors.length} errori`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeCurrentFile(i)}
+                          className="shrink-0 text-[#8a3a3a] underline"
+                        >
+                          rimuovi
+                        </button>
+                      </div>
+                      {entry.groups.length > 1 && (
+                        <p className="mt-1 text-[#6a6d70]">
+                          ({entry.groups.map((g) => `${g.kind.toUpperCase()}: ${g.rows.length}`).join(", ")})
+                        </p>
+                      )}
+                      {entry.parseErrors.length > 0 && (
+                        <ul className="mt-1 list-disc pl-4 text-[#8a3a3a]">
+                          {entry.parseErrors.map((err, j) => (
+                            <li key={j}>{err}</li>
+                          ))}
+                        </ul>
+                      )}
+                      {entry.parseWarnings.length > 0 && (
+                        <ul className="mt-1 list-disc pl-4 text-[#8a6a1f]">
+                          {entry.parseWarnings.map((w, j) => (
+                            <li key={j}>{w}</li>
+                          ))}
+                        </ul>
+                      )}
 
-            {currentMatch?.kind === "unknown" && structureId !== "" && currentFile && (
-              <label className="mt-2 flex items-center gap-2 text-[12px] text-[#6b625c]">
-                <input
-                  type="checkbox"
-                  checked={currentFile.structureConfirmed}
-                  onChange={(e) => setCurrentFile((prev) => (prev ? { ...prev, structureConfirmed: e.target.checked } : prev))}
-                />
-                Confermo che questo file corrisponde a &quot;{structures.find((s) => s.id === structureId)?.name}&quot; (nome file non riconosciuto automaticamente)
-              </label>
+                      {match?.kind === "format_mismatch" && (
+                        <p className="mt-1 font-semibold text-[#8a3a3a]">{match.reason}</p>
+                      )}
+
+                      {match?.kind === "mismatch" && (
+                        <p className="mt-1 font-semibold text-[#8a3a3a]">
+                          {structureMismatchMessage(match.guessedName, structures.find((s) => s.id === structureId)?.name ?? structureId)}
+                        </p>
+                      )}
+
+                      {match?.kind === "unknown" && structureId !== "" && (
+                        <label className="mt-1 flex items-center gap-2 text-[#6b625c]">
+                          <input
+                            type="checkbox"
+                            checked={entry.structureConfirmed}
+                            onChange={(e) => updateCurrentFileConfirmed(i, e.target.checked)}
+                          />
+                          Confermo che questo file corrisponde a &quot;{structures.find((s) => s.id === structureId)?.name}&quot; (nome
+                          file non riconosciuto automaticamente)
+                        </label>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             )}
           </div>
 
@@ -824,6 +1065,19 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
               <p className="font-semibold">Import completato</p>
               <p className="mt-1">Righe importate: {currentSummary.imported}</p>
               <p>Duplicati saltati: {currentSummary.duplicatesSkipped}</p>
+              {currentSummary.perFile && currentSummary.perFile.length > 1 && (
+                <div className="mt-2">
+                  <p className="font-semibold">Riepilogo per file:</p>
+                  <ul className="list-disc pl-5">
+                    {currentSummary.perFile.map((f, i) => (
+                      <li key={i}>
+                        {f.fileName}: {f.imported} importate, {f.duplicatesSkipped} duplicati saltati
+                        {f.errors.length > 0 && `, ${f.errors.length} errori`}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {currentSummary.errors.length > 0 && (
                 <>
                   <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
@@ -864,16 +1118,27 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
               <input
                 key={historicalFileInputKey}
                 type="file"
-                accept=".xls,.xlsx"
-                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0], "historical")}
+                accept=".xls,.xlsx,.csv"
+                onChange={(e) => e.target.files?.[0] && handleHistoricalFile(e.target.files[0])}
               />
             </div>
           </div>
           {historicalFile && (
             <p className="mt-2 text-[12px] text-[#6a6d70]">
-              {historicalFile.file.name} — {historicalFile.rows.length} periodi riconosciuti
+              {historicalFile.file.name} — {totalRowsInEntry(historicalFile)} periodi riconosciuti
               {historicalFile.parseErrors.length > 0 && `, ${historicalFile.parseErrors.length} errori`}
             </p>
+          )}
+          {historicalFile && historicalFile.parseWarnings.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-[12px] text-[#8a6a1f]">
+              {historicalFile.parseWarnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          )}
+
+          {historicalMatch?.kind === "format_mismatch" && (
+            <p className="mt-2 text-[12px] font-semibold text-[#8a3a3a]">{historicalMatch.reason}</p>
           )}
 
           {historicalMatch?.kind === "mismatch" && (

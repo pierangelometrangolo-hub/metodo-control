@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx";
-import { parseBdExportWorkbook, parseEuroCurrency, isRevenueCellDateFormatted } from "../bdExportParser";
+import { parseBdExportWorkbook, parseBdExportCsv, parseEuroCurrency, isRevenueCellDateFormatted } from "../bdExportParser";
 
 const HEADER = ["Data", "Unità occupate", "Unità in vendita", "Arrivi", "Presenze", "Revenue Totale"];
 
@@ -394,5 +394,118 @@ describe("bdExportParser - replica sul contenuto reale del file Villa Neviera 20
     expect(errors[0]).toContain("27 Luglio");
     expect(errors[0]).toContain("formattata come data");
     expect(warnings).toHaveLength(2); // le due righe rooms_sold=0
+  });
+});
+
+// Costruisce un CSV BD minimo, stesso formato verificato sul file reale
+// Villa Neviera 2026-09-01: UTF-8 con BOM, delimitatore ",", campi tra
+// virgolette quando contengono la virgola stessa (la colonna Data) o spazi,
+// importi in formato italiano identico a quello XLS ("€ 1.024,92").
+const CSV_HEADER = ',Data,"Unità occupate","Unità Libere","Unità in vendita","Unità chiuse",IMO,"Indice Medio Occupazione",Arrivi,Presenze,"Revenue Totale","Tariffa media (ADR)",RevPAR,BW';
+
+function buildCsv(rows: string[], withBom = true): string {
+  const content = [CSV_HEADER, ...rows].join("\n");
+  return withBom ? "﻿" + content : content;
+}
+
+describe("parseBdExportCsv - export BD in formato CSV (stesse colonne base, stesso guardrail ADR/RevPAR)", () => {
+  it("riga normale, tutte le 6 colonne base lette correttamente - ADR/RevPAR MAI nel risultato (ParsedMonthRow non li contiene)", () => {
+    const csv = buildCsv([',"Giovedì, 01 Gennaio 2026",5,3,8,1,"62.5 %",62%,0,10,"€ 670,33","€ 134,07","€ 83,79","26 gg"']);
+    const { rows, errors, warnings } = parseBdExportCsv(csv);
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      periodLabel: "Giovedì, 01 Gennaio 2026",
+      stayDate: "2026-01-01",
+      revenueTotal: 670.33,
+      roomsSold: 5,
+      roomsAvailable: 8,
+      arrivals: 0,
+      presences: 10,
+    });
+    expect(Object.keys(rows[0])).not.toContain("adr");
+    expect(Object.keys(rows[0])).not.toContain("revpar");
+  });
+
+  it("[caso reale] Villa Neviera 27/07/2026 nel CSV: Revenue Totale corretto '€ 1.024,92' (mai il seriale-data 33627 dell'XLS)", () => {
+    const csv = buildCsv([',"Lunedì, 27 Luglio 2026",8,1,9,0,"88.89 %",88%,2,16,"€ 1.024,92","€ 128,12","€ 113,88","99 gg"']);
+    const { rows, errors, warnings } = parseBdExportCsv(csv);
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].revenueTotal).toBeCloseTo(1024.92, 2);
+    expect(rows[0].roomsSold).toBe(8);
+    expect(rows[0].roomsAvailable).toBe(9);
+    expect(rows[0].arrivals).toBe(2);
+    expect(rows[0].presences).toBe(16);
+  });
+
+  it("righe di totale annuale (Data vuota) -> saltate senza errore, stesso comportamento dell'XLS", () => {
+    const csv = buildCsv([
+      ',"Giovedì, 01 Gennaio 2026",5,3,8,1,"62.5 %",62%,0,10,"€ 670,33","€ 134,07","€ 83,79","26 gg"',
+      ',,1328,,,41,"40,94%",,837,2801,"€ 157.661,03","€ 118,72","€ 48,60",49',
+      ',,1328,,,41,"40,94%",,837,2801,"€ 157.661,03","€ 118,72","€ 48,60",49',
+    ]);
+    const { rows, errors } = parseBdExportCsv(csv);
+    expect(errors).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("guardrail ADR/RevPAR riusato identico: RevPAR fortemente incoerente ma ADR concorde -> accettata (stesso comportamento dell'XLS)", () => {
+    // ADR = 500/5 = 100.00 (dichiarato "100,00", coerente); RevPAR
+    // dichiarato deliberatamente sbagliato ("999,99") - basta un riscontro
+    // coerente per accettare, stessa regola condivisa via processBdRows.
+    const csv = buildCsv([',"Lunedì, 03 Agosto 2026",5,2,10,0,"50 %",50%,1,7,"€ 500,00","100,00","999,99",']);
+    const { rows, errors, warnings } = parseBdExportCsv(csv);
+    expect(errors).toHaveLength(0);
+    expect(warnings).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("guardrail ADR/RevPAR riusato identico: entrambi fortemente incoerenti -> scartata (stesso comportamento dell'XLS)", () => {
+    const csv = buildCsv([',"Mercoledì, 12 Agosto 2026",6,1,7,0,"85 %",85%,7,16,"€ 30325,00","115,52","99,02",']);
+    const { rows, errors } = parseBdExportCsv(csv);
+    expect(rows).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("ADR");
+    expect(errors[0]).toContain("RevPAR");
+  });
+
+  it("cella Revenue Totale non interpretabile -> riga scartata, errore generico (stesso comportamento dell'XLS)", () => {
+    const csv = buildCsv([',"Lunedì, 05 Gennaio 2026",0,9,9,0,"0 %",0%,0,0,"N/D","0,00","0,00",']);
+    const { rows, errors } = parseBdExportCsv(csv);
+    expect(rows).toHaveLength(0);
+    expect(errors[0]).toContain("valori mancanti o non numerici");
+  });
+
+  it("colonne base mancanti -> errore esplicito, nessuna riga (stesso comportamento dell'XLS)", () => {
+    const csv = "Data,Presenze\n\"Giovedì, 01 Gennaio 2026\",10";
+    const { rows, errors } = parseBdExportCsv(csv);
+    expect(rows).toHaveLength(0);
+    expect(errors[0]).toContain("colonne mancanti");
+  });
+
+  it("BOM UTF-8 in apertura file -> gestito correttamente, non influenza il parsing dell'header", () => {
+    const withBom = buildCsv([',"Giovedì, 01 Gennaio 2026",5,3,8,1,"62.5 %",62%,0,10,"€ 670,33","€ 134,07","€ 83,79","26 gg"'], true);
+    const withoutBom = buildCsv([',"Giovedì, 01 Gennaio 2026",5,3,8,1,"62.5 %",62%,0,10,"€ 670,33","€ 134,07","€ 83,79","26 gg"'], false);
+    expect(parseBdExportCsv(withBom).rows).toEqual(parseBdExportCsv(withoutBom).rows);
+    expect(parseBdExportCsv(withBom).errors).toHaveLength(0);
+  });
+
+  it("campo Data contenente la virgola del delimitatore, correttamente tra virgolette -> non spezza il parsing della riga", () => {
+    // "Giovedì, 01 Gennaio 2026" contiene una virgola: se il tokenizer non
+    // rispettasse le virgolette, la riga si spezzerebbe in colonne sbagliate.
+    const csv = buildCsv([',"Giovedì, 01 Gennaio 2026",5,3,8,1,"62.5 %",62%,0,10,"€ 670,33","€ 134,07","€ 83,79","26 gg"']);
+    const { rows, errors } = parseBdExportCsv(csv);
+    expect(errors).toHaveLength(0);
+    expect(rows[0].stayDate).toBe("2026-01-01");
+    expect(rows[0].roomsSold).toBe(5);
+  });
+
+  it("file vuoto -> errore esplicito", () => {
+    const { rows, errors } = parseBdExportCsv("");
+    expect(rows).toHaveLength(0);
+    expect(errors).toHaveLength(1);
   });
 });

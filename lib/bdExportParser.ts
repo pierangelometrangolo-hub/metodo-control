@@ -297,6 +297,112 @@ function parsePeriodStartDate(label: string): string | null {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+// Nucleo comune a ENTRAMBI i formati BD (.xls/.xlsx e, ora, .csv): stessa
+// identica logica di business (colonne richieste, parsing importi/conteggi,
+// guardrail ADR/RevPAR) applicata a una matrice di celle gia' tokenizzata,
+// indipendentemente da come quella matrice sia stata ottenuta - evita di
+// duplicare la logica tra parseBdExportWorkbook e parseBdExportCsv (l'unica
+// cosa che davvero differisce tra i due formati e' COME si legge la cella
+// fisica di Revenue Totale per il controllo formato-data, che il CSV non
+// puo' nemmeno porre: un file di testo non ha metadati di tipo/formato
+// cella, quindi quella corruzione specifica e' strutturalmente impossibile
+// in CSV - da qui il parametro isRevenueDateFormatted, "sempre false" per
+// il CSV).
+// `data[0]` e' sempre l'header, `data[i]` (i>=1) le righe dati - stessa
+// convenzione di XLSX.utils.sheet_to_json({header:1}), riusata identica
+// anche per l'array ottenuto dal tokenizer CSV.
+function processBdRows(data: unknown[][], isRevenueDateFormatted: (dataRowIndex: number) => boolean): ParseResult {
+  const headerRow = data[0].map((h) => String(h).trim());
+  const colIndex: Record<string, number> = {};
+  for (const [key, label] of Object.entries(REQUIRED_COLUMNS)) {
+    colIndex[key] = headerRow.indexOf(label);
+  }
+
+  const missing = Object.entries(REQUIRED_COLUMNS).filter(([key]) => colIndex[key] === -1);
+  if (missing.length > 0) {
+    return {
+      rows: [],
+      errors: [
+        `Formato file non riconosciuto: colonne mancanti (${missing.map(([, label]) => label).join(", ")}). ` +
+          `Colonne trovate nel file: ${headerRow.join(", ")}`,
+      ],
+      warnings: [],
+    };
+  }
+
+  // ADR/RevPAR sono opzionali (solo riferimento per evaluateRevenueConsistency,
+  // mai richieste per riconoscere il formato del file, MAI importate come
+  // fonte del dato - ParsedMonthRow non ha nemmeno un campo per loro) - a
+  // differenza di REQUIRED_COLUMNS, la loro assenza non blocca l'import,
+  // riduce solo i riscontri disponibili per quel controllo.
+  const optionalColIndex: Record<string, number> = {};
+  for (const [key, label] of Object.entries(OPTIONAL_KPI_COLUMNS)) {
+    optionalColIndex[key] = headerRow.indexOf(label);
+  }
+
+  const rows: ParsedMonthRow[] = [];
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const periodLabel = String(row[colIndex.data] || "").trim();
+
+    // riga dei totali annuali: non ha un'etichetta di periodo, si salta senza errore
+    if (!periodLabel) continue;
+
+    const stayDate = parsePeriodStartDate(periodLabel);
+    if (!stayDate) {
+      errors.push(`Riga ${i + 1}: impossibile interpretare il periodo "${periodLabel}"`);
+      continue;
+    }
+
+    // Controllo sulla cella FISICA di Revenue Totale, PRIMA di qualunque
+    // altra lettura/validazione su questo campo (parseEuroCurrency incluso)
+    // - vedi isRevenueCellDateFormatted: un valore fisicamente non piu'
+    // presente (sostituito da un seriale-data) non deve mai arrivare al
+    // guardrail ADR/RevPAR ne' essere ricostruito da esso. No-op per il CSV
+    // (isRevenueDateFormatted sempre false li').
+    if (isRevenueDateFormatted(i)) {
+      errors.push(
+        `Riga ${i + 1} (${periodLabel}): Revenue Totale non leggibile: la cella Excel è formattata come data. Verificare il valore sorgente BD.`
+      );
+      continue;
+    }
+
+    const roomsSold = toNumber(row[colIndex.roomsSold]);
+    const roomsAvailable = toNumber(row[colIndex.roomsAvailable]);
+    const arrivals = toNumber(row[colIndex.arrivals]);
+    const presences = toNumber(row[colIndex.presences]);
+    const revenueTotal = parseEuroCurrency(row[colIndex.revenue]);
+
+    if (
+      roomsSold === null ||
+      roomsAvailable === null ||
+      arrivals === null ||
+      presences === null ||
+      revenueTotal === null
+    ) {
+      errors.push(`Riga ${i + 1} (${periodLabel}): valori mancanti o non numerici`);
+      continue;
+    }
+
+    const kpiOutcomes = classifyKpiChecks(revenueTotal, roomsSold, roomsAvailable, row, optionalColIndex);
+    const action = evaluateRevenueConsistency(kpiOutcomes);
+    if (action.kind === "reject") {
+      errors.push(`Riga ${i + 1} (${periodLabel}): ${action.detail} - riga scartata (Revenue Totale probabilmente corrotto).`);
+      continue;
+    }
+    if (action.kind === "warn") {
+      warnings.push(`Riga ${i + 1} (${periodLabel}): ${action.detail}`);
+    }
+
+    rows.push({ periodLabel, stayDate, revenueTotal, roomsSold, roomsAvailable, arrivals, presences });
+  }
+
+  return { rows, errors, warnings };
+}
+
 export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
   let workbook: XLSX.WorkBook;
 
@@ -348,98 +454,79 @@ export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
     sheetRange = null;
   }
 
-  const headerRow = data[0].map((h) => String(h).trim());
-  const colIndex: Record<string, number> = {};
-  for (const [key, label] of Object.entries(REQUIRED_COLUMNS)) {
-    colIndex[key] = headerRow.indexOf(label);
-  }
+  const revenueColIdx = data[0].map((h) => String(h).trim()).indexOf(REQUIRED_COLUMNS.revenue);
 
-  const missing = Object.entries(REQUIRED_COLUMNS).filter(([key]) => colIndex[key] === -1);
-  if (missing.length > 0) {
-    return {
-      rows: [],
-      errors: [
-        `Formato file non riconosciuto: colonne mancanti (${missing.map(([, label]) => label).join(", ")}). ` +
-          `Colonne trovate nel file: ${headerRow.join(", ")}`,
-      ],
-      warnings: [],
-    };
-  }
+  return processBdRows(data, (dataRowIndex) => {
+    if (!sheetRange || revenueColIdx === -1) return false;
+    const addr = XLSX.utils.encode_cell({ r: sheetRange.s.r + dataRowIndex, c: sheetRange.s.c + revenueColIdx });
+    return isRevenueCellDateFormatted(sheet[addr]);
+  });
+}
 
-  // ADR/RevPAR sono opzionali (solo riferimento per evaluateRevenueConsistency,
-  // mai richieste per riconoscere il formato del file) - a differenza di
-  // REQUIRED_COLUMNS, la loro assenza non blocca l'import, semplicemente
-  // riduce i riscontri disponibili per quel controllo (vedi commento sopra
-  // evaluateRevenueConsistency).
-  const optionalColIndex: Record<string, number> = {};
-  for (const [key, label] of Object.entries(OPTIONAL_KPI_COLUMNS)) {
-    optionalColIndex[key] = headerRow.indexOf(label);
-  }
+function stripBom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
 
-  const rows: ParsedMonthRow[] = [];
-  const errors: string[] = [];
-  const warnings: string[] = [];
+// Tokenizzatore CSV minimale (virgolette come escape "" , campo tra
+// virgolette puo' contenere il delimitatore) - stessa logica gia' in uso
+// in lib/montecalliniPmsParser.ts per il proprio formato (delimitatore
+// ";"), reimplementata qui in locale invece che condivisa: sono due parser
+// indipendenti per due fonti diverse (vedi commento in testa a
+// montecalliniPmsParser.ts), non deve esserci un accoppiamento tra i due
+// solo perche' usano lo stesso algoritmo di tokenizzazione generico.
+function splitCsvLine(line: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
 
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    const periodLabel = String(row[colIndex.data] || "").trim();
-
-    // riga dei totali annuali: non ha un'etichetta di periodo, si salta senza errore
-    if (!periodLabel) continue;
-
-    const stayDate = parsePeriodStartDate(periodLabel);
-    if (!stayDate) {
-      errors.push(`Riga ${i + 1}: impossibile interpretare il periodo "${periodLabel}"`);
-      continue;
-    }
-
-    // Controllo sulla cella FISICA di Revenue Totale, PRIMA di qualunque
-    // altra lettura/validazione su questo campo (parseEuroCurrency incluso)
-    // - vedi isRevenueCellDateFormatted: un valore fisicamente non piu'
-    // presente (sostituito da un seriale-data) non deve mai arrivare al
-    // guardrail ADR/RevPAR ne' essere ricostruito da esso.
-    if (sheetRange) {
-      const revenueCellAddr = XLSX.utils.encode_cell({
-        r: sheetRange.s.r + i,
-        c: sheetRange.s.c + colIndex.revenue,
-      });
-      if (isRevenueCellDateFormatted(sheet[revenueCellAddr])) {
-        errors.push(
-          `Riga ${i + 1} (${periodLabel}): Revenue Totale non leggibile: la cella Excel è formattata come data. Verificare il valore sorgente BD.`
-        );
-        continue;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
       }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delimiter) {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
     }
+  }
+  fields.push(current);
+  return fields.map((f) => f.trim());
+}
 
-    const roomsSold = toNumber(row[colIndex.roomsSold]);
-    const roomsAvailable = toNumber(row[colIndex.roomsAvailable]);
-    const arrivals = toNumber(row[colIndex.arrivals]);
-    const presences = toNumber(row[colIndex.presences]);
-    const revenueTotal = parseEuroCurrency(row[colIndex.revenue]);
+// Export BD in formato CSV (stesso report "ADR - RevPAR", esportato come
+// testo delimitato da "," invece che come XLS binario) - verificato su file
+// reale (Villa Neviera, estrazione 2026-09-01): UTF-8 con BOM, delimitatore
+// ",", campi tra virgolette quando contengono la virgola stessa (es. la
+// colonna Data, "Lunedì, 27 Luglio 2026") o spazi, importi nello stesso
+// formato italiano gia' supportato da parseEuroCurrency ("€ 1.024,92").
+//
+// Il vantaggio concreto confermato sullo stesso identico giorno/struttura
+// dell'incidente cella-formato-data (vedi isRevenueCellDateFormatted): nel
+// CSV "Revenue Totale" per il 27/07/2026 e' il testo corretto
+// "€ 1.024,92", non il seriale Excel 33627 - il CSV e' testo puro, non ha
+// celle tipizzate/formattate, quindi quella specifica corruzione (un
+// formato-cella Excel applicato per errore) e' strutturalmente impossibile
+// in questo formato.
+export function parseBdExportCsv(csvText: string): ParseResult {
+  const content = stripBom(csvText);
+  const lines = content.split(/\r\n|\n|\r/).filter((l) => l.trim() !== "");
 
-    if (
-      roomsSold === null ||
-      roomsAvailable === null ||
-      arrivals === null ||
-      presences === null ||
-      revenueTotal === null
-    ) {
-      errors.push(`Riga ${i + 1} (${periodLabel}): valori mancanti o non numerici`);
-      continue;
-    }
-
-    const kpiOutcomes = classifyKpiChecks(revenueTotal, roomsSold, roomsAvailable, row, optionalColIndex);
-    const action = evaluateRevenueConsistency(kpiOutcomes);
-    if (action.kind === "reject") {
-      errors.push(`Riga ${i + 1} (${periodLabel}): ${action.detail} - riga scartata (Revenue Totale probabilmente corrotto).`);
-      continue;
-    }
-    if (action.kind === "warn") {
-      warnings.push(`Riga ${i + 1} (${periodLabel}): ${action.detail}`);
-    }
-
-    rows.push({ periodLabel, stayDate, revenueTotal, roomsSold, roomsAvailable, arrivals, presences });
+  if (lines.length === 0) {
+    return { rows: [], errors: ["Il file è vuoto"], warnings: [] };
   }
 
-  return { rows, errors, warnings };
+  const data = lines.map((line) => splitCsvLine(line, ","));
+  return processBdRows(data, () => false);
 }

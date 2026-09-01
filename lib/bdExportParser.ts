@@ -34,20 +34,16 @@ const ITALIAN_MONTHS: Record<string, number> = {
 // o percentuale (es. ADR, RevPAR, IMO - oggi non lette, ricalcolate lato
 // client da revenue/camere gia' validati): l'export BD scrive quasi sempre
 // queste colonne come testo formattato ("€ 1.234,56"), ma occasionalmente
-// una singola cella perde la formattazione e arriva come numero Excel
-// grezzo (es. 30325 invece di "€ 303,25" - o "€ 168,63" diventato 22828
-// solo nella colonna RevPAR, osservato nello stesso file dell'incidente
-// che ha colpito Revenue Totale, mai letto da questo parser). Un numero
-// grezzo per una colonna valuta NON e' mai un valore attendibile - usa
-// parseEuroCurrency (sotto), che rifiuta esplicitamente i number, MAI
-// toNumber() ne' un accesso diretto alla cella per una colonna di questo
-// tipo: toNumber() accetta i number perche' e' corretto per le colonne
-// di conteggio (Unita' occupate/in vendita/Arrivi/Presenze, che l'export
-// scrive sempre come numero puro) - per una colonna valuta lo stesso
-// comportamento riprodurrebbe l'incidente reale del 2026-08-19 (19 celle
-// corrotte su 5 strutture, fatturato mensile gonfiato fino a 5x su una
-// struttura), mascherato allo stesso modo finche' qualcuno non nota un
-// numero implausibile in produzione.
+// una cella perde la formattazione e arriva come numero Excel grezzo (es.
+// 33627 invece di "€ 336,27" per Revenue Totale, caso reale confermato su
+// Villa Neviera nell'estrazione del 2026-09-01 - il valore numerico e'
+// corretto, solo il formato testo e' andato perso). Usa sempre
+// parseEuroCurrency (sotto) per una colonna di questo tipo, MAI toNumber()
+// ne' un accesso diretto alla cella: parseEuroCurrency accetta sia il
+// testo formattato italiano sia un number Excel grezzo (se finito),
+// rifiutando solo NaN/±Infinity/testo non interpretabile - toNumber()
+// resta riservato alle colonne di CONTEGGIO (Unita' occupate/in vendita/
+// Arrivi/Presenze), che l'export scrive sempre come numero puro.
 const REQUIRED_COLUMNS = {
   data: "Data",
   roomsSold: "Unità occupate",
@@ -57,24 +53,113 @@ const REQUIRED_COLUMNS = {
   revenue: "Revenue Totale",
 } as const;
 
-// "Revenue Totale" nell'export BD arriva sempre come testo formattato
-// ("€ 1.234,56") - verificato su piu' export reali di piu' strutture.
-// Quando una cella arriva invece come numero Excel grezzo, e' un difetto
-// del file sorgente (la cella ha perso la formattazione testo lato BD),
-// MAI un valore attendibile da accettare cosi' com'e': un caso reale ha
-// prodotto revenue_total=30325 al posto di circa 300 euro per un solo
-// giorno, gonfiando il fatturato dell'intero mese di ~5x (altri casi
-// reali confermati su Villa Neviera, Palazzo Rollo, Palazzo Arco Cadura,
-// Sangiorgio Resort - 19 celle isolate in totale su un'unica estrazione).
-// Un numero grezzo qui viene quindi trattato come riga non parsabile,
-// mai accettato silenziosamente - stessa regola di "mai un dato indovinato
-// o inventato" gia' in uso nel resto di questo parser.
-function parseEuroCurrency(value: unknown): number | null {
+// "Revenue Totale" nell'export BD arriva quasi sempre come testo
+// formattato ("€ 1.234,56"), ma non sempre: alcune celle arrivano come
+// number Excel grezzo (formattazione testo persa lato BD, non un errore
+// di valore) - caso reale confermato su Villa Neviera e Palazzo Rollo
+// nell'estrazione del 2026-09-01 (righe scartate per errore perche' il
+// parser si aspettava solo una stringa: 364/365 e 356/365 righe importate
+// invece di 365/365). Un number qui va accettato COSI' COM'E' quando e'
+// finito (Number.isFinite) - mai ripassato per una stringa e riparsato,
+// per non perdere/alterare i decimali originali - e rifiutato solo se
+// NaN o ±Infinity (mai un valore plausibile per un revenue). Una stringa
+// segue invece il formato importi italiano gia' supportato (simbolo €,
+// punto migliaia, virgola decimale, spazi).
+//
+// Esportata (unica modifica a questo file per il parser Montecallini):
+// il formato importi italiano (punto migliaia, virgola decimale) e'
+// identico nell'export PMS "PlanningForecast" - riusata cosi' com'e' da
+// lib/montecalliniPmsParser.ts invece di duplicare la stessa logica.
+// Comportamento e firma invariati salvo l'accettazione dei number finiti,
+// nessun altro impatto sulle 5 strutture BD.
+export function parseEuroCurrency(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
   if (typeof value !== "string") return null;
 
   const cleaned = value.replace(/[€\s]/g, "").replace(/\./g, "").replace(",", ".");
   const n = parseFloat(cleaned);
   return Number.isNaN(n) ? null : n;
+}
+
+// Colonne KPI dell'export "ADR - RevPAR" (nome del report stesso, invariato
+// da come compare nel nome file reale - vedi matchFileToStructure in
+// lib/performanceImportRouting.ts) - presenti nel file ma MAI lette come
+// fonte del dato, solo come riferimento indipendente per il controllo di
+// coerenza sotto: usano lo stesso formato importi (testo "€ X,XX" o,
+// occasionalmente, number Excel grezzo) di Revenue Totale, quindi vengono
+// lette con la stessa parseEuroCurrency.
+const OPTIONAL_KPI_COLUMNS = {
+  adr: "ADR",
+  revpar: "RevPAR",
+} as const;
+
+// Stesse identiche definizioni gia' in uso in lib/performanceMetrics.ts
+// (adr/revPar) per calcolare questi KPI a valle da revenue/camere gia'
+// validati - qui vengono ricalcolate dal lato "grezzo" del file (revenue
+// letto + camere lette) solo per confrontarle con l'ADR/RevPAR che BD
+// stessa dichiara nella stessa riga, non per introdurre una definizione
+// nuova.
+const KPI_RELATIVE_TOLERANCE = 0.01; // 1% - copre gli arrotondamenti a 2 decimali che BD applica ai KPI visualizzati
+const KPI_ABSOLUTE_TOLERANCE = 0.5; // mezzo euro - evita una tolleranza irragionevolmente stretta (o una divisione per zero) quando il KPI dichiarato e' vicino/uguale a zero
+
+function isWithinKpiTolerance(computed: number, declared: number): boolean {
+  const allowedDiff = Math.max(KPI_ABSOLUTE_TOLERANCE, Math.abs(declared) * KPI_RELATIVE_TOLERANCE);
+  return Math.abs(computed - declared) <= allowedDiff;
+}
+
+// Guardrail di coerenza per Revenue Totale: nato dal fix che ha esteso
+// parseEuroCurrency ad accettare i number Excel grezzi (vedi commento sopra
+// REQUIRED_COLUMNS) - quel fix risolve i casi legittimi (formattazione
+// testo persa, valore corretto) ma da solo non distingue piu' un number
+// legittimo da un number REALMENTE corrotto (caso reale confermato
+// nell'incidente del 2026-08-19: 30325 al posto di ~300). Qui si confronta
+// il Revenue Totale letto (da stringa O da number, stesso controllo per
+// entrambi) con ADR/RevPAR che BD dichiara nella stessa riga, quando
+// disponibili e utilizzabili - MAI un numero magico su Revenue Totale in
+// se' (nessuna soglia tipo "revenue > X"), solo una relazione aritmetica
+// gia' in uso altrove nell'app. Se nessun KPI e' disponibile/utilizzabile
+// per la riga (colonna assente dal file, cella vuota/non interpretabile,
+// roomsSold/roomsAvailable a zero), il controllo per quel KPI viene
+// semplicemente saltato - MAI trattato come un mismatch: l'assenza di un
+// riferimento non e' una prova di corruzione, e bloccare in quel caso
+// reintrodurrebbe falsi positivi che questo guardrail non deve creare.
+function checkRevenueConsistency(
+  revenueTotal: number,
+  roomsSold: number,
+  roomsAvailable: number,
+  row: unknown[],
+  optionalColIndex: Record<string, number>
+): { inconsistent: boolean; detail: string } {
+  const checks: { label: string; computed: number | null; declaredCell: unknown }[] = [
+    {
+      label: "ADR",
+      computed: roomsSold > 0 ? revenueTotal / roomsSold : null,
+      declaredCell: optionalColIndex.adr !== -1 ? row[optionalColIndex.adr] : undefined,
+    },
+    {
+      label: "RevPAR",
+      computed: roomsAvailable > 0 ? revenueTotal / roomsAvailable : null,
+      declaredCell: optionalColIndex.revpar !== -1 ? row[optionalColIndex.revpar] : undefined,
+    },
+  ];
+
+  for (const check of checks) {
+    if (check.computed === null) continue; // roomsSold/roomsAvailable a zero: KPI non definito, nessun controllo possibile
+    if (check.declaredCell === undefined) continue; // colonna assente dal file
+    const declared = parseEuroCurrency(check.declaredCell);
+    if (declared === null) continue; // cella KPI vuota/non interpretabile: nessun riferimento utilizzabile, mai un blocco per questo
+
+    if (!isWithinKpiTolerance(check.computed, declared)) {
+      return {
+        inconsistent: true,
+        detail: `${check.label} calcolato da Revenue Totale (${check.computed.toFixed(2)}) incoerente con ${check.label} dichiarato nel file (${declared.toFixed(2)})`,
+      };
+    }
+  }
+
+  return { inconsistent: false, detail: "" };
 }
 
 // Solo per colonne di CONTEGGIO (camere/arrivi/presenze), mai per colonne
@@ -148,6 +233,16 @@ export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
     };
   }
 
+  // ADR/RevPAR sono opzionali (solo riferimento per checkRevenueConsistency,
+  // mai richieste per riconoscere il formato del file) - a differenza di
+  // REQUIRED_COLUMNS, la loro assenza non blocca l'import, semplicemente
+  // disattiva il controllo di coerenza per l'intero file (vedi commento
+  // sopra checkRevenueConsistency).
+  const optionalColIndex: Record<string, number> = {};
+  for (const [key, label] of Object.entries(OPTIONAL_KPI_COLUMNS)) {
+    optionalColIndex[key] = headerRow.indexOf(label);
+  }
+
   const rows: ParsedMonthRow[] = [];
   const errors: string[] = [];
 
@@ -168,15 +263,7 @@ export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
     const roomsAvailable = toNumber(row[colIndex.roomsAvailable]);
     const arrivals = toNumber(row[colIndex.arrivals]);
     const presences = toNumber(row[colIndex.presences]);
-    const revenueCell = row[colIndex.revenue];
-    const revenueTotal = parseEuroCurrency(revenueCell);
-
-    if (revenueTotal === null && typeof revenueCell === "number") {
-      errors.push(
-        `Riga ${i + 1} (${periodLabel}): "Revenue Totale" e' un numero Excel grezzo (${revenueCell}) invece del testo formattato atteso ("€ X,XX") - cella probabilmente corrotta nel file sorgente, riga scartata anziche' importata con un valore inattendibile.`
-      );
-      continue;
-    }
+    const revenueTotal = parseEuroCurrency(row[colIndex.revenue]);
 
     if (
       roomsSold === null ||
@@ -186,6 +273,12 @@ export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
       revenueTotal === null
     ) {
       errors.push(`Riga ${i + 1} (${periodLabel}): valori mancanti o non numerici`);
+      continue;
+    }
+
+    const kpiCheck = checkRevenueConsistency(revenueTotal, roomsSold, roomsAvailable, row, optionalColIndex);
+    if (kpiCheck.inconsistent) {
+      errors.push(`Riga ${i + 1} (${periodLabel}): ${kpiCheck.detail} - riga scartata (Revenue Totale probabilmente corrotto).`);
       continue;
     }
 

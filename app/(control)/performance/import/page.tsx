@@ -21,13 +21,18 @@ import {
   MONTECALLINI_STRUCTURE_NAME,
   detectFileFormat,
   detectCsvFormat,
-  resolveGroupExtractionDate,
   guessStructureId,
   matchFileToStructure,
   structureMismatchMessage,
-  resolveBdStructureFromFileName,
-  bdStructureMismatchMessage,
 } from "@/lib/performanceImportRouting";
+import {
+  ingestSingleFile,
+  ingestMontecalliniBatch,
+  MontecalliniFileGroups,
+} from "@/lib/performance/ingestion/importService";
+import { IngestionOutcome, StructureAlias, StructureResolution } from "@/lib/performance/ingestion/types";
+import { resolveBookingDesignerStructure, structureResolutionErrorMessage } from "@/lib/performance/ingestion/routing";
+import { loadStructureAliases } from "@/lib/performance/ingestion/repository";
 
 // channel_commission_rates ha RLS insert/update a rank >= 2 - il form
 // Commissioni va nascosto del tutto per level=user, non solo disabilitato
@@ -82,22 +87,98 @@ function totalRowsInEntry(entry: FileEntry): number {
   return entry.groups.reduce((sum, g) => sum + g.rows.length, 0);
 }
 
-type FileImportSummary = {
-  fileName: string;
-  imported: number;
-  duplicatesSkipped: number;
-  errors: string[];
+// Riepilogo import (Import Integrity Foundation Fase 1): non piu' un
+// singolo numero "duplicati saltati" che confondeva "e' normale, stesso
+// file ricaricato" con "attenzione, questo e' un conflitto da guardare" -
+// 4 categorie distinte, derivate 1:1 dallo status di IngestionOutcome
+// (lib/performance/ingestion/types.ts). routing_error/parse_error/
+// validation_error sono fuse in una sola categoria "Errore parsing/routing"
+// come richiesto, mai mostrate separate all'utente.
+type OutcomeCategory = "imported" | "duplicate" | "conflict" | "error";
+
+function categorizeOutcome(status: IngestionOutcome["status"]): OutcomeCategory {
+  if (status === "imported") return "imported";
+  if (status === "skipped_duplicate") return "duplicate";
+  if (status === "conflict") return "conflict";
+  return "error";
+}
+
+function outcomeDetail(outcome: IngestionOutcome): string {
+  switch (outcome.status) {
+    case "imported":
+      return `${outcome.importedCount} righe importate`;
+    case "skipped_duplicate":
+      return outcome.reason === "exact_duplicate"
+        ? "Duplicato esatto (stesso file già importato) - nessuna scrittura."
+        : "Duplicato semantico (stesso contenuto già importato con un file diverso) - nessuna scrittura.";
+    case "conflict":
+      return "Un import già completato per questa struttura/data ha un contenuto diverso - nessuna scrittura, richiede verifica manuale.";
+    case "routing_error":
+    case "parse_error":
+    case "validation_error":
+      return outcome.message;
+  }
+}
+
+type OutcomeLine = { label: string; category: OutcomeCategory; detail: string };
+type RunSummary = { lines: OutcomeLine[] };
+
+// Stesso messaggio prodotto da ingestSingleFile per il caso "risolto ma
+// struttura diversa da quella selezionata" (importService.ts) - duplicato
+// qui solo per l'anteprima UI di ImportNazionalita, che deve mostrarlo
+// PRIMA di inviare il file al servizio (difesa in profondita', invariata
+// nello spirito rispetto al vecchio bdStructureMismatchMessage).
+function bookingDesignerStructureMismatchMessage(
+  resolution: StructureResolution,
+  selectedStructureId: string,
+  structures: StructureOption[]
+): string {
+  if (resolution.kind === "resolved") {
+    const selectedName = structures.find((s) => s.id === selectedStructureId)?.name ?? selectedStructureId;
+    return `Il file appartiene a "${resolution.structureName}", ma hai selezionato "${selectedName}". Seleziona la struttura corretta prima di procedere.`;
+  }
+  return structureResolutionErrorMessage(resolution, structures);
+}
+
+const OUTCOME_CATEGORY_LABEL: Record<OutcomeCategory, string> = {
+  imported: "Importato",
+  duplicate: "Duplicato già acquisito",
+  conflict: "Conflitto",
+  error: "Errore parsing/routing",
 };
 
-type ImportSummary = {
-  imported: number;
-  duplicatesSkipped: number;
-  errors: string[];
-  // Popolato solo per il flusso multi-file Montecallini (Import actual) -
-  // un file PMS puo' generare piu' scritture (CY/SDLY/LY), il riepilogo
-  // per file resta comunque UNA riga per file caricato, non per scrittura.
-  perFile?: FileImportSummary[];
-};
+function countByCategory(lines: OutcomeLine[]): Record<OutcomeCategory, number> {
+  const counts: Record<OutcomeCategory, number> = { imported: 0, duplicate: 0, conflict: 0, error: 0 };
+  for (const line of lines) counts[line.category] += 1;
+  return counts;
+}
+
+// Un solo componente di riepilogo, riusato identico dai 3 flussi (Import
+// storico/actual/Nazionalità) - mai una formulazione diversa per lo stesso
+// esito.
+function ImportRunSummaryView({ summary }: { summary: RunSummary }) {
+  const counts = countByCategory(summary.lines);
+
+  return (
+    <div className="rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
+      <p className="font-semibold">Import completato</p>
+      <p className="mt-1">Importato: {counts.imported}</p>
+      <p>Duplicato già acquisito: {counts.duplicate}</p>
+      <p className={counts.conflict > 0 ? "font-semibold text-[#8a3a3a]" : undefined}>Conflitto: {counts.conflict}</p>
+      <p className={counts.error > 0 ? "text-[#8a3a3a]" : undefined}>Errore parsing/routing: {counts.error}</p>
+
+      {summary.lines.length > 0 && (
+        <ul className="mt-2 list-disc pl-5">
+          {summary.lines.map((line, i) => (
+            <li key={i} className={line.category === "conflict" || line.category === "error" ? "text-[#8a3a3a]" : undefined}>
+              <span className="font-semibold">[{OUTCOME_CATEGORY_LABEL[line.category]}]</span> {line.label}: {line.detail}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function todayString() {
   return new Date().toISOString().split("T")[0];
@@ -174,91 +255,16 @@ async function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
   });
 }
 
-async function processFileImport(params: {
-  file: File;
-  structureId: string;
-  rows: ImportableRow[];
-  extractionDate: string;
-  uploadedBy: string;
-}): Promise<{ imported: number; duplicatesSkipped: number; dbErrors: string[] }> {
-  const { file, structureId, rows, extractionDate, uploadedBy } = params;
-  const dbErrors: string[] = [];
-
-  if (rows.length === 0) {
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  const stayDates = rows.map((r) => r.stayDate);
-
-  const dupCheck = await supabase
-    .from("performance_daily_snapshot")
-    .select("stay_date")
-    .eq("structure_id", structureId)
-    .eq("extraction_date", extractionDate)
-    .in("stay_date", stayDates);
-
-  if (dupCheck.error) {
-    dbErrors.push(`${file.name}: errore verifica duplicati (${dupCheck.error.message})`);
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  const existingDates = new Set((dupCheck.data || []).map((r) => r.stay_date as string));
-  const rowsToInsert = rows.filter((r) => !existingDates.has(r.stayDate));
-  const duplicatesSkipped = rows.length - rowsToInsert.length;
-
-  if (rowsToInsert.length === 0) {
-    return { imported: 0, duplicatesSkipped, dbErrors };
-  }
-
-  const storagePath = `${structureId}/${extractionDate}/${Date.now()}-${file.name}`;
-
-  const upload = await supabase.storage.from("bd-import-files").upload(storagePath, file);
-  if (upload.error) {
-    dbErrors.push(`${file.name}: errore caricamento file (${upload.error.message})`);
-    return { imported: 0, duplicatesSkipped, dbErrors };
-  }
-
-  const bdImport = await supabase
-    .from("bd_imports")
-    .insert({
-      structure_id: structureId,
-      source: "bd_export",
-      file_name: file.name,
-      file_path: storagePath,
-      extraction_date: extractionDate,
-      uploaded_by: uploadedBy,
-    })
-    .select("id")
-    .single();
-
-  if (bdImport.error || !bdImport.data) {
-    dbErrors.push(`${file.name}: errore creazione import (${bdImport.error?.message})`);
-    return { imported: 0, duplicatesSkipped, dbErrors };
-  }
-
-  const snapshotRows = rowsToInsert.map((r) => ({
-    structure_id: structureId,
-    stay_date: r.stayDate,
-    stay_year: Number(r.stayDate.slice(0, 4)),
-    extraction_date: extractionDate,
-    revenue_total: r.revenueTotal,
-    rooms_sold: r.roomsSold,
-    rooms_available: r.roomsAvailable,
-    arrivals: r.arrivals,
-    presences: r.presences,
-    bd_import_id: bdImport.data.id,
-  }));
-
-  const snapshotInsert = await supabase.from("performance_daily_snapshot").insert(snapshotRows);
-
-  if (snapshotInsert.error) {
-    await supabase.from("bd_imports").delete().eq("id", bdImport.data.id);
-    dbErrors.push(`${file.name}: errore salvataggio dati (${snapshotInsert.error.message})`);
-    return { imported: 0, duplicatesSkipped, dbErrors };
-  }
-
-  return { imported: rowsToInsert.length, duplicatesSkipped, dbErrors };
-}
+// processFileImport (dedup per-riga + insert diretti + DELETE compensativo
+// su errore) e' stato RIMOSSO - Import Integrity Foundation Fase 1. Quel
+// codice scartava silenziosamente come "duplicato" qualunque riga con uno
+// stay_date gia' presente per la stessa struttura+data, anche quando il
+// CONTENUTO differiva (bug reale: un secondo file correttivo veniva
+// interpretato come duplicato invece che come conflitto). Sostituito da
+// lib/performance/ingestion/importService.ts (ingestSingleFile /
+// ingestMontecalliniBatch), che confronta il CONTENUTO (hash) prima di
+// decidere, e scrive in modo atomico via la RPC fn_commit_performance_import
+// (vedi supabase/migrations/20260908113200_fn_commit_performance_import.sql).
 
 export default function PerformanceImportPage() {
   const router = useRouter();
@@ -427,7 +433,7 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [extractionDate, setExtractionDate] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [summary, setSummary] = useState<RunSummary | null>(null);
   const [globalError, setGlobalError] = useState("");
 
   async function handleFiles(files: File[]) {
@@ -512,57 +518,83 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
 
     setSubmitting(true);
 
-    let totalImported = 0;
-    let totalDuplicatesSkipped = 0;
-    const allErrors: string[] = [];
-
+    const lines: OutcomeLine[] = [];
     const today = todayString();
 
-    for (const entry of entries) {
-      allErrors.push(...entry.parseErrors.map((e) => `${entry.file.name}: ${e}`));
-      allErrors.push(...entry.parseWarnings.map((w) => `${entry.file.name}: ${w}`));
+    // I file PMS Montecallini vanno raggruppati e passati INSIEME al
+    // servizio (N file = 1 batch per kind CY/SDLY/LY, mai confrontati file
+    // contro file - vedi lib/performance/ingestion/montecalliniBatching.ts):
+    // separati qui dai file BD, che restano invece un'unita' di import per
+    // file (comportamento invariato).
+    const bdEntries = entries.filter((e) => e.format !== "montecallini_pms");
+    const montecalliniEntries = entries.filter((e) => e.format === "montecallini_pms");
 
+    for (const entry of bdEntries) {
       // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato
-      // (difesa in profondita' - vedi canSubmit sopra).
+      // (difesa in profondita' - vedi canSubmit sopra, guardrail invariato).
       const match = matchFileToStructure(entry.file.name, entry.format, entry.structureId, structures);
       const selectedName = structures.find((s) => s.id === entry.structureId)?.name ?? entry.structureId;
       if (match.kind === "format_mismatch") {
-        allErrors.push(`${entry.file.name}: ${match.reason} File saltato.`);
+        lines.push({ label: entry.file.name, category: "error", detail: `${match.reason} File saltato.` });
         continue;
       }
       if (match.kind === "mismatch") {
-        allErrors.push(`${entry.file.name}: ${structureMismatchMessage(match.guessedName, selectedName)} File saltato.`);
+        lines.push({ label: entry.file.name, category: "error", detail: `${structureMismatchMessage(match.guessedName, selectedName)} File saltato.` });
         continue;
       }
       if (match.kind === "unknown" && !entry.structureConfirmed) {
-        allErrors.push(`${entry.file.name}: corrispondenza struttura non confermata - file saltato.`);
+        lines.push({ label: entry.file.name, category: "error", detail: "corrispondenza struttura non confermata - file saltato." });
         continue;
       }
 
-      // Un file PMS Montecallini puo' generare fino a 3 scritture (CY/SDLY/LY),
-      // ciascuna con la propria extraction_date - mai la stessa data scelta
-      // manualmente per il batch, che resta valida solo per i file BD delle
-      // altre strutture (dove c'e' sempre un solo gruppo "cy").
-      for (const group of entry.groups) {
-        if (group.rows.length === 0) continue;
-        const groupExtractionDate = resolveGroupExtractionDate(entry.format, group.kind, group.rows, extractionDate, today);
+      const content = await entry.file.arrayBuffer();
+      const rows = entry.groups.flatMap((g) => g.rows); // sempre un solo gruppo "cy" per l'export BD, invariato
+      const outcome = await ingestSingleFile({
+        supabase,
+        dataset: "adr_revpar",
+        selectedStructureId: entry.structureId,
+        structures,
+        uploadedBy: user.id,
+        file: entry.file,
+        fileContent: content,
+        extractionDate,
+        snapshotRows: rows,
+      });
+      lines.push({ label: entry.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+    }
 
-        const result = await processFileImport({
-          file: entry.file,
-          structureId: entry.structureId,
-          rows: group.rows,
-          extractionDate: groupExtractionDate,
-          uploadedBy: user.id,
-        });
+    if (montecalliniEntries.length > 0) {
+      const formatMismatch = montecalliniEntries
+        .map((entry) => ({ entry, match: matchFileToStructure(entry.file.name, entry.format, entry.structureId, structures) }))
+        .filter(({ match }) => match.kind === "format_mismatch");
 
-        totalImported += result.imported;
-        totalDuplicatesSkipped += result.duplicatesSkipped;
-        allErrors.push(...result.dbErrors.map((e) => `${entry.file.name} [${group.kind}]: ${e}`));
+      for (const { entry, match } of formatMismatch) {
+        if (match.kind === "format_mismatch") {
+          lines.push({ label: entry.file.name, category: "error", detail: `${match.reason} File saltato.` });
+        }
+      }
+
+      const validEntries = montecalliniEntries.filter((e) => !formatMismatch.some(({ entry }) => entry === e));
+
+      if (validEntries.length > 0) {
+        const structureId = validEntries[0].structureId;
+        const files: MontecalliniFileGroups[] = await Promise.all(
+          validEntries.map(async (e) => ({ fileName: e.file.name, file: e.file, content: await e.file.arrayBuffer(), groups: e.groups }))
+        );
+        const batchResult = await ingestMontecalliniBatch({ supabase, selectedStructureId: structureId, structures, uploadedBy: user.id, files, today });
+
+        if (batchResult.status === "routing_error") {
+          lines.push({ label: validEntries.map((e) => e.file.name).join(", "), category: "error", detail: batchResult.message });
+        } else {
+          for (const { kind, outcome } of batchResult.batches) {
+            lines.push({ label: `Montecallini [${kind.toUpperCase()}]`, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+          }
+        }
       }
     }
 
     setSubmitting(false);
-    setSummary({ imported: totalImported, duplicatesSkipped: totalDuplicatesSkipped, errors: allErrors });
+    setSummary({ lines });
     setEntries([]);
   }
 
@@ -676,23 +708,7 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
 
         {globalError && <p className="text-sm text-[#8a3a3a]">{globalError}</p>}
 
-        {summary && (
-          <div className="rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
-            <p className="font-semibold">Import completato</p>
-            <p className="mt-1">Righe importate: {summary.imported}</p>
-            <p>Duplicati saltati (già presenti per quella data di estrazione): {summary.duplicatesSkipped}</p>
-            {summary.errors.length > 0 && (
-              <>
-                <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
-                <ul className="list-disc pl-5 text-[#8a3a3a]">
-                  {summary.errors.map((err, i) => (
-                    <li key={i}>{err}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
-        )}
+        {summary && <ImportRunSummaryView summary={summary} />}
 
         <div className="flex justify-end">
           <AppButton variant="primary" disabled={!canSubmit || submitting} onClick={handleSubmit}>
@@ -719,7 +735,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
   // submit/summary/error condivisa: l'una non deve mai bloccare ne'
   // dipendere dall'altra.
   const [submittingCurrent, setSubmittingCurrent] = useState(false);
-  const [currentSummary, setCurrentSummary] = useState<ImportSummary | null>(null);
+  const [currentSummary, setCurrentSummary] = useState<RunSummary | null>(null);
   const [currentError, setCurrentError] = useState("");
   // Incrementata dopo ogni import riuscito per forzare il remount del
   // <input type="file"> nativo - senza questo, il nome del file gia'
@@ -728,7 +744,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
   const [currentFileInputKey, setCurrentFileInputKey] = useState(0);
 
   const [submittingHistorical, setSubmittingHistorical] = useState(false);
-  const [historicalSummary, setHistoricalSummary] = useState<ImportSummary | null>(null);
+  const [historicalSummary, setHistoricalSummary] = useState<RunSummary | null>(null);
   const [historicalFileInputKey, setHistoricalFileInputKey] = useState(0);
   const [historicalError, setHistoricalError] = useState("");
 
@@ -818,60 +834,73 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
     setSubmittingCurrent(true);
 
+    const lines: OutcomeLine[] = [];
     const selectedName = structures.find((s) => s.id === structureId)?.name ?? structureId;
-    const perFile: FileImportSummary[] = [];
-    let totalImported = 0;
-    let totalDuplicatesSkipped = 0;
-    const allErrors: string[] = [];
 
-    for (const entry of currentFiles) {
+    // Stessa separazione BD/Montecallini di ImportStorico: i file PMS
+    // Montecallini vanno passati INSIEME al servizio come un unico batch
+    // per kind (CY/SDLY/LY), mai confrontati file contro file.
+    const bdEntries = currentFiles.filter((e) => e.format !== "montecallini_pms");
+    const montecalliniEntries = currentFiles.filter((e) => e.format === "montecallini_pms");
+
+    for (const entry of bdEntries) {
       // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato.
       const match = matchFileToStructure(entry.file.name, entry.format, structureId, structures);
       if (match.kind === "format_mismatch" || match.kind === "mismatch") {
         const msg = match.kind === "format_mismatch" ? match.reason : structureMismatchMessage(match.guessedName, selectedName);
-        perFile.push({ fileName: entry.file.name, imported: 0, duplicatesSkipped: 0, errors: [msg] });
-        allErrors.push(`${entry.file.name}: ${msg} File saltato.`);
+        lines.push({ label: entry.file.name, category: "error", detail: `${msg} File saltato.` });
         continue;
       }
       if (match.kind === "unknown" && !entry.structureConfirmed) {
-        const msg = "corrispondenza struttura non confermata";
-        perFile.push({ fileName: entry.file.name, imported: 0, duplicatesSkipped: 0, errors: [msg] });
-        allErrors.push(`${entry.file.name}: ${msg} - file saltato.`);
+        lines.push({ label: entry.file.name, category: "error", detail: "corrispondenza struttura non confermata - file saltato." });
         continue;
       }
 
-      let fileImported = 0;
-      let fileDuplicatesSkipped = 0;
-      const fileErrors: string[] = [...entry.parseErrors, ...entry.parseWarnings];
+      const content = await entry.file.arrayBuffer();
+      const rows = entry.groups.flatMap((g) => g.rows); // sempre un solo gruppo "cy" per l'export BD, invariato
+      const outcome = await ingestSingleFile({
+        supabase,
+        dataset: "adr_revpar",
+        selectedStructureId: structureId,
+        structures,
+        uploadedBy: user.id,
+        file: entry.file,
+        fileContent: content,
+        extractionDate: today,
+        snapshotRows: rows,
+      });
+      lines.push({ label: entry.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+    }
 
-      // Un file PMS Montecallini puo' generare fino a 3 scritture (CY/SDLY/LY),
-      // ciascuna con la propria extraction_date - per l'export BD c'e' sempre
-      // un solo gruppo "cy" con extraction_date = oggi, invariato.
-      for (const group of entry.groups) {
-        if (group.rows.length === 0) continue;
-        const groupExtractionDate = resolveGroupExtractionDate(entry.format, group.kind, group.rows, today, today);
+    if (montecalliniEntries.length > 0) {
+      const formatMismatchEntries = montecalliniEntries
+        .map((entry) => ({ entry, match: matchFileToStructure(entry.file.name, entry.format, structureId, structures) }))
+        .filter(({ match }) => match.kind === "format_mismatch");
 
-        const result = await processFileImport({
-          file: entry.file,
-          structureId,
-          rows: group.rows,
-          extractionDate: groupExtractionDate,
-          uploadedBy: user.id,
-        });
-
-        fileImported += result.imported;
-        fileDuplicatesSkipped += result.duplicatesSkipped;
-        fileErrors.push(...result.dbErrors);
+      for (const { entry, match } of formatMismatchEntries) {
+        if (match.kind === "format_mismatch") lines.push({ label: entry.file.name, category: "error", detail: `${match.reason} File saltato.` });
       }
 
-      perFile.push({ fileName: entry.file.name, imported: fileImported, duplicatesSkipped: fileDuplicatesSkipped, errors: fileErrors });
-      totalImported += fileImported;
-      totalDuplicatesSkipped += fileDuplicatesSkipped;
-      allErrors.push(...fileErrors.map((e) => `${entry.file.name}: ${e}`));
+      const validEntries = montecalliniEntries.filter((e) => !formatMismatchEntries.some(({ entry }) => entry === e));
+
+      if (validEntries.length > 0) {
+        const files: MontecalliniFileGroups[] = await Promise.all(
+          validEntries.map(async (e) => ({ fileName: e.file.name, file: e.file, content: await e.file.arrayBuffer(), groups: e.groups }))
+        );
+        const batchResult = await ingestMontecalliniBatch({ supabase, selectedStructureId: structureId, structures, uploadedBy: user.id, files, today });
+
+        if (batchResult.status === "routing_error") {
+          lines.push({ label: validEntries.map((e) => e.file.name).join(", "), category: "error", detail: batchResult.message });
+        } else {
+          for (const { kind, outcome } of batchResult.batches) {
+            lines.push({ label: `Montecallini [${kind.toUpperCase()}]`, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+          }
+        }
+      }
     }
 
     setSubmittingCurrent(false);
-    setCurrentSummary({ imported: totalImported, duplicatesSkipped: totalDuplicatesSkipped, errors: allErrors, perFile });
+    setCurrentSummary({ lines });
     setCurrentFiles([]);
     setCurrentFileInputKey((k) => k + 1);
     // Il selettore struttura torna pronto per la prossima struttura del
@@ -911,29 +940,53 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
     setSubmittingHistorical(true);
 
-    let totalImported = 0;
-    let totalDuplicatesSkipped = 0;
-    const allErrors: string[] = [...historicalFile.parseErrors.map((e) => `${historicalFile.file.name}: ${e}`), ...historicalFile.parseWarnings.map((w) => `${historicalFile.file.name}: ${w}`)];
+    const lines: OutcomeLine[] = [];
+    for (const w of historicalFile.parseWarnings) lines.push({ label: historicalFile.file.name, category: "error", detail: w });
 
-    for (const group of historicalFile.groups) {
-      if (group.rows.length === 0) continue;
-      const groupExtractionDate = resolveGroupExtractionDate(historicalFile.format, group.kind, group.rows, historicalDate, today);
-
-      const result = await processFileImport({
-        file: historicalFile.file,
-        structureId,
-        rows: group.rows,
-        extractionDate: groupExtractionDate,
+    if (historicalFile.format === "montecallini_pms") {
+      // Un solo file, ma passato comunque come batch di 1 al servizio
+      // Montecallini - stessa via del multi-file, mai un percorso separato
+      // che potrebbe divergere nel calcolo dell'hash o della data. La data
+      // scelta nello slot "storico" (historicalDate) NON viene usata per
+      // Montecallini: resolveGroupExtractionDate ignora sempre fallbackDate
+      // per questo formato e ricava la data dal contenuto del file stesso
+      // (invariato, vedi performanceImportRouting.ts).
+      const content = await historicalFile.file.arrayBuffer();
+      const batchResult = await ingestMontecalliniBatch({
+        supabase,
+        selectedStructureId: structureId,
+        structures,
         uploadedBy: user.id,
+        files: [{ fileName: historicalFile.file.name, file: historicalFile.file, content, groups: historicalFile.groups }],
+        today,
       });
 
-      totalImported += result.imported;
-      totalDuplicatesSkipped += result.duplicatesSkipped;
-      allErrors.push(...result.dbErrors.map((e) => `${historicalFile.file.name} [${group.kind}]: ${e}`));
+      if (batchResult.status === "routing_error") {
+        lines.push({ label: historicalFile.file.name, category: "error", detail: batchResult.message });
+      } else {
+        for (const { kind, outcome } of batchResult.batches) {
+          lines.push({ label: `Montecallini [${kind.toUpperCase()}]`, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+        }
+      }
+    } else {
+      const content = await historicalFile.file.arrayBuffer();
+      const rows = historicalFile.groups.flatMap((g) => g.rows); // export BD: sempre un solo gruppo "cy", invariato
+      const outcome = await ingestSingleFile({
+        supabase,
+        dataset: "adr_revpar",
+        selectedStructureId: structureId,
+        structures,
+        uploadedBy: user.id,
+        file: historicalFile.file,
+        fileContent: content,
+        extractionDate: historicalDate,
+        snapshotRows: rows,
+      });
+      lines.push({ label: historicalFile.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
     }
 
     setSubmittingHistorical(false);
-    setHistoricalSummary({ imported: totalImported, duplicatesSkipped: totalDuplicatesSkipped, errors: allErrors });
+    setHistoricalSummary({ lines });
     setHistoricalFile(null);
     setHistoricalDate("");
     setHistoricalFileInputKey((k) => k + 1);
@@ -1062,36 +1115,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
           {currentError && <p className="mt-3 text-sm text-[#8a3a3a]">{currentError}</p>}
 
-          {currentSummary && (
-            <div className="mt-3 rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
-              <p className="font-semibold">Import completato</p>
-              <p className="mt-1">Righe importate: {currentSummary.imported}</p>
-              <p>Duplicati saltati: {currentSummary.duplicatesSkipped}</p>
-              {currentSummary.perFile && currentSummary.perFile.length > 1 && (
-                <div className="mt-2">
-                  <p className="font-semibold">Riepilogo per file:</p>
-                  <ul className="list-disc pl-5">
-                    {currentSummary.perFile.map((f, i) => (
-                      <li key={i}>
-                        {f.fileName}: {f.imported} importate, {f.duplicatesSkipped} duplicati saltati
-                        {f.errors.length > 0 && `, ${f.errors.length} errori`}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {currentSummary.errors.length > 0 && (
-                <>
-                  <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
-                  <ul className="list-disc pl-5 text-[#8a3a3a]">
-                    {currentSummary.errors.map((err, i) => (
-                      <li key={i}>{err}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
-          )}
+          {currentSummary && <ImportRunSummaryView summary={currentSummary} />}
 
           <div className="mt-4 flex justify-end">
             <AppButton variant="primary" disabled={!canSubmitCurrent || submittingCurrent} onClick={handleSubmitCurrent}>
@@ -1162,23 +1186,7 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
           {historicalError && <p className="mt-3 text-sm text-[#8a3a3a]">{historicalError}</p>}
 
-          {historicalSummary && (
-            <div className="mt-3 rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
-              <p className="font-semibold">Import completato</p>
-              <p className="mt-1">Righe importate: {historicalSummary.imported}</p>
-              <p>Duplicati saltati: {historicalSummary.duplicatesSkipped}</p>
-              {historicalSummary.errors.length > 0 && (
-                <>
-                  <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
-                  <ul className="list-disc pl-5 text-[#8a3a3a]">
-                    {historicalSummary.errors.map((err, i) => (
-                      <li key={i}>{err}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </div>
-          )}
+          {historicalSummary && <ImportRunSummaryView summary={historicalSummary} />}
 
           <div className="mt-4 flex justify-end">
             <AppButton
@@ -1431,95 +1439,27 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
   );
 }
 
-async function processNationalityImport(params: {
-  file: File;
-  structureId: string;
-  rows: ParsedNationalityRow[];
-  extractionDate: string;
-  uploadedBy: string;
-}): Promise<{ imported: number; duplicatesSkipped: number; dbErrors: string[] }> {
-  const { file, structureId, rows, extractionDate, uploadedBy } = params;
-  const dbErrors: string[] = [];
-
-  if (rows.length === 0) {
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  // Duplicati: stessa struttura + stessa extraction_date gia' importata,
-  // stesso principio gia' in uso in processFileImport per ADR/RevPAR (una
-  // sola volta per data di estrazione, non una entry per ogni upload).
-  const dupCheck = await supabase
-    .from("guest_nationality")
-    .select("id")
-    .eq("structure_id", structureId)
-    .eq("extraction_date", extractionDate)
-    .limit(1);
-
-  if (dupCheck.error) {
-    dbErrors.push(`${file.name}: errore verifica duplicati (${dupCheck.error.message})`);
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  if ((dupCheck.data || []).length > 0) {
-    return { imported: 0, duplicatesSkipped: rows.length, dbErrors };
-  }
-
-  const storagePath = `${structureId}/${extractionDate}/${Date.now()}-${file.name}`;
-
-  const upload = await supabase.storage.from("bd-import-files").upload(storagePath, file);
-  if (upload.error) {
-    dbErrors.push(`${file.name}: errore caricamento file (${upload.error.message})`);
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  const bdImport = await supabase
-    .from("bd_imports")
-    .insert({
-      structure_id: structureId,
-      source: "bd_export",
-      report_type: "nationality",
-      file_name: file.name,
-      file_path: storagePath,
-      extraction_date: extractionDate,
-      uploaded_by: uploadedBy,
-    })
-    .select("id")
-    .single();
-
-  if (bdImport.error || !bdImport.data) {
-    dbErrors.push(`${file.name}: errore creazione import (${bdImport.error?.message})`);
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  const nationalityRows = rows.map((r) => ({
-    structure_id: structureId,
-    stay_date: r.stayDate,
-    extraction_date: extractionDate,
-    nationality: r.nationality,
-    presences: r.presences,
-    bd_import_id: bdImport.data.id,
-  }));
-
-  const insert = await supabase.from("guest_nationality").insert(nationalityRows);
-
-  if (insert.error) {
-    await supabase.from("bd_imports").delete().eq("id", bdImport.data.id);
-    dbErrors.push(`${file.name}: errore salvataggio dati (${insert.error.message})`);
-    return { imported: 0, duplicatesSkipped: 0, dbErrors };
-  }
-
-  return { imported: nationalityRows.length, duplicatesSkipped: 0, dbErrors };
-}
-
 function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
   const [structureId, setStructureId] = useState("");
   const [extractionDate, setExtractionDate] = useState("");
   const [fileEntry, setFileEntry] = useState<{ file: File; rows: ParsedNationalityRow[]; parseErrors: string[] } | null>(
     null
   );
+  // Alias booking_designer caricati una sola volta all'ingresso nella
+  // pagina (structure_source_aliases via repository.ts) - stesso elenco
+  // usato sia per l'anteprima di corrispondenza qui sotto sia,
+  // indipendentemente, dalla verifica autoritativa dentro ingestSingleFile.
+  const [aliases, setAliases] = useState<StructureAlias[]>([]);
+  const [aliasesError, setAliasesError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [summary, setSummary] = useState<RunSummary | null>(null);
   const [globalError, setGlobalError] = useState("");
+
+  useEffect(() => {
+    loadStructureAliases(supabase, "booking_designer")
+      .then(setAliases)
+      .catch((err) => setAliasesError(err instanceof Error ? err.message : String(err)));
+  }, []);
 
   async function handleFile(file: File) {
     setGlobalError("");
@@ -1538,10 +1478,11 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
   // warning: un mismatch qui salverebbe righe di nazionalità/bd_imports
   // formalmente valide ma sulla struttura sbagliata, un errore di qualita'
   // dati non piu' rilevabile a posteriori). Ricalcolato reattivamente da
-  // fileEntry/structures ad ogni render, stesso pattern gia' in uso per
-  // matchFileToStructure in ImportStorico/ImportActual - mai salvato in
-  // uno stato separato che potrebbe disallinearsi.
-  const structureMatch = fileEntry ? resolveBdStructureFromFileName(fileEntry.file.name, structures) : null;
+  // fileEntry/structures/aliases ad ogni render, stesso pattern gia' in uso
+  // per matchFileToStructure in ImportStorico/ImportActual - mai salvato in
+  // uno stato separato che potrebbe disallinearsi. Match ESATTO via alias
+  // DB (resolveBookingDesignerStructure), mai fuzzy.
+  const structureMatch = fileEntry ? resolveBookingDesignerStructure(fileEntry.file.name, aliases, structures) : null;
   const structureMatchOk = structureMatch !== null && structureMatch.kind === "resolved" && structureMatch.structureId === structureId;
   const selectedStructureName = structures.find((s) => s.id === structureId)?.name ?? structureId;
 
@@ -1564,27 +1505,33 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
 
     // Riverifica prima di scrivere, non solo tramite il pulsante disabilitato
     // (difesa in profondita' - stesso principio gia' in uso per ADR/RevPAR).
-    const match = resolveBdStructureFromFileName(fileEntry.file.name, structures);
+    const match = resolveBookingDesignerStructure(fileEntry.file.name, aliases, structures);
     if (match.kind !== "resolved" || match.structureId !== structureId) {
-      setGlobalError(bdStructureMismatchMessage(match, selectedStructureName));
+      setGlobalError(bookingDesignerStructureMismatchMessage(match, structureId, structures));
       return;
     }
 
     setSubmitting(true);
 
-    const result = await processNationalityImport({
-      file: fileEntry.file,
-      structureId,
-      rows: fileEntry.rows,
-      extractionDate,
+    const content = await fileEntry.file.arrayBuffer();
+    const outcome = await ingestSingleFile({
+      supabase,
+      dataset: "nationality",
+      selectedStructureId: structureId,
+      structures,
       uploadedBy: user.id,
+      file: fileEntry.file,
+      fileContent: content,
+      extractionDate,
+      nationalityRows: fileEntry.rows,
     });
 
     setSubmitting(false);
     setSummary({
-      imported: result.imported,
-      duplicatesSkipped: result.duplicatesSkipped,
-      errors: [...fileEntry.parseErrors.map((e) => `${fileEntry.file.name}: ${e}`), ...result.dbErrors],
+      lines: [
+        ...fileEntry.parseErrors.map((e): OutcomeLine => ({ label: fileEntry.file.name, category: "error", detail: e })),
+        { label: fileEntry.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) },
+      ],
     });
     setFileEntry(null);
   }
@@ -1650,7 +1597,7 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
                   <>
                     <p className="text-[#6a6d70]">Struttura selezionata: {selectedStructureName}</p>
                     <p className="mt-1 font-semibold text-[#8a3a3a]">
-                      ✕ {bdStructureMismatchMessage(structureMatch, selectedStructureName)}
+                      ✕ {bookingDesignerStructureMismatchMessage(structureMatch, structureId, structures)}
                     </p>
                   </>
                 )}
@@ -1659,31 +1606,18 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
 
             {structureMatch && structureMatch.kind !== "resolved" && (
               <div className="mt-3 rounded-[10px] border border-[#e9c9c9] bg-[#fbf1f1] p-3 text-[12px]">
-                <p className="font-semibold text-[#8a3a3a]">✕ {bdStructureMismatchMessage(structureMatch, selectedStructureName)}</p>
+                <p className="font-semibold text-[#8a3a3a]">
+                  ✕ {bookingDesignerStructureMismatchMessage(structureMatch, structureId, structures)}
+                </p>
               </div>
             )}
           </div>
         )}
 
+        {aliasesError && <p className="text-sm text-[#8a3a3a]">Impossibile caricare gli alias struttura: {aliasesError}</p>}
         {globalError && <p className="text-sm text-[#8a3a3a]">{globalError}</p>}
 
-        {summary && (
-          <div className="rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
-            <p className="font-semibold">Import completato</p>
-            <p className="mt-1">Righe importate: {summary.imported}</p>
-            <p>Duplicati saltati (già presente un import per questa struttura e data di estrazione): {summary.duplicatesSkipped}</p>
-            {summary.errors.length > 0 && (
-              <>
-                <p className="mt-2 font-semibold text-[#8a3a3a]">Errori:</p>
-                <ul className="list-disc pl-5 text-[#8a3a3a]">
-                  {summary.errors.map((err, i) => (
-                    <li key={i}>{err}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
-        )}
+        {summary && <ImportRunSummaryView summary={summary} />}
 
         <div className="flex justify-end">
           <AppButton variant="primary" disabled={!canSubmit || submitting} onClick={handleSubmit}>

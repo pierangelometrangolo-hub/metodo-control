@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import { parseNationalityWorkbook, ParsedNationalityRow } from "../nationalityParser";
-import { resolveBdStructureFromFileName, StructureOption } from "../performanceImportRouting";
+import { resolveBookingDesignerStructure } from "../performance/ingestion/routing";
+import { StructureAlias, StructureOption } from "../performance/ingestion/types";
 
 const STRUCTURES: StructureOption[] = [
   { id: "s-rollo", name: "Palazzo Rollo" },
@@ -10,6 +11,18 @@ const STRUCTURES: StructureOption[] = [
   { id: "s-cadura", name: "Palazzo Arco Cadura" },
   { id: "s-sangiorgio", name: "Sangiorgio Resort" },
   { id: "s-belli", name: "Dimora De Belli" },
+];
+
+// Stesso alias reale seminato dalla migration
+// 20260908113000_structure_source_aliases.sql - qui in memoria, il
+// guardrail struttura-file ora legge gli alias dal DB (mai piu' da una
+// costante in codice), vedi lib/performance/ingestion/routing.ts.
+const ALIASES: StructureAlias[] = [
+  { structureId: "s-neviera", source: "booking_designer", alias: "Villa Neviera Wine Resort" },
+  { structureId: "s-belli", source: "booking_designer", alias: "Palazzo De' Belli" },
+  { structureId: "s-sangiorgio", source: "booking_designer", alias: "Sangiorgio Resort _____" },
+  { structureId: "s-cadura", source: "booking_designer", alias: "Palazzo Arco Cadura Hotel & SPA" },
+  { structureId: "s-rollo", source: "booking_designer", alias: "Palazzo Rollo" },
 ];
 
 // Test di regressione sul file REALE export BD "Ospiti per provenienza"
@@ -79,13 +92,13 @@ describe.skipIf(!filesAvailable)("parseNationalityWorkbook - regressione sul fil
     expect(new Set(csvResult.rows.map((r) => r.nationality)).size).toBe(20);
   });
 
-  it("guardrail struttura-file: il filename reale risolve su 'Dimora De Belli' (alias PMS->DB), import consentito selezionando quella struttura", () => {
-    const match = resolveBdStructureFromFileName(CSV_FILE, STRUCTURES);
+  it("guardrail struttura-file: il filename reale risolve su 'Dimora De Belli' via alias DB, import consentito selezionando quella struttura", () => {
+    const match = resolveBookingDesignerStructure(CSV_FILE, ALIASES, STRUCTURES);
     expect(match).toEqual({ kind: "resolved", structureId: "s-belli", structureName: "Dimora De Belli" });
   });
 
   it("guardrail struttura-file: lo stesso filename reale NON risolve su nessun'altra struttura (mai un mismatch falso positivo)", () => {
-    const match = resolveBdStructureFromFileName(CSV_FILE, STRUCTURES);
+    const match = resolveBookingDesignerStructure(CSV_FILE, ALIASES, STRUCTURES);
     expect(match.kind).toBe("resolved");
     if (match.kind === "resolved") {
       expect(["s-rollo", "s-neviera", "s-cadura", "s-sangiorgio"]).not.toContain(match.structureId);

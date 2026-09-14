@@ -264,8 +264,71 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
       return { status: "routing_error", message };
     }
 
+    // ============ FASE 1: tutti i file caricati/parsati PRIMA di qualunque commit ============
+    // `files` arriva qui gia' interamente parsato dal chiamante
+    // (app/(control)/performance/import/page.tsx: parseImportFile gira per
+    // intero, su TUTTI i file selezionati, PRIMA di questa chiamata - mai
+    // dentro il loop di commit sotto). Qui restiamo comunque su un'unica
+    // fase esplicita di lettura/hashing di TUTTI i file, prima di
+    // costruire un solo batch/kind o di toccare la RPC.
     const checksumByFileName = new Map<string, string>();
     for (const f of files) checksumByFileName.set(f.fileName, await sha256Hex(f.content));
+
+    // BUGFIX (14/09/2026): un file selezionato che non ha prodotto NESSUNA
+    // riga importabile su NESSUN kind (colonne mancanti, file vuoto, errore
+    // strutturale di parsing - gia' segnalato dal chiamante lasciando
+    // `groups` vuoto per quel file, invariato) non deve piu' passare
+    // silenziosamente: prima blocca solo se stesso (le altre righe del
+    // batch venivano comunque committate, un file rotto spariva senza
+    // traccia). Ora blocca l'INTERO batch Montecallini di questa chiamata -
+    // "N file selezionati insieme = 1 batch", quindi un file bloccante
+    // dentro quell'insieme blocca l'insieme, mai solo se stesso. Righe
+    // strutturali attese (TOTALE/footer, gia' escluse dal parser in
+    // `excludedRows`, mai in `groups`) non contano come errore qui: un file
+    // legittimo con 0 righe in un solo kind (es. nessuna riga LY quel mese)
+    // ha comunque gruppi non vuoti per gli altri kind.
+    const failedFiles = files.filter((f) => f.groups.every((g) => g.rows.length === 0));
+    if (failedFiles.length > 0) {
+      const allFileNames = files.map((f) => f.fileName).join(", ");
+      const message =
+        failedFiles.length === 1
+          ? `Il file "${failedFiles[0].fileName}" non ha prodotto nessuna riga valida. L'intero batch Montecallini (${files.length} file: ${allFileNames}) è stato bloccato - nessuna scrittura, correggere il file prima di ricaricare tutto il batch.`
+          : `${failedFiles.length} file non hanno prodotto nessuna riga valida (${failedFiles.map((f) => f.fileName).join(", ")}). L'intero batch Montecallini (${files.length} file: ${allFileNames}) è stato bloccato - nessuna scrittura.`;
+
+      await logPreflightEvent(supabase, {
+        status: "routing_error",
+        structureId: selectedStructureId,
+        extractionDate: null,
+        dataset: "montecallini_pms",
+        source: "manual_upload",
+        sourceFileName: allFileNames,
+        errorCode: "montecallini_batch_parse_error",
+        errorMessage: message,
+      });
+
+      return { status: "routing_error", message };
+    }
+
+    // ============ Identita' del batch: UN SOLO hash sull'insieme COMPLETO dei file ============
+    // Insieme ORDINATO dei source_checksum di TUTTI i file selezionati in
+    // QUESTA chiamata (indipendente dall'ordine di selezione - vedi
+    // normalization.computeBatchHash) - un solo valore, riusato IDENTICO
+    // come source_checksum/batch_hash per OGNI kind (cy/sdly/ly) prodotto
+    // da questa stessa chiamata.
+    //
+    // BUGFIX (14/09/2026): prima questo hash veniva ricalcolato PER KIND, a
+    // partire dal sottoinsieme di checksum dei soli file che avevano
+    // contribuito righe a QUEL kind (batch.sourceChecksums) - coerente solo
+    // quando ogni file contribuisce a tutti e 3 i kind (il caso comune),
+    // ma non e' la definizione richiesta ("N file selezionati insieme = 1
+    // batch_hash"): un file che per qualunque motivo contribuisce a un
+    // sottoinsieme diverso di kind rispetto agli altri produceva hash
+    // diversi tra kind pur trattandosi dello stesso identico batch di
+    // upload. Ora l'identita' del batch e' calcolata UNA SOLA VOLTA, qui,
+    // sull'intero insieme di file in ingresso - MAI piu' derivata da
+    // `batch.sourceChecksums` (che resta comunque necessario, sotto, per
+    // sapere quali file appartengono a `bd_imports` di ciascun kind).
+    const overallBatchHash = await computeBatchHash([...checksumByFileName.values()]);
 
     const batchInputs: MontecalliniFileInput[] = files.map((f) => ({
       fileName: f.fileName,
@@ -277,17 +340,29 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
     const batches = buildMontecalliniBatches(batchInputs);
     const results: { kind: GroupKind; outcome: IngestionOutcome }[] = [];
 
+    // Un file che contribuisce a piu' kind (il caso comune: lo stesso
+    // PlanningForecast ha quasi sempre righe cy+sdly+ly) va caricato su
+    // storage UNA SOLA VOLTA per l'intera chiamata - non piu' una volta per
+    // ogni kind che lo referenzia. Il path e lo stesso formato di sempre
+    // (invariato), solo calcolato/caricato la prima volta che serve e
+    // riusato per i kind successivi: nessun cambio di schema/formato path,
+    // nessun impatto su bd_imports (che resta comunque una riga per file
+    // PER KIND commesso, invariato - qui cambia solo QUANTE VOLTE i byte
+    // fisici vengono scritti su storage, mai quante righe bd_imports
+    // vengono scritte).
+    const uploadedPaths = new Map<string, string>();
+    async function uploadFileOnce(fileName: string, extractionDateForPath: string): Promise<string> {
+      const cached = uploadedPaths.get(fileName);
+      if (cached) return cached;
+      const storagePath = `${selectedStructureId}/${extractionDateForPath}/${Date.now()}-${fileName}`;
+      const fileObj = files.find((f) => f.fileName === fileName)?.file;
+      if (fileObj) await uploadSourceFile(supabase, storagePath, fileObj);
+      uploadedPaths.set(fileName, storagePath);
+      return storagePath;
+    }
+
     for (const batch of batches) {
       const extractionDate = resolveGroupExtractionDate("montecallini_pms", batch.kind, batch.rows, today, today);
-
-      // Per un batch multi-file, l'identita' "batch_hash" (insieme
-      // ORDINATO dei checksum dei singoli file, indipendente dall'ordine
-      // di selezione - vedi normalization.ts) fa doppio servizio da
-      // source_checksum: "stesso batch_hash" = "esattamente lo stesso
-      // insieme di file", la definizione piu' naturale di "exact
-      // duplicate" quando l'unita' di import e' un insieme di file, non
-      // un file singolo.
-      const batchHash = await computeBatchHash(batch.sourceChecksums);
       const normalizedContentHash = await computeSnapshotContentHash(batch.rows);
 
       const priorEvent = await findLatestImportedEvent(supabase, {
@@ -314,24 +389,22 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
             dataset: "montecallini_pms",
             source: "manual_upload",
             sourceFileName: batch.sourceFiles.map((sf) => sf.fileName).join(", "),
-            sourceChecksum: batchHash,
+            sourceChecksum: overallBatchHash,
             normalizedContentHash,
-            batchHash,
+            batchHash: overallBatchHash,
           });
           results.push({ kind: batch.kind, outcome: { status: "conflict", eventId, conflictingEventId: null } });
           continue;
         }
       }
 
-      const decision = decideImportAction(priorEvent, { sourceChecksum: batchHash, normalizedContentHash });
+      const decision = decideImportAction(priorEvent, { sourceChecksum: overallBatchHash, normalizedContentHash });
 
       let sourceFiles: { file_name: string; file_path: string }[];
       if (decision.action === "commit") {
         sourceFiles = [];
         for (const sf of batch.sourceFiles) {
-          const storagePath = `${selectedStructureId}/${extractionDate}/${Date.now()}-${sf.fileName}`;
-          const fileObj = files.find((f) => f.fileName === sf.fileName)?.file;
-          if (fileObj) await uploadSourceFile(supabase, storagePath, fileObj);
+          const storagePath = await uploadFileOnce(sf.fileName, extractionDate);
           sourceFiles.push({ file_name: sf.fileName, file_path: storagePath });
         }
       } else {
@@ -343,9 +416,9 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
         extractionDate,
         dataset: "montecallini_pms",
         source: "manual_upload",
-        sourceChecksum: batchHash,
+        sourceChecksum: overallBatchHash,
         normalizedContentHash,
-        batchHash,
+        batchHash: overallBatchHash,
         uploadedBy,
         bdImportsSource: BD_IMPORTS_SOURCE,
         reportType: null,

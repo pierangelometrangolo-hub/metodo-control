@@ -11,6 +11,27 @@ export type StructureOption = {
   name: string;
 };
 
+// KPI dichiarati dalla FONTE (BD: colonne IMO / RevPAR / "Tariffa media
+// (ADR)" - PMS Montecallini: colonne OCCUP / RPAR / ADR) - MAI usati come
+// fonte del dato importato, MAI scritti in performance_daily_snapshot, MAI
+// inclusi nel normalized_content_hash o nel payload della RPC. Vivono qui
+// solo per essere passati ai guardrail di coerenza (lib/performance/
+// guardrails/), che li confrontano con i KPI ricalcolati da revenue/camere
+// gia' validati. Ogni campo e' null quando la colonna e' assente o la cella
+// non e' interpretabile - un riferimento assente non e' mai una prova di
+// nulla.
+export type SourceKpiSnapshot = {
+  // Occupancy sorgente come FRAZIONE 0..1 (BD: colonna IMO, PMS: colonna
+  // OCCUP). Normalizzata a frazione a monte (il parser gestisce sia il
+  // formato "62,5 %" sia la frazione grezza 0.625 dell'.xls).
+  occupancyFraction: number | null;
+  // RevPAR sorgente dichiarato in valuta (BD: "RevPAR", PMS: "RPAR").
+  revpar: number | null;
+  // ADR sorgente dichiarato in valuta. Non consumato dai guardrail V0,
+  // presente per simmetria e per usi futuri.
+  adr: number | null;
+};
+
 // Forma minima comune a ParsedMonthRow (export BD) e ParsedMontecalliniRow
 // (export PMS) - permette al routing di restare agnostico rispetto alla
 // fonte, senza che nessuno dei due parser dipenda dall'altro. arrivals e'
@@ -23,6 +44,11 @@ export type ImportableRow = {
   roomsAvailable: number;
   arrivals: number | null;
   presences: number;
+  // Diagnostico opzionale - vedi SourceKpiSnapshot. Popolato dalla pagina
+  // Import affiancando ogni riga al proprio elemento di
+  // ParseResult.sourceKpiByRow. Assente = nessun KPI sorgente disponibile
+  // per questa riga (i guardrail di coerenza restano no-op).
+  sourceKpi?: SourceKpiSnapshot;
 };
 
 export type FileFormat = "bd_export" | "montecallini_pms";

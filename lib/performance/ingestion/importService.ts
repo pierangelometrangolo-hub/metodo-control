@@ -17,6 +17,14 @@ import {
   uploadSourceFile,
 } from "./repository";
 import { MontecalliniFileInput, buildMontecalliniBatches } from "./montecalliniBatching";
+import { runGuardrails } from "../guardrails/runner";
+import type { GuardrailFinding } from "../guardrails/types";
+import {
+  buildGuardrailBlockMessage,
+  buildParserBlockMessage,
+  classifyGuardrailErrorCode,
+  classifyParserErrorCode,
+} from "./validationError";
 
 // Orchestrazione del servizio import Performance (upload manuale attuale +
 // futura automazione Google Drive, NON implementata qui - "source" e'
@@ -45,7 +53,24 @@ import { MontecalliniFileInput, buildMontecalliniBatches } from "./montecalliniB
 //      legacy da cui dedurla) - vedi repository.ts.
 //   13. guardrail esistenti (validazioni parser BD/RevPAR, controllo
 //      cella-formato-data, ecc.): gia' applicati dal parser a monte,
-//      nessuna duplicazione qui.
+//      nessuna duplicazione qui. STEP 3: un `parseErrors` non vuoto
+//      passato dal chiamante (una VERA riga-dato non parsabile, mai una
+//      riga strutturale attesa - TOTALE/footer/riga vuota, che il parser
+//      non mette mai in errors) blocca l'intera unita' (file, o l'intero
+//      batch multi-file Montecallini PRIMA della divisione per kind) -
+//      validation_error, zero scritture. Nessuno snapshot parziale: mai
+//      "riga esclusa, resto importato".
+//   13-bis. Guardrails (lib/performance/guardrails/): eseguiti DOPO la
+//      normalizzazione e PRIMA del calcolo hash/conflict/commit.
+//      STEP 3 — enforcement: se hasBlockingFindings (solo GR-C06 e
+//      GR-C01-QTY hanno severity="blocking" nel registry), l'unita'
+//      bloccata e' il FILE per ADR/RevPAR e Nazionalita', il singolo KIND
+//      (cy/sdly/ly) per Montecallini - MAI l'intero batch multi-file solo
+//      perche' un kind ha un'anomalia (vedi validationError.ts). Le altre
+//      findings (severity="warning"/"info") non bloccano mai e restano
+//      solo in IngestionOutcome.guardrailFindings per la UI/il log - ne'
+//      alterano normalized_content_hash ne' il payload della RPC in
+//      nessun caso, bloccante o meno.
 //   14-15. commit atomico + evento: repository.commitImport.
 
 const BOOKING_DESIGNER_SOURCE = "booking_designer";
@@ -77,6 +102,13 @@ export type SingleFileIngestParams = CommonParams & {
   extractionDate: string;
   snapshotRows?: ImportableRow[];
   nationalityRows?: ParsedNationalityRow[];
+  // Errori del parser (lib/bdExportParser.ts / lib/nationalityParser.ts) su
+  // VERE righe-dato - mai le righe strutturali attese (TOTALE, footer, riga
+  // vuota di chiusura tabella), che i parser non mettono mai qui. STEP 3:
+  // se non vuoto, blocca l'INTERO file (validation_error, zero scritture) -
+  // mai "riga esclusa, resto importato". Opzionale/default [] per
+  // retrocompatibilita' con i chiamanti che non lo passano ancora.
+  parseErrors?: string[];
 };
 
 export async function ingestSingleFile(params: SingleFileIngestParams): Promise<IngestionOutcome> {
@@ -108,11 +140,47 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
       return { status: "routing_error", message };
     }
 
+    // ============ STEP 3: parser error -> BLOCKING FILE (mai riga esclusa + resto importato) ============
+    // `parseErrors` arriva dal chiamante (parseImportFile in
+    // app/(control)/performance/import/page.tsx) - contiene SOLO errori su
+    // VERE righe-dato (data non interpretabile, valore numerico
+    // obbligatorio non parsabile, cella Revenue formato-data, colonne
+    // obbligatorie assenti...). Le righe strutturali attese
+    // (TOTALE/footer/riga vuota) non finiscono MAI qui: i parser le
+    // saltano in silenzio o le mettono in excludedRows, non in errors -
+    // nessuna modifica ai parser necessaria per questa distinzione, gia'
+    // corretta da prima di questo step. Zero scritture: nessun checksum
+    // calcolato ancora, nessun tentativo di normalizzazione.
+    const parseErrors = params.parseErrors ?? [];
+    if (parseErrors.length > 0) {
+      const rowsSurvived = dataset === "nationality" ? (params.nationalityRows ?? []).length : (params.snapshotRows ?? []).length;
+      const errorCode = classifyParserErrorCode(rowsSurvived);
+      const message = buildParserBlockMessage(`il file "${fileName}"`, parseErrors);
+
+      await logPreflightEvent(supabase, {
+        status: "validation_error",
+        structureId: selectedStructureId,
+        extractionDate,
+        dataset,
+        source: "manual_upload",
+        sourceFileName: fileName,
+        errorCode,
+        errorMessage: message,
+      });
+
+      return { status: "validation_error", message };
+    }
+
     const sourceChecksum = await sha256Hex(fileContent);
 
     let normalizedContentHash: string;
     let snapshotRowsJson: Record<string, unknown>[] | null = null;
     let nationalityRowsJson: Record<string, unknown>[] | null = null;
+    // Popolato subito dopo la normalizzazione, restituito tale e quale
+    // nell'esito. STEP 3: se contiene una finding blocking, blocca il file
+    // (vedi il controllo subito sotto, dopo la normalizzazione) - vedi
+    // GUARDRAILS_SHADOW_MODE in lib/performance/guardrails/runner.ts.
+    let guardrailFindings: GuardrailFinding[] = [];
 
     if (dataset === "nationality") {
       const rows: NormalizedNationalityRow[] = (params.nationalityRows ?? []).map((r) => ({
@@ -128,6 +196,10 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
         presences: r.presences,
         source_index: r.sourceIndex,
       }));
+      guardrailFindings = runGuardrails({
+        dataset: "nationality",
+        rows: rows.map((r) => ({ stayDate: r.stayDate, nationality: r.nationality, presences: r.presences })),
+      }).findings;
     } else {
       const rows: NormalizedSnapshotRow[] = (params.snapshotRows ?? []).map((r) => ({
         stayDate: r.stayDate,
@@ -137,6 +209,9 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
         arrivals: r.arrivals,
         presences: r.presences,
         sourceIndex: 0,
+        // Diagnostico - mai scritto ne' hashato (vedi sotto snapshotRowsJson
+        // e normalization.snapshotRowSignature).
+        sourceKpi: r.sourceKpi,
       }));
       normalizedContentHash = await computeSnapshotContentHash(rows);
       snapshotRowsJson = rows.map((r) => ({
@@ -148,6 +223,35 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
         presences: r.presences,
         source_index: r.sourceIndex,
       }));
+      guardrailFindings = runGuardrails({ dataset: "adr_revpar", rows }).findings;
+    }
+
+    // ============ STEP 3: guardrail blocking -> BLOCKING FILE ============
+    // Solo le findings con severity="blocking" (oggi: GR-C06 chiave
+    // duplicata, GR-C01-QTY quantita' negativa - vedi registry.ts) arrivano
+    // qui: tutte le altre (warning/info) non impostano MAI questo flag. Un
+    // solo evento validation_error anche quando piu' findings blocking
+    // coesistono nello stesso file (error_code sintetico
+    // guardrail_validation_failed in quel caso - vedi validationError.ts).
+    // PRIMA della verifica legacy/conflict: se dobbiamo bloccare non ha
+    // senso interrogare performance_import_events/snapshot legacy per
+    // questa chiave.
+    if (guardrailFindings.some((f) => f.severity === "blocking")) {
+      const errorCode = classifyGuardrailErrorCode(guardrailFindings);
+      const message = buildGuardrailBlockMessage(guardrailFindings);
+
+      await logPreflightEvent(supabase, {
+        status: "validation_error",
+        structureId: selectedStructureId,
+        extractionDate,
+        dataset,
+        source: "manual_upload",
+        sourceFileName: fileName,
+        errorCode,
+        errorMessage: message,
+      });
+
+      return { status: "validation_error", message, guardrailFindings };
     }
 
     const priorEvent = await findLatestImportedEvent(supabase, { structureId: selectedStructureId, extractionDate, dataset });
@@ -172,7 +276,7 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
         });
         // Zero scritture ai dataset: si esce qui, MAI si arriva
         // all'upload/RPC di commit per questa chiave.
-        return { status: "conflict", eventId, conflictingEventId: null };
+        return { status: "conflict", eventId, conflictingEventId: null, guardrailFindings };
       }
     }
 
@@ -210,7 +314,9 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
       nationalityRows: nationalityRowsJson,
     });
 
-    return mapCommitResult(result);
+    const outcome = mapCommitResult(result);
+    outcome.guardrailFindings = guardrailFindings;
+    return outcome;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { status: "parse_error", message };
@@ -224,6 +330,14 @@ export type MontecalliniFileGroups = {
   file: File;
   content: ArrayBuffer;
   groups: { kind: GroupKind; rows: ImportableRow[] }[];
+  // Errori del parser (lib/montecalliniPmsParser.ts) su VERE righe-dato di
+  // QUESTO file - mai le righe strutturali attese (TOTALE/footer, gia' in
+  // excludedRows, mai qui). STEP 3: se non vuoto per ALMENO UN file del
+  // batch, blocca l'INTERO batch multi-file (validation_error, zero
+  // scritture) - il parsing avviene PRIMA della divisione per kind, quindi
+  // un file sorgente inaffidabile non puo' contribuire a nessun kind, non
+  // solo al proprio. Opzionale/default [] per retrocompatibilita'.
+  parseErrors?: string[];
 };
 
 export type MontecalliniBatchIngestParams = CommonParams & {
@@ -233,6 +347,11 @@ export type MontecalliniBatchIngestParams = CommonParams & {
 
 export type MontecalliniBatchResult =
   | { status: "routing_error"; message: string }
+  // STEP 3: errore parser su una vera riga-dato di uno o piu' file del
+  // batch - blocca l'INTERO batch (tutti i kind, tutti i file), MAI un
+  // singolo kind: il parsing e' file-wide, avviene prima della divisione
+  // per kind, quindi un file inaffidabile non e' isolabile a un kind solo.
+  | { status: "validation_error"; message: string }
   | { status: "ok"; batches: { kind: GroupKind; outcome: IngestionOutcome }[] };
 
 export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestParams): Promise<MontecalliniBatchResult> {
@@ -309,6 +428,44 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
       return { status: "routing_error", message };
     }
 
+    // ============ STEP 3: errore parser su una vera riga-dato -> BLOCKING BATCH ============
+    // `parseErrors` (per file, gia' popolato dal chiamante - parseImportFile
+    // in app/(control)/performance/import/page.tsx) contiene SOLO errori su
+    // VERE righe-dato (data non interpretabile, valore numerico non
+    // parsabile, CP>CV, quantita' negativa rilevata dal parser stesso...) -
+    // mai righe strutturali attese (TOTALE/footer), che il parser mette
+    // sempre in excludedRows, mai in errors. Se ALMENO UN file del batch ne
+    // ha almeno uno, l'INTERO batch (tutti i file, tutti i kind) viene
+    // bloccato QUI, PRIMA della divisione per kind (buildMontecalliniBatches
+    // sotto non viene nemmeno chiamata): un file sorgente con dati non
+    // affidabili non e' isolabile al solo kind a cui "sembra" appartenere,
+    // perche' la sua inaffidabilita' e' scoperta PRIMA di sapere quali kind
+    // popolera'. Zero RPC, zero upload, per NESSUN file del batch.
+    const filesWithParseErrors = files.filter((f) => (f.parseErrors?.length ?? 0) > 0);
+    if (filesWithParseErrors.length > 0) {
+      const allFileNames = files.map((f) => f.fileName).join(", ");
+      const allParseErrors = filesWithParseErrors.flatMap((f) => f.parseErrors ?? []);
+      const rowsSurvived = filesWithParseErrors.reduce(
+        (sum, f) => sum + f.groups.reduce((s, g) => s + g.rows.length, 0),
+        0
+      );
+      const errorCode = classifyParserErrorCode(rowsSurvived);
+      const message = buildParserBlockMessage(`il batch Montecallini (${files.length} file: ${allFileNames})`, allParseErrors);
+
+      await logPreflightEvent(supabase, {
+        status: "validation_error",
+        structureId: selectedStructureId,
+        extractionDate: null,
+        dataset: "montecallini_pms",
+        source: "manual_upload",
+        sourceFileName: allFileNames,
+        errorCode,
+        errorMessage: message,
+      });
+
+      return { status: "validation_error", message };
+    }
+
     // ============ Identita' del batch: UN SOLO hash sull'insieme COMPLETO dei file ============
     // Insieme ORDINATO dei source_checksum di TUTTI i file selezionati in
     // QUESTA chiamata (indipendente dall'ordine di selezione - vedi
@@ -365,6 +522,37 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
       const extractionDate = resolveGroupExtractionDate("montecallini_pms", batch.kind, batch.rows, today, today);
       const normalizedContentHash = await computeSnapshotContentHash(batch.rows);
 
+      // Un run PER KIND (batch.rows e' gia' il singolo kind cy/sdly/ly),
+      // cosi' GR-C06 rileva i duplicati di stay_date dentro il kind
+      // corrente, mai fra kind diversi.
+      const guardrailFindings = runGuardrails({ dataset: "montecallini_pms", rows: batch.rows }).findings;
+
+      // ============ STEP 3: guardrail blocking -> BLOCKING SOLO QUESTO KIND ============
+      // Enforcement PER KIND (mai l'intero batch multi-file): CY con un
+      // duplicato blocca solo CY, SDLY/LY validi proseguono normalmente -
+      // vedi il commento in testa al file. Solo severity="blocking"
+      // (GR-C06, GR-C01-QTY) arriva qui; warning/info non impostano mai
+      // questo ramo. `continue` passa al kind successivo, mai un abort
+      // dell'intero batch.
+      if (guardrailFindings.some((f) => f.severity === "blocking")) {
+        const errorCode = classifyGuardrailErrorCode(guardrailFindings);
+        const message = buildGuardrailBlockMessage(guardrailFindings);
+
+        await logPreflightEvent(supabase, {
+          status: "validation_error",
+          structureId: selectedStructureId,
+          extractionDate,
+          dataset: "montecallini_pms",
+          source: "manual_upload",
+          sourceFileName: batch.sourceFiles.map((sf) => sf.fileName).join(", "),
+          errorCode,
+          errorMessage: message,
+        });
+
+        results.push({ kind: batch.kind, outcome: { status: "validation_error", message, guardrailFindings } });
+        continue;
+      }
+
       const priorEvent = await findLatestImportedEvent(supabase, {
         structureId: selectedStructureId,
         extractionDate,
@@ -393,7 +581,10 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
             normalizedContentHash,
             batchHash: overallBatchHash,
           });
-          results.push({ kind: batch.kind, outcome: { status: "conflict", eventId, conflictingEventId: null } });
+          results.push({
+            kind: batch.kind,
+            outcome: { status: "conflict", eventId, conflictingEventId: null, guardrailFindings },
+          });
           continue;
         }
       }
@@ -435,7 +626,9 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
         nationalityRows: null,
       });
 
-      results.push({ kind: batch.kind, outcome: mapCommitResult(result) });
+      const batchOutcome = mapCommitResult(result);
+      batchOutcome.guardrailFindings = guardrailFindings;
+      results.push({ kind: batch.kind, outcome: batchOutcome });
     }
 
     return { status: "ok", batches: results };

@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import type { SourceKpiSnapshot } from "./performanceImportRouting";
 
 export type ParsedMonthRow = {
   periodLabel: string;
@@ -18,6 +19,13 @@ export type ParseResult = {
   // disponibile ed e' incoerente"). Vuoto quando non c'e' nulla da
   // segnalare, mai usato per bloccare un import.
   warnings: string[];
+  // KPI dichiarati dalla FONTE (IMO / RevPAR / ADR), uno per riga, allineato
+  // 1:1 con `rows` (stesso indice, stesso ordine). MAI parte di
+  // ParsedMonthRow (che resta i soli 6 campi importati) - vive qui solo per
+  // essere passato ai guardrail di coerenza (lib/performance/guardrails/),
+  // che li confrontano con i KPI ricalcolati. Ogni campo e' null quando la
+  // colonna e' assente dal file o la cella non e' interpretabile.
+  sourceKpiByRow: SourceKpiSnapshot[];
 };
 
 const ITALIAN_MONTHS: Record<string, number> = {
@@ -138,6 +146,45 @@ const OPTIONAL_KPI_COLUMNS = {
   adr: "Tariffa media (ADR)",
   revpar: "RevPAR",
 } as const;
+
+// Colonna Occupancy dell'export "ADR - RevPAR" - MAI letta come fonte del
+// dato (l'Occupancy MC-side e' sempre rooms_sold/rooms_available), usata
+// SOLO dal guardrail di coerenza GR-ADR-OCC01. Nome verificato sul file
+// reale Villa Neviera 2026-09-01: la colonna "IMO" porta il valore preciso
+// (frazione 0,625 nell'.xls o testo "62.5 %" nel .csv - 5/8 esatto),
+// mentre la colonna adiacente "Indice Medio Occupazione" e' arrotondata
+// all'intero ("62%") e va evitata.
+const OPTIONAL_OCCUPANCY_COLUMN = "IMO";
+
+// Converte l'Occupancy sorgente (colonna IMO) in FRAZIONE 0..1.
+// Gestisce entrambi i formati reali del BD:
+//   - .xls: frazione grezza (0.625) come number
+//   - .csv: testo "62.5 %" (decimale col punto) - ma il parser OCCUP
+//     Montecallini usa "60,4%" (decimale con la virgola): entrambi
+//     supportati.
+// null se assente / non interpretabile / non finito.
+export function parseOccupancyToFraction(value: unknown): number | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    return value > 1.5 ? value / 100 : value;
+  }
+  if (typeof value !== "string") return null;
+
+  const hadPercent = value.includes("%");
+  let t = value.replace(/[%\s]/g, "");
+  if (t === "") return null;
+  if (t.includes(",") && t.includes(".")) {
+    // l'ultimo separatore incontrato e' il decimale
+    t = t.lastIndexOf(",") > t.lastIndexOf(".") ? t.replace(/\./g, "").replace(",", ".") : t.replace(/,/g, "");
+  } else {
+    t = t.replace(",", ".");
+  }
+
+  const n = parseFloat(t);
+  if (Number.isNaN(n)) return null;
+  if (hadPercent || n > 1.5) return n / 100;
+  return n;
+}
 
 // Stesse identiche definizioni gia' in uso in lib/performanceMetrics.ts
 // (adr/revPar) per calcolare questi KPI a valle da revenue/camere gia'
@@ -334,6 +381,7 @@ function processBdRows(data: unknown[][], isRevenueDateFormatted: (dataRowIndex:
           `Colonne trovate nel file: ${headerRow.join(", ")}`,
       ],
       warnings: [],
+      sourceKpiByRow: [],
     };
   }
 
@@ -346,10 +394,14 @@ function processBdRows(data: unknown[][], isRevenueDateFormatted: (dataRowIndex:
   for (const [key, label] of Object.entries(OPTIONAL_KPI_COLUMNS)) {
     optionalColIndex[key] = headerRow.indexOf(label);
   }
+  // Colonna IMO (Occupancy sorgente) - stesso trattamento opzionale, letta
+  // solo per sourceKpiByRow / il guardrail GR-ADR-OCC01.
+  const imoColIndex = headerRow.indexOf(OPTIONAL_OCCUPANCY_COLUMN);
 
   const rows: ParsedMonthRow[] = [];
   const errors: string[] = [];
   const warnings: string[] = [];
+  const sourceKpiByRow: SourceKpiSnapshot[] = [];
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
@@ -405,9 +457,16 @@ function processBdRows(data: unknown[][], isRevenueDateFormatted: (dataRowIndex:
     }
 
     rows.push({ periodLabel, stayDate, revenueTotal, roomsSold, roomsAvailable, arrivals, presences });
+    // Allineato 1:1 con rows.push sopra - stessa iterazione, stesso indice.
+    // Valori SOLO diagnostici (guardrail di coerenza), mai importati.
+    sourceKpiByRow.push({
+      occupancyFraction: imoColIndex !== -1 ? parseOccupancyToFraction(row[imoColIndex]) : null,
+      revpar: optionalColIndex.revpar !== -1 ? parseEuroCurrency(row[optionalColIndex.revpar]) : null,
+      adr: optionalColIndex.adr !== -1 ? parseEuroCurrency(row[optionalColIndex.adr]) : null,
+    });
   }
 
-  return { rows, errors, warnings };
+  return { rows, errors, warnings, sourceKpiByRow };
 }
 
 export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
@@ -430,19 +489,20 @@ export function parseBdExportWorkbook(buffer: ArrayBuffer): ParseResult {
       rows: [],
       errors: [`File non leggibile come Excel: ${err instanceof Error ? err.message : String(err)}`],
       warnings: [],
+      sourceKpiByRow: [],
     };
   }
 
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) {
-    return { rows: [], errors: ["Il file non contiene nessun foglio"], warnings: [] };
+    return { rows: [], errors: ["Il file non contiene nessun foglio"], warnings: [], sourceKpiByRow: [] };
   }
 
   const sheet = workbook.Sheets[sheetName];
   const data = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: "" });
 
   if (data.length === 0) {
-    return { rows: [], errors: ["Il foglio è vuoto"], warnings: [] };
+    return { rows: [], errors: ["Il foglio è vuoto"], warnings: [], sourceKpiByRow: [] };
   }
 
   // Necessario per risalire dalla riga/colonna POSIZIONALE di sheet_to_json
@@ -531,7 +591,7 @@ export function parseBdExportCsv(csvText: string): ParseResult {
   const lines = content.split(/\r\n|\n|\r/).filter((l) => l.trim() !== "");
 
   if (lines.length === 0) {
-    return { rows: [], errors: ["Il file è vuoto"], warnings: [] };
+    return { rows: [], errors: ["Il file è vuoto"], warnings: [], sourceKpiByRow: [] };
   }
 
   const data = lines.map((line) => splitCsvLine(line, ","));

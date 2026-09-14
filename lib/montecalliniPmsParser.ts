@@ -26,7 +26,8 @@
 //   PAX          -> presences
 //   —            -> arrivals sempre NULL (colonna non disponibile)
 
-import { parseEuroCurrency } from "./bdExportParser";
+import { parseEuroCurrency, parseOccupancyToFraction } from "./bdExportParser";
+import type { SourceKpiSnapshot } from "./performanceImportRouting";
 
 export type MontecalliniRowKind = "cy" | "sdly" | "ly";
 
@@ -65,6 +66,11 @@ export type MontecalliniParseResult = {
   // al posto di chi importa.
   warnings: MontecalliniWarning[];
   errors: string[]; // righe malformate o con valori impossibili (CP>CV, negativi) - riga scartata
+  // KPI dichiarati dalla FONTE (OCCUP / RPAR / ADR), uno per riga, allineato
+  // 1:1 con `rows`. MAI parte di ParsedMontecalliniRow - vive qui solo per
+  // i guardrail di coerenza (lib/performance/guardrails/). null quando la
+  // colonna e' assente o la cella non e' interpretabile.
+  sourceKpiByRow: SourceKpiSnapshot[];
 };
 
 // Limite superiore di BUON SENSO per CV (inventario fisico attuale = 48),
@@ -92,6 +98,10 @@ const REQUIRED_COLUMNS = {
 const OPTIONAL_CONTROL_COLUMNS = {
   adr: "ADR",
   occup: "OCCUP",
+  // RPAR = RevPAR dichiarato dal PMS - nome colonna verificato sui file
+  // reali PlanningForecast ("RPAR", non "REVPAR"). Letto solo per
+  // sourceKpiByRow / il guardrail GR-MC-REV01, mai come fonte del dato.
+  revpar: "RPAR",
 } as const;
 
 function stripBom(content: string): string {
@@ -176,7 +186,7 @@ export function parseMontecalliniPmsCsv(fileContent: string): MontecalliniParseR
   const lines = content.split(/\r\n|\n|\r/).filter((l) => l.trim() !== "");
 
   if (lines.length === 0) {
-    return { rows: [], excludedRows: [], warnings: [], errors: ["Il file e' vuoto"] };
+    return { rows: [], excludedRows: [], warnings: [], errors: ["Il file e' vuoto"], sourceKpiByRow: [] };
   }
 
   const headerFields = splitCsvLine(lines[0], ";");
@@ -195,6 +205,7 @@ export function parseMontecalliniPmsCsv(fileContent: string): MontecalliniParseR
         `Formato file non riconosciuto: colonne mancanti (${missing.map(([, label]) => label).join(", ")}). ` +
           `Colonne trovate nel file: ${headerFields.join(", ")}`,
       ],
+      sourceKpiByRow: [],
     };
   }
 
@@ -207,6 +218,7 @@ export function parseMontecalliniPmsCsv(fileContent: string): MontecalliniParseR
   const excludedRows: MontecalliniExcludedRow[] = [];
   const warnings: MontecalliniWarning[] = [];
   const errors: string[] = [];
+  const sourceKpiByRow: SourceKpiSnapshot[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const lineNumber = i + 1;
@@ -309,7 +321,15 @@ export function parseMontecalliniPmsCsv(fileContent: string): MontecalliniParseR
       arrivals: null,
       presences,
     });
+    // Allineato 1:1 con rows.push sopra. Valori SOLO diagnostici (guardrail
+    // di coerenza GR-MC-REV01 e simmetrici), mai importati.
+    sourceKpiByRow.push({
+      occupancyFraction:
+        optionalColIndex.occup !== -1 ? parseOccupancyToFraction(fields[optionalColIndex.occup] ?? "") : null,
+      revpar: optionalColIndex.revpar !== -1 ? parseEuroCurrency(fields[optionalColIndex.revpar] ?? "") : null,
+      adr: optionalColIndex.adr !== -1 ? parseEuroCurrency(fields[optionalColIndex.adr] ?? "") : null,
+    });
   }
 
-  return { rows, excludedRows, warnings, errors };
+  return { rows, excludedRows, warnings, errors, sourceKpiByRow };
 }

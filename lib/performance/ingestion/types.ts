@@ -3,6 +3,9 @@
 // commento in importService.ts). Nessuna dipendenza da React/Supabase qui
 // dentro: solo forme dati, cosi' restano testabili senza mock pesanti.
 
+import type { SourceKpiSnapshot } from "../../performanceImportRouting";
+import type { GuardrailFinding } from "../guardrails/types";
+
 // Stesso set di 3 dataset gia' deciso per performance_import_events.dataset
 // (vedi migration) - MAI il formato file (xls/csv/pms), quello e' un
 // dettaglio del parsing, non dell'identita' del dataset.
@@ -51,6 +54,13 @@ export type NormalizedSnapshotRow = {
   // al proprio bd_imports (un file = un bd_imports, invariato). Per i
   // dataset a file singolo e' sempre 0.
   sourceIndex: number;
+  // KPI dichiarati dalla fonte - SOLO diagnostici, MAI scritti in
+  // performance_daily_snapshot, MAI inclusi nel normalized_content_hash o
+  // nel payload della RPC (vedi normalization.ts: snapshotRowSignature
+  // elenca esplicitamente i soli 6 campi; importService: snapshotRowsJson
+  // mappa esplicitamente i soli campi importati). Consumati solo dai
+  // guardrail di coerenza.
+  sourceKpi?: SourceKpiSnapshot;
 };
 
 export type NormalizedNationalityRow = {
@@ -77,10 +87,15 @@ export type StructureResolution =
   | { kind: "not_found" }
   | { kind: "ambiguous"; candidateStructureIds: string[] };
 
-export type IngestionOutcome =
+// guardrailFindings: presente quando il servizio ha eseguito il livello
+// guardrail (dopo la normalizzazione). In Guardrails V0 (shadow mode) e'
+// puramente diagnostico - non influenza `status`, l'hash o la RPC. Assente
+// per gli esiti che avvengono PRIMA della normalizzazione (routing_error).
+export type IngestionOutcome = (
   | { status: "imported"; importedCount: number; eventId: string; bdImportIds: string[] }
   | { status: "skipped_duplicate"; reason: "exact_duplicate" | "semantic_duplicate"; eventId: string }
   | { status: "conflict"; eventId: string; conflictingEventId: string | null }
   | { status: "routing_error"; message: string }
   | { status: "parse_error"; message: string }
-  | { status: "validation_error"; message: string };
+  | { status: "validation_error"; message: string }
+) & { guardrailFindings?: GuardrailFinding[] };

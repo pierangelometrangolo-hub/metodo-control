@@ -68,6 +68,9 @@ export function buildMontecalliniBatches(files: MontecalliniFileInput[]): Montec
           arrivals: row.arrivals,
           presences: row.presences,
           sourceIndex,
+          // Diagnostico - trasportato per i guardrail di coerenza, mai
+          // scritto ne' hashato (vedi NormalizedSnapshotRow.sourceKpi).
+          sourceKpi: row.sourceKpi,
         });
       }
     }

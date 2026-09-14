@@ -33,6 +33,9 @@ import {
 import { IngestionOutcome, StructureAlias, StructureResolution } from "@/lib/performance/ingestion/types";
 import { resolveBookingDesignerStructure, structureResolutionErrorMessage } from "@/lib/performance/ingestion/routing";
 import { loadStructureAliases } from "@/lib/performance/ingestion/repository";
+import { categorizeOutcome, OUTCOME_CATEGORY_LABEL, OutcomeCategory } from "@/lib/performance/ingestion/outcomeCategory";
+import { groupFindingsForDisplay } from "@/lib/performance/guardrails";
+import type { GuardrailFinding } from "@/lib/performance/guardrails";
 
 // channel_commission_rates ha RLS insert/update a rank >= 2 - il form
 // Commissioni va nascosto del tutto per level=user, non solo disabilitato
@@ -87,21 +90,19 @@ function totalRowsInEntry(entry: FileEntry): number {
   return entry.groups.reduce((sum, g) => sum + g.rows.length, 0);
 }
 
-// Riepilogo import (Import Integrity Foundation Fase 1): non piu' un
-// singolo numero "duplicati saltati" che confondeva "e' normale, stesso
-// file ricaricato" con "attenzione, questo e' un conflitto da guardare" -
-// 4 categorie distinte, derivate 1:1 dallo status di IngestionOutcome
-// (lib/performance/ingestion/types.ts). routing_error/parse_error/
-// validation_error sono fuse in una sola categoria "Errore parsing/routing"
-// come richiesto, mai mostrate separate all'utente.
-type OutcomeCategory = "imported" | "duplicate" | "conflict" | "error";
-
-function categorizeOutcome(status: IngestionOutcome["status"]): OutcomeCategory {
-  if (status === "imported") return "imported";
-  if (status === "skipped_duplicate") return "duplicate";
-  if (status === "conflict") return "conflict";
-  return "error";
-}
+// OutcomeCategory / categorizeOutcome / OUTCOME_CATEGORY_LABEL: spostate in
+// lib/performance/ingestion/outcomeCategory.ts (vedi import in cima al
+// file) per poterle testare in isolamento - stesso principio gia' in uso
+// per lib/performanceImportRouting.ts. Comportamento invariato: 6
+// categorie derivate 1:1 dallo status di IngestionOutcome.
+// routing_error/parse_error restano fusi in "Errore parsing/routing" (file/
+// struttura sbagliati, o un'eccezione imprevista) - MAI insieme a
+// validation_error, che da STEP 3 ha una categoria propria e visivamente
+// diversa: il file era quello giusto, ma il CONTENUTO non ha passato i
+// controlli di qualita' (parser su una vera riga-dato, o un guardrail
+// bloccante) - zero scritture comunque. "warning" (tier "Avvisi") resta
+// separato: NON deve MAI finire sotto "Errore parsing/routing" ne' sotto
+// "Errore validazione" (bug UX gia' corretto una volta, STEP 2).
 
 function outcomeDetail(outcome: IngestionOutcome): string {
   switch (outcome.status) {
@@ -120,8 +121,26 @@ function outcomeDetail(outcome: IngestionOutcome): string {
   }
 }
 
-type OutcomeLine = { label: string; category: OutcomeCategory; detail: string };
+type OutcomeLine = {
+  label: string;
+  category: OutcomeCategory;
+  detail: string;
+  // Findings dei Guardrails associate a questo esito. Le sole
+  // severity="warning"/"info" sono puramente diagnostiche; le
+  // severity="blocking" (se presenti) sono quelle che hanno REALMENTE
+  // impedito la scrittura (outcome.status === "validation_error").
+  findings?: GuardrailFinding[];
+};
 type RunSummary = { lines: OutcomeLine[] };
+
+function outcomeLine(label: string, outcome: IngestionOutcome): OutcomeLine {
+  return {
+    label,
+    category: categorizeOutcome(outcome.status),
+    detail: outcomeDetail(outcome),
+    findings: outcome.guardrailFindings,
+  };
+}
 
 // Stesso messaggio prodotto da ingestSingleFile per il caso "risolto ma
 // struttura diversa da quella selezionata" (importService.ts) - duplicato
@@ -140,17 +159,80 @@ function bookingDesignerStructureMismatchMessage(
   return structureResolutionErrorMessage(resolution, structures);
 }
 
-const OUTCOME_CATEGORY_LABEL: Record<OutcomeCategory, string> = {
-  imported: "Importato",
-  duplicate: "Duplicato già acquisito",
-  conflict: "Conflitto",
-  error: "Errore parsing/routing",
-};
-
 function countByCategory(lines: OutcomeLine[]): Record<OutcomeCategory, number> {
-  const counts: Record<OutcomeCategory, number> = { imported: 0, duplicate: 0, conflict: 0, error: 0 };
+  const counts: Record<OutcomeCategory, number> = {
+    imported: 0,
+    duplicate: 0,
+    conflict: 0,
+    error: 0,
+    validationError: 0,
+    warning: 0,
+  };
   for (const line of lines) counts[line.category] += 1;
   return counts;
+}
+
+// Riepilogo compatto delle findings Guardrails di un intero run:
+// raggruppate per guardrail_id, con conteggio e pochi esempi (mai
+// centinaia di righe identiche). Le findings che hanno REALMENTE bloccato
+// un file/kind (severity="blocking" - GR-C06, GR-C01-QTY) sono separate e
+// marcate come tali; le altre (warning/info) restano sotto "Avvisi", non
+// hanno mai impedito la scrittura.
+function GuardrailFindingsView({ findings }: { findings: GuardrailFinding[] }) {
+  if (findings.length === 0) return null;
+
+  const groups = groupFindingsForDisplay(findings);
+  const blocking = groups.filter((g) => g.severity === "blocking");
+  const advisories = groups.filter((g) => g.severity !== "blocking");
+
+  return (
+    <div className="mt-3 space-y-3">
+      {blocking.length > 0 && (
+        <div className="rounded-[12px] border border-[#e0b48f] bg-[#fbf1e6] p-3 text-[12px] text-[#7a4a1f]">
+          <p className="font-semibold">Import bloccato dai controlli di qualità</p>
+          <p className="mt-1 text-[#8a6a4a]">
+            Nessuna scrittura per il file/kind indicato - verificare il file sorgente e ricaricarlo.
+          </p>
+          <ul className="mt-2 space-y-2">
+            {blocking.map((g) => (
+              <li key={g.id}>
+                <span className="font-semibold">
+                  {g.title} ({g.id}) — {g.count}
+                </span>
+                <ul className="mt-1 list-disc pl-5">
+                  {g.examples.map((ex, i) => (
+                    <li key={i}>{ex}</li>
+                  ))}
+                  {g.hiddenCount > 0 && <li>…e altri {g.hiddenCount}</li>}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {advisories.length > 0 && (
+        <div className="rounded-[12px] border border-[#e7dcc4] bg-[#faf5e8] p-3 text-[12px] text-[#8a6a1f]">
+          <p className="font-semibold">Avvisi (Guardrails V0 — diagnostica, nessun blocco)</p>
+          <ul className="mt-2 space-y-2">
+            {advisories.map((g) => (
+              <li key={g.id}>
+                <span className="font-semibold">
+                  {g.title} ({g.id}) — {g.count}
+                </span>
+                <ul className="mt-1 list-disc pl-5">
+                  {g.examples.map((ex, i) => (
+                    <li key={i}>{ex}</li>
+                  ))}
+                  {g.hiddenCount > 0 && <li>…e altri {g.hiddenCount}</li>}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Un solo componente di riepilogo, riusato identico dai 3 flussi (Import
@@ -158,6 +240,7 @@ function countByCategory(lines: OutcomeLine[]): Record<OutcomeCategory, number> 
 // esito.
 function ImportRunSummaryView({ summary }: { summary: RunSummary }) {
   const counts = countByCategory(summary.lines);
+  const allFindings = summary.lines.flatMap((l) => l.findings ?? []);
 
   return (
     <div className="rounded-[14px] border border-[#cfe3d3] bg-[#f2f8f3] p-4 text-sm text-[#2B2D2F]">
@@ -166,16 +249,33 @@ function ImportRunSummaryView({ summary }: { summary: RunSummary }) {
       <p>Duplicato già acquisito: {counts.duplicate}</p>
       <p className={counts.conflict > 0 ? "font-semibold text-[#8a3a3a]" : undefined}>Conflitto: {counts.conflict}</p>
       <p className={counts.error > 0 ? "text-[#8a3a3a]" : undefined}>Errore parsing/routing: {counts.error}</p>
+      {counts.validationError > 0 && (
+        <p className="font-semibold text-[#7a4a1f]">Errore validazione: {counts.validationError}</p>
+      )}
+      {counts.warning > 0 && <p className="text-[#8a6a1f]">Avvisi: {counts.warning}</p>}
 
       {summary.lines.length > 0 && (
         <ul className="mt-2 list-disc pl-5">
           {summary.lines.map((line, i) => (
-            <li key={i} className={line.category === "conflict" || line.category === "error" ? "text-[#8a3a3a]" : undefined}>
+            <li
+              key={i}
+              className={
+                line.category === "conflict" || line.category === "error"
+                  ? "text-[#8a3a3a]"
+                  : line.category === "validationError"
+                    ? "text-[#7a4a1f]"
+                    : line.category === "warning"
+                      ? "text-[#8a6a1f]"
+                      : undefined
+              }
+            >
               <span className="font-semibold">[{OUTCOME_CATEGORY_LABEL[line.category]}]</span> {line.label}: {line.detail}
             </li>
           ))}
         </ul>
       )}
+
+      <GuardrailFindingsView findings={allFindings} />
     </div>
   );
 }
@@ -218,10 +318,14 @@ async function parseImportFile(
     const csvFormat = detectCsvFormat(text);
 
     if (csvFormat === "montecallini_pms") {
-      const { rows, errors, warnings } = parseMontecalliniPmsCsv(text);
+      const { rows, errors, warnings, sourceKpiByRow } = parseMontecalliniPmsCsv(text);
+      // Affianca a ogni riga il proprio KPI sorgente (IMO/RPAR/ADR) -
+      // diagnostico, mai importato/hashato: serve solo ai guardrail di
+      // coerenza a valle (lib/performance/guardrails/).
+      const rowsWithKpi = rows.map((r, i) => ({ ...r, sourceKpi: sourceKpiByRow[i] }));
 
       const groups: ParsedGroup[] = (["cy", "sdly", "ly"] as const)
-        .map((kind) => ({ kind, rows: rows.filter((r) => r.kind === kind) }))
+        .map((kind) => ({ kind, rows: rowsWithKpi.filter((r) => r.kind === kind) }))
         .filter((g) => g.rows.length > 0);
 
       return {
@@ -232,13 +336,15 @@ async function parseImportFile(
       };
     }
 
-    const { rows, errors, warnings } = parseBdExportCsv(text);
-    return { groups: rows.length > 0 ? [{ kind: "cy", rows }] : [], errors, warnings, format: csvFormat };
+    const { rows, errors, warnings, sourceKpiByRow } = parseBdExportCsv(text);
+    const rowsWithKpi = rows.map((r, i) => ({ ...r, sourceKpi: sourceKpiByRow[i] }));
+    return { groups: rowsWithKpi.length > 0 ? [{ kind: "cy", rows: rowsWithKpi }] : [], errors, warnings, format: csvFormat };
   }
 
   const buffer = await readFileAsArrayBuffer(file);
-  const { rows, errors, warnings } = parseBdExportWorkbook(buffer);
-  return { groups: rows.length > 0 ? [{ kind: "cy", rows }] : [], errors, warnings, format: "bd_export" };
+  const { rows, errors, warnings, sourceKpiByRow } = parseBdExportWorkbook(buffer);
+  const rowsWithKpi = rows.map((r, i) => ({ ...r, sourceKpi: sourceKpiByRow[i] }));
+  return { groups: rowsWithKpi.length > 0 ? [{ kind: "cy", rows: rowsWithKpi }] : [], errors, warnings, format: "bd_export" };
 }
 
 // firstDayOfMonthAfter, oneYearBefore, computeMontecalliniGroupExtractionDate,
@@ -559,8 +665,9 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
         fileContent: content,
         extractionDate,
         snapshotRows: rows,
+        parseErrors: entry.parseErrors,
       });
-      lines.push({ label: entry.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+      lines.push(outcomeLine(entry.file.name, outcome));
     }
 
     if (montecalliniEntries.length > 0) {
@@ -579,15 +686,25 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
       if (validEntries.length > 0) {
         const structureId = validEntries[0].structureId;
         const files: MontecalliniFileGroups[] = await Promise.all(
-          validEntries.map(async (e) => ({ fileName: e.file.name, file: e.file, content: await e.file.arrayBuffer(), groups: e.groups }))
+          validEntries.map(async (e) => ({
+            fileName: e.file.name,
+            file: e.file,
+            content: await e.file.arrayBuffer(),
+            groups: e.groups,
+            parseErrors: e.parseErrors,
+          }))
         );
         const batchResult = await ingestMontecalliniBatch({ supabase, selectedStructureId: structureId, structures, uploadedBy: user.id, files, today });
 
-        if (batchResult.status === "routing_error") {
-          lines.push({ label: validEntries.map((e) => e.file.name).join(", "), category: "error", detail: batchResult.message });
+        if (batchResult.status === "routing_error" || batchResult.status === "validation_error") {
+          lines.push({
+            label: validEntries.map((e) => e.file.name).join(", "),
+            category: batchResult.status === "validation_error" ? "validationError" : "error",
+            detail: batchResult.message,
+          });
         } else {
           for (const { kind, outcome } of batchResult.batches) {
-            lines.push({ label: `Montecallini [${kind.toUpperCase()}]`, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+            lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()}]`, outcome));
           }
         }
       }
@@ -868,8 +985,9 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
         fileContent: content,
         extractionDate: today,
         snapshotRows: rows,
+        parseErrors: entry.parseErrors,
       });
-      lines.push({ label: entry.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+      lines.push(outcomeLine(entry.file.name, outcome));
     }
 
     if (montecalliniEntries.length > 0) {
@@ -885,15 +1003,25 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
 
       if (validEntries.length > 0) {
         const files: MontecalliniFileGroups[] = await Promise.all(
-          validEntries.map(async (e) => ({ fileName: e.file.name, file: e.file, content: await e.file.arrayBuffer(), groups: e.groups }))
+          validEntries.map(async (e) => ({
+            fileName: e.file.name,
+            file: e.file,
+            content: await e.file.arrayBuffer(),
+            groups: e.groups,
+            parseErrors: e.parseErrors,
+          }))
         );
         const batchResult = await ingestMontecalliniBatch({ supabase, selectedStructureId: structureId, structures, uploadedBy: user.id, files, today });
 
-        if (batchResult.status === "routing_error") {
-          lines.push({ label: validEntries.map((e) => e.file.name).join(", "), category: "error", detail: batchResult.message });
+        if (batchResult.status === "routing_error" || batchResult.status === "validation_error") {
+          lines.push({
+            label: validEntries.map((e) => e.file.name).join(", "),
+            category: batchResult.status === "validation_error" ? "validationError" : "error",
+            detail: batchResult.message,
+          });
         } else {
           for (const { kind, outcome } of batchResult.batches) {
-            lines.push({ label: `Montecallini [${kind.toUpperCase()}]`, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+            lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()}]`, outcome));
           }
         }
       }
@@ -941,7 +1069,10 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
     setSubmittingHistorical(true);
 
     const lines: OutcomeLine[] = [];
-    for (const w of historicalFile.parseWarnings) lines.push({ label: historicalFile.file.name, category: "error", detail: w });
+    // Bug UX corretto: i warning di coerenza del parser (mai bloccanti) NON
+    // devono comparire sotto "Errore parsing/routing" - vanno nel tier
+    // "Avvisi".
+    for (const w of historicalFile.parseWarnings) lines.push({ label: historicalFile.file.name, category: "warning", detail: w });
 
     if (historicalFile.format === "montecallini_pms") {
       // Un solo file, ma passato comunque come batch di 1 al servizio
@@ -957,15 +1088,27 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
         selectedStructureId: structureId,
         structures,
         uploadedBy: user.id,
-        files: [{ fileName: historicalFile.file.name, file: historicalFile.file, content, groups: historicalFile.groups }],
+        files: [
+          {
+            fileName: historicalFile.file.name,
+            file: historicalFile.file,
+            content,
+            groups: historicalFile.groups,
+            parseErrors: historicalFile.parseErrors,
+          },
+        ],
         today,
       });
 
-      if (batchResult.status === "routing_error") {
-        lines.push({ label: historicalFile.file.name, category: "error", detail: batchResult.message });
+      if (batchResult.status === "routing_error" || batchResult.status === "validation_error") {
+        lines.push({
+          label: historicalFile.file.name,
+          category: batchResult.status === "validation_error" ? "validationError" : "error",
+          detail: batchResult.message,
+        });
       } else {
         for (const { kind, outcome } of batchResult.batches) {
-          lines.push({ label: `Montecallini [${kind.toUpperCase()}]`, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+          lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()}]`, outcome));
         }
       }
     } else {
@@ -981,8 +1124,9 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
         fileContent: content,
         extractionDate: historicalDate,
         snapshotRows: rows,
+        parseErrors: historicalFile.parseErrors,
       });
-      lines.push({ label: historicalFile.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) });
+      lines.push(outcomeLine(historicalFile.file.name, outcome));
     }
 
     setSubmittingHistorical(false);
@@ -1524,14 +1668,17 @@ function ImportNazionalita({ structures }: { structures: StructureOption[] }) {
       fileContent: content,
       extractionDate,
       nationalityRows: fileEntry.rows,
+      parseErrors: fileEntry.parseErrors,
     });
 
     setSubmitting(false);
     setSummary({
-      lines: [
-        ...fileEntry.parseErrors.map((e): OutcomeLine => ({ label: fileEntry.file.name, category: "error", detail: e })),
-        { label: fileEntry.file.name, category: categorizeOutcome(outcome.status), detail: outcomeDetail(outcome) },
-      ],
+      // fileEntry.parseErrors non viene piu' ripetuto qui come righe
+      // separate: da questo step lo stesso elenco arriva gia' al servizio
+      // (sopra) e, se non vuoto, produce un unico outcome validation_error
+      // con il riepilogo sintetico - mai una doppia segnalazione dello
+      // stesso problema in due categorie diverse.
+      lines: [outcomeLine(fileEntry.file.name, outcome)],
     });
     setFileEntry(null);
   }

@@ -35,6 +35,7 @@ import {
   pacingDetail,
   sumSnapshots,
 } from "@/lib/performanceMetrics";
+import { aggregatePortfolioPerformance, PortfolioComparison } from "@/lib/performance/portfolio";
 
 type StructureOption = {
   id: string;
@@ -389,6 +390,39 @@ export default function PerformanceOverviewPage() {
     ? `${selectedYear - 1}`
     : `${MONTH_LABELS[selectedMonth - 1]} ${selectedYear - 1}`;
 
+  // TOTALE METODO: aggregato dalle stesse righe gia' mostrate sopra (stesso
+  // periodo, stesso snapshot per struttura), nessuna query aggiuntiva.
+  const portfolio = aggregatePortfolioPerformance(rows, { hasLoadError: loadError !== "" });
+  const portfolioOf = `${portfolio.totalStructures}`;
+  const portfolioCoverageParts = [
+    `Budget ${portfolio.budget.minimo?.coverage ?? 0}/${portfolioOf}`,
+    `LY ${portfolio.lastYear?.coverage ?? 0}/${portfolioOf}`,
+    `SDLY ${portfolio.sdly?.coverage ?? 0}/${portfolioOf}`,
+  ];
+  // "su x/y" sotto il valore solo se il confronto copre meno strutture del
+  // totale: a colpo d'occhio si vede che il riferimento non e' 6/6.
+  const portfolioCoverageNote = (comparison: PortfolioComparison) =>
+    comparison.coverage < portfolio.totalStructures ? (
+      <p className="mt-0.5 text-[11px] font-normal text-[#6a6d70]">
+        su {comparison.coverage}/{portfolioOf}
+      </p>
+    ) : null;
+  const portfolioBudgetCell = (comparison: PortfolioComparison | null, label: string) =>
+    comparison ? (
+      <>
+        <CellTooltip placement="top" align="right" trigger={<span>{formatCurrency(comparison.reference)}</span>}>
+          <p>
+            Budget {label}: somma su {comparison.coverage}/{portfolioOf} strutture con OTB e budget
+          </p>
+          <p>OTB stesse strutture: {formatCurrency(comparison.actual)}</p>
+          <p>Variazione: {formatDelta(comparison.actual, comparison.reference).text}</p>
+        </CellTooltip>
+        {portfolioCoverageNote(comparison)}
+      </>
+    ) : (
+      ND
+    );
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -691,6 +725,110 @@ export default function PerformanceOverviewPage() {
                   );
                 })}
               </tbody>
+              {portfolio.totalStructures > 0 && (
+                <tfoot>
+                  <tr className="border-t-2 border-[#e7dfd8] bg-[#f8f6f2] font-semibold text-[#2B2D2F]">
+                    <td className="py-3 pr-4 align-top">
+                      <p className="uppercase tracking-[0.08em]">TOTALE METODO</p>
+                      <p className="mt-1 whitespace-nowrap text-[11px] font-normal text-[#6a6d70]">
+                        {portfolio.includedStructures}/{portfolioOf} strutture con dati
+                      </p>
+                      <p className="whitespace-nowrap text-[11px] font-normal text-[#6a6d70]">
+                        {portfolioCoverageParts.join(" · ")}
+                      </p>
+                      {portfolio.partial && (
+                        <p className="text-[11px] font-normal text-[#8a3a3a]">Dati parziali</p>
+                      )}
+                    </td>
+
+                    <td className="py-3 pr-4 align-top">
+                      {portfolio.revenue !== null ? formatCurrencyCents(portfolio.revenue) : ND}
+                    </td>
+
+                    <td className="py-3 pr-4 align-top">
+                      {portfolio.pacing ? (
+                        <CellTooltip
+                          placement="top"
+                          trigger={
+                            <div className="flex items-center gap-2">
+                              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pacingDotClasses[portfolio.pacing]}`} />
+                              <span>{pacingLabels[portfolio.pacing]}</span>
+                            </div>
+                          }
+                        >
+                          <p>
+                            Calcolato su {portfolio.pacingCoverage}/{portfolioOf} strutture con OTB e budget Minimo e
+                            Realistico.
+                          </p>
+                          {portfolio.budget.minimo && (
+                            <>
+                              <p className="mt-1">
+                                {pacingDetail(portfolio.budget.minimo.actual, portfolio.budget.minimo.reference)} (
+                                {portfolio.budget.minimo.coverage}/{portfolioOf} strutture)
+                              </p>
+                              <p>
+                                Variazione vs Minimo:{" "}
+                                {formatDelta(portfolio.budget.minimo.actual, portfolio.budget.minimo.reference).text}
+                              </p>
+                            </>
+                          )}
+                        </CellTooltip>
+                      ) : (
+                        <span className="text-[#6a6d70]">{ND}</span>
+                      )}
+                    </td>
+
+                    {[
+                      { comparison: portfolio.sdly, label: `SDLY ${lastYearPeriodLabel} (a parità di anticipo)` },
+                      { comparison: portfolio.lastYear, label: `Consuntivo chiuso ${lastYearPeriodLabel}` },
+                    ].map(({ comparison, label }) => (
+                      <td key={label} className="py-3 pr-4 align-top">
+                        {comparison ? (
+                          <>
+                            <CellTooltip
+                              placement="top"
+                              trigger={
+                                <span>
+                                  {formatCurrency(comparison.reference)}{" "}
+                                  <span className={formatDelta(comparison.actual, comparison.reference).colorClass}>
+                                    ({formatDelta(comparison.actual, comparison.reference).text})
+                                  </span>
+                                </span>
+                              }
+                            >
+                              <p>
+                                Confronto omogeneo su {comparison.coverage}/{portfolioOf} strutture con entrambi i dati
+                              </p>
+                              <p className="mt-1">OTB {periodLabel} (stesse strutture): {formatCurrency(comparison.actual)}</p>
+                              <p>
+                                {label}: {formatCurrency(comparison.reference)}
+                              </p>
+                              <p className="mt-1">
+                                Differenza: {formatSignedCurrency(comparison.actual - comparison.reference)}
+                              </p>
+                              <p>Variazione: {formatDelta(comparison.actual, comparison.reference).text}</p>
+                            </CellTooltip>
+                            {portfolioCoverageNote(comparison)}
+                          </>
+                        ) : (
+                          <span className="text-[#6a6d70]">{ND}</span>
+                        )}
+                      </td>
+                    ))}
+
+                    <td className="py-3 pr-4 align-top">{formatCurrency(portfolio.adr)}</td>
+                    <td className="py-3 pr-4 align-top">{formatCurrency(portfolio.revpar)}</td>
+                    <td className="py-3 pr-4 align-top">{formatPercent(portfolio.occupancy)}</td>
+
+                    <td className="py-3 pr-4 align-top text-[#6a6d70]">—</td>
+                    <td className="py-3 pr-4 align-top text-[#6a6d70]">—</td>
+
+                    <td className="py-3 pr-4 align-top">{portfolioBudgetCell(portfolio.budget.minimo, "Minimo")}</td>
+                    <td className="py-3 pr-4 align-top">{portfolioBudgetCell(portfolio.budget.realistico, "Realistico")}</td>
+                    <td className="py-3 align-top">{portfolioBudgetCell(portfolio.budget.sfidante, "Sfidante")}</td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         )}

@@ -279,6 +279,91 @@ function formatPeriodLabel(start: string, end: string): string {
   return `${start} → ${end}`;
 }
 
+// Stesso rischio e stessa soluzione di fetchAllSnapshotRows in
+// app/(control)/performance/page.tsx: una risposta senza .range() esplicito
+// viene troncata da PostgREST oltre un limite di righe fisso lato server
+// (1.000 in questo progetto), senza errore - verificato dal vero che il
+// widget "Revenue per canale" di Palazzo Rollo mostrava un totale parziale
+// e non deterministico (order-dependent) proprio per questo, non solo per
+// la doppia extraction_date. v_channel_revenue_latest gia' deduplica per
+// extraction_date, ma resta comunque potenzialmente > 1.000 righe per
+// struttura/periodo (es. Palazzo Arco Cadura: 1.412 righe grezze, di cui
+// solo una per chiave logica sopravvive alla view - ma il conteggio finale
+// puo' comunque superare 1.000 su periodi lunghi con molti canali).
+const CHANNEL_REVENUE_PAGE_SIZE = 1000;
+
+type ChannelRevenueQueryRow = { channel: string; revenue_gross: number | string };
+
+async function fetchAllChannelRevenueRows(
+  sId: string,
+  start: string,
+  end: string
+): Promise<{ data: ChannelRevenueQueryRow[]; error: { message: string } | null }> {
+  const allRows: ChannelRevenueQueryRow[] = [];
+  let from = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from("v_channel_revenue_latest")
+      .select("channel, revenue_gross")
+      .eq("structure_id", sId)
+      .gte("period_start", start)
+      .lte("period_start", end)
+      .order("period_start", { ascending: true })
+      .order("channel", { ascending: true })
+      .range(from, from + CHANNEL_REVENUE_PAGE_SIZE - 1);
+
+    if (error) return { data: allRows, error };
+
+    allRows.push(...((data as ChannelRevenueQueryRow[]) || []));
+
+    if (!data || data.length < CHANNEL_REVENUE_PAGE_SIZE) break;
+    from += CHANNEL_REVENUE_PAGE_SIZE;
+  }
+
+  return { data: allRows, error: null };
+}
+
+// Stesso helper, stesso motivo, per Nazionalita': v_nationality_latest
+// dedupplica per extraction_date ma la risposta resta comunque soggetta
+// allo stesso limite implicito di PostgREST su periodi/anni con molte
+// nazionalita' diverse.
+const NATIONALITY_PAGE_SIZE = 1000;
+
+type NationalityQueryRow = { nationality: string; presences: number | string };
+
+async function fetchAllNationalityRows(
+  sId: string,
+  start: string,
+  end: string
+): Promise<{ data: NationalityQueryRow[]; error: { message: string } | null }> {
+  const allRows: NationalityQueryRow[] = [];
+  let from = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from("v_nationality_latest")
+      .select("nationality, presences")
+      .eq("structure_id", sId)
+      .gte("stay_date", start)
+      .lte("stay_date", end)
+      .order("stay_date", { ascending: true })
+      .order("nationality", { ascending: true })
+      .range(from, from + NATIONALITY_PAGE_SIZE - 1);
+
+    if (error) return { data: allRows, error };
+
+    allRows.push(...((data as NationalityQueryRow[]) || []));
+
+    if (!data || data.length < NATIONALITY_PAGE_SIZE) break;
+    from += NATIONALITY_PAGE_SIZE;
+  }
+
+  return { data: allRows, error: null };
+}
+
 export default function PerformanceStructureDrilldownPage({
   params,
 }: {
@@ -464,7 +549,7 @@ export default function PerformanceStructureDrilldownPage({
     // del tutto, non solo mostrata con "ND" - controllo una volta sola,
     // non ad ogni cambio di periodo.
     const { count: channelCount, error: channelCountError } = await supabase
-      .from("channel_revenue")
+      .from("v_channel_revenue_latest")
       .select("*", { count: "exact", head: true })
       .eq("structure_id", structureId);
 
@@ -473,7 +558,7 @@ export default function PerformanceStructureDrilldownPage({
     }
 
     const { count: nationalityCount, error: nationalityCountError } = await supabase
-      .from("guest_nationality")
+      .from("v_nationality_latest")
       .select("*", { count: "exact", head: true })
       .eq("structure_id", structureId);
 
@@ -562,29 +647,18 @@ export default function PerformanceStructureDrilldownPage({
         .eq("season_year", year)
         .eq("month", month),
       hasChannelData
-        ? supabase
-            .from("channel_revenue")
-            .select("channel, revenue_gross")
-            .eq("structure_id", structureId)
-            .gte("period_start", periodStart)
-            .lte("period_start", periodEnd)
+        ? fetchAllChannelRevenueRows(structureId, periodStart, periodEnd)
         : Promise.resolve({ data: [], error: null }),
       // Direct Booking Share vs anno precedente: SEMPRE consuntivo, mai vero
-      // SDLY - verificato empiricamente che channel_revenue non ha uno
-      // storico di estrazioni (un solo bd_import_id/extraction_date per
-      // ogni combinazione period_start/channel, a differenza di
-      // performance_daily_snapshot che ha una riga per ogni estrazione).
-      // Senza uno storico non esiste un "OTB a parita' di anticipo" da
-      // ricostruire: l'unico dato disponibile per l'anno scorso e' gia' il
-      // risultato finale, quindi qui non c'e' un tab SDLY - l'etichetta
-      // dice esplicitamente "Consuntivo anno prec." invece di "SDLY".
+      // SDLY - channel_revenue e' uno storico di estrazioni (v_channel_
+      // revenue_latest ne prende solo l'ultima per chiave logica), ma non
+      // esiste un "OTB a parita' di anticipo" da ricostruire per l'anno
+      // scorso: l'unico dato disponibile e' gia' il risultato finale di
+      // quell'extraction_date, quindi qui non c'e' un tab SDLY vero -
+      // l'etichetta dice esplicitamente "Consuntivo anno prec." invece di
+      // "SDLY".
       hasChannelData
-        ? supabase
-            .from("channel_revenue")
-            .select("channel, revenue_gross")
-            .eq("structure_id", structureId)
-            .gte("period_start", sdlyStart)
-            .lte("period_start", sdlyEnd)
+        ? fetchAllChannelRevenueRows(structureId, sdlyStart, sdlyEnd)
         : Promise.resolve({ data: [], error: null }),
       // Percentuali commissione per il toggle "Mostra netto" su Revenue per
       // canale - ancorate allo stesso mese di budgetAnchorDate/monthRange
@@ -601,22 +675,12 @@ export default function PerformanceStructureDrilldownPage({
             .eq("period_month", month)
         : Promise.resolve({ data: [], error: null }),
       hasNationalityData
-        ? supabase
-            .from("guest_nationality")
-            .select("nationality, presences")
-            .eq("structure_id", structureId)
-            .gte("stay_date", periodStart)
-            .lte("stay_date", periodEnd)
+        ? fetchAllNationalityRows(structureId, periodStart, periodEnd)
         : Promise.resolve({ data: [], error: null }),
       // Confronto Nazionalità 2026 vs 2025: stesso periodo SDLY gia'
       // calcolato per le altre sezioni della pagina.
       hasNationalityData
-        ? supabase
-            .from("guest_nationality")
-            .select("nationality, presences")
-            .eq("structure_id", structureId)
-            .gte("stay_date", sdlyStart)
-            .lte("stay_date", sdlyEnd)
+        ? fetchAllNationalityRows(structureId, sdlyStart, sdlyEnd)
         : Promise.resolve({ data: [], error: null }),
       // Disponibilita' storico Nazionalita' per l'ANNO del periodo SDLY
       // (non solo il periodo specifico): distingue "nessun dato importato
@@ -624,10 +688,11 @@ export default function PerformanceStructureDrilldownPage({
       // 2026 - dati precedenti non attendibili, mai importati) da "importato,
       // ma zero presenze in questo specifico periodo" (0 e' un dato reale,
       // non un'assenza di copertura). Verificato una volta sull'intero anno,
-      // non sul singolo periodo scelto nel calendario.
+      // non sul singolo periodo scelto nel calendario. head:true -> nessuna
+      // riga restituita, il limite PostgREST non si applica qui.
       hasNationalityData
         ? supabase
-            .from("guest_nationality")
+            .from("v_nationality_latest")
             .select("id", { count: "exact", head: true })
             .eq("structure_id", structureId)
             .gte("stay_date", `${sdlyStart.slice(0, 4)}-01-01`)

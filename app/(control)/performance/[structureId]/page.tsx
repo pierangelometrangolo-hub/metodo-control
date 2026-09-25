@@ -265,6 +265,12 @@ const COMPARISON_TAB_OPTIONS: { value: ComparisonTab; label: string }[] = [
 
 const DEFAULT_MONTH = monthRange(todayString());
 
+// Stesso pattern gia' in uso in performance/page.tsx (Vista d'insieme) per
+// le scorciatoie Mese/Anno - stesso range di 5 anni, stessa provenienza
+// (todayString, calcolato una sola volta al caricamento del modulo).
+const [TODAY_YEAR, TODAY_MONTH] = todayString().split("-").map(Number);
+const YEAR_OPTIONS = Array.from({ length: 5 }, (_, i) => TODAY_YEAR - 3 + i);
+
 function isFullMonth(start: string, end: string): boolean {
   const { start: monthStart, end: monthEnd } = monthRange(start);
   return start === monthStart && end === monthEnd;
@@ -398,9 +404,10 @@ export default function PerformanceStructureDrilldownPage({
 
   // Stato "grezzo" del calendario: durante la selezione di un intervallo
   // rangeEnd puo' essere null (primo click gia' fatto, in attesa del
-  // secondo). Nessuna modalita'/toggle esplicita: il calendario e' sempre
-  // in questo comportamento, un giorno singolo e' semplicemente un
-  // intervallo con inizio e fine coincidenti (due click sulla stessa data).
+  // secondo). Un giorno singolo e' semplicemente un intervallo con inizio
+  // e fine coincidenti (due click sulla stessa data). Le modalita' Mese/
+  // Anno (sotto) sono scorciatoie che scrivono su questi stessi due stati -
+  // mai una seconda source of truth.
   const [rangeStart, setRangeStart] = useState<string>(initialRange.start);
   const [rangeEnd, setRangeEnd] = useState<string | null>(initialRange.end);
 
@@ -417,6 +424,45 @@ export default function PerformanceStructureDrilldownPage({
       setConfirmedEnd(rangeEnd);
     }
   }, [rangeStart, rangeEnd]);
+
+  // Modalita' di navigazione del periodo: Intervallo (calendario libero,
+  // comportamento di sempre), Mese, Anno. Scrivono tutte su rangeStart/
+  // rangeEnd - "anno" e' la modalita' iniziale coerente quando si arriva
+  // da ?anno=YYYY (link da Budget), altrimenti si parte da Intervallo.
+  const [periodMode, setPeriodMode] = useState<"intervallo" | "mese" | "anno">(
+    annoParam && !Number.isNaN(Number(annoParam)) ? "anno" : "intervallo"
+  );
+  const [initialSelectedYear, initialSelectedMonth] = initialRange.start.split("-").map(Number);
+  const [selectedMonth, setSelectedMonth] = useState(initialSelectedMonth);
+  const [selectedYear, setSelectedYear] = useState(initialSelectedYear);
+
+  function applyMonthSelection(year: number, month: number) {
+    const { start, end } = monthRange(`${year}-${pad(month)}-01`);
+    setRangeStart(start);
+    setRangeEnd(end);
+  }
+
+  function applyYearSelection(year: number) {
+    setRangeStart(`${year}-01-01`);
+    setRangeEnd(`${year}-12-31`);
+  }
+
+  function switchPeriodMode(mode: "intervallo" | "mese" | "anno") {
+    setPeriodMode(mode);
+    if (mode === "mese") {
+      applyMonthSelection(selectedYear, selectedMonth);
+    } else if (mode === "anno") {
+      applyYearSelection(selectedYear);
+    } else if (!rangeEnd) {
+      // Si passa a Intervallo con una selezione lasciata a meta' (rangeEnd
+      // nullo, mai realmente accaduto perche' Mese/Anno impostano sempre
+      // coppie complete, ma copre anche il caso limite di partenza): torna
+      // all'ultimo periodo confermato invece di lasciare uno stato
+      // incompleto.
+      setRangeStart(confirmedStart);
+      setRangeEnd(confirmedEnd);
+    }
+  }
 
   const [periodSnapshots, setPeriodSnapshots] = useState<SnapshotRow[]>([]);
   // "Consuntivo anno prec.": v_snapshot_latest sullo stesso periodo di un
@@ -440,7 +486,14 @@ export default function PerformanceStructureDrilldownPage({
   // canali con una riga in channel_commission_rates per quel mese finiscono
   // in questa mappa, gli altri restano senza netto calcolato.
   const [channelCommissionRates, setChannelCommissionRates] = useState<Map<string, ChannelCommissionInfo>>(new Map());
+  const [channelCommissionRatesLy, setChannelCommissionRatesLy] = useState<Map<string, ChannelCommissionInfo>>(
+    new Map()
+  );
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
+  // Indipendente da "Mostra netto" - entrambi attivabili insieme, mai
+  // gated da canManage (channel_revenue non ha la stessa RLS rank>=2 di
+  // channel_commission_rates, a differenza di "Mostra netto").
+  const [showChannelSdlyCompare, setShowChannelSdlyCompare] = useState(false);
   const [hasNationalityData, setHasNationalityData] = useState(false);
   const [nationalityData, setNationalityData] = useState<NationalityDatum[]>([]);
   const [nationalityDataSdly, setNationalityDataSdly] = useState<NationalityDatum[]>([]);
@@ -579,6 +632,12 @@ export default function PerformanceStructureDrilldownPage({
     const sdlyStart = sdlyDate(periodStart);
     const sdlyEnd = sdlyDate(periodEnd);
     const { start: monthStart, end: monthEnd, year, month } = monthRange(budgetAnchorDate);
+    // Stessa ancora di year/month sopra ma traslata di un anno (sdlyStart
+    // e' gia' sdlyDate(periodStart) === sdlyDate(budgetAnchorDate)): stessa
+    // identica semantica "singolo mese anche per l'anno intero" gia' in uso
+    // per le commissioni correnti, solo applicata al periodo LY - MAI la
+    // percentuale 2026 riusata sul 2025.
+    const { year: sdlyYear, month: sdlyMonth } = monthRange(sdlyStart);
 
     const snapshotColumns =
       "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
@@ -617,6 +676,7 @@ export default function PerformanceStructureDrilldownPage({
       channelRes,
       channelSdlyRes,
       commissionRatesRes,
+      commissionRatesLyRes,
       nationalityRes,
       nationalitySdlyRes,
       nationalitySdlyYearCountRes,
@@ -674,6 +734,18 @@ export default function PerformanceStructureDrilldownPage({
             .eq("period_year", year)
             .eq("period_month", month)
         : Promise.resolve({ data: [], error: null }),
+      // Stessa query, stessa RLS, stesso gate canManage - solo period_year/
+      // period_month traslati sull'anno precedente (sdlyYear/sdlyMonth
+      // sopra). Se per quel canale non esiste una riga per il 2025, la barra
+      // LY resta lorda piena (nessun fallback sulla percentuale 2026).
+      hasChannelData && canManage
+        ? supabase
+            .from("channel_commission_rates")
+            .select("channel, commission_pct, source, source_reference")
+            .eq("structure_id", structureId)
+            .eq("period_year", sdlyYear)
+            .eq("period_month", sdlyMonth)
+        : Promise.resolve({ data: [], error: null }),
       hasNationalityData
         ? fetchAllNationalityRows(structureId, periodStart, periodEnd)
         : Promise.resolve({ data: [], error: null }),
@@ -708,6 +780,7 @@ export default function PerformanceStructureDrilldownPage({
     if (channelRes.error) setLoadError(channelRes.error.message);
     if (channelSdlyRes.error) setLoadError(channelSdlyRes.error.message);
     if (commissionRatesRes.error) setLoadError(commissionRatesRes.error.message);
+    if (commissionRatesLyRes.error) setLoadError(commissionRatesLyRes.error.message);
     if (nationalityRes.error) setLoadError(nationalityRes.error.message);
     if (nationalitySdlyRes.error) setLoadError(nationalitySdlyRes.error.message);
     if (nationalitySdlyYearCountRes.error) setLoadError(nationalitySdlyYearCountRes.error.message);
@@ -717,18 +790,26 @@ export default function PerformanceStructureDrilldownPage({
     setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
     setBudgets((budgetsRes.data as BudgetRow[]) || []);
 
-    setChannelCommissionRates(
+    type CommissionRow = {
+      channel: string;
+      commission_pct: number;
+      source: "fattura" | "stima";
+      source_reference: string | null;
+    };
+    const toCommissionMap = (rows: CommissionRow[] | null) =>
       new Map(
-        (
-          (commissionRatesRes.data as
-            | { channel: string; commission_pct: number; source: "fattura" | "stima"; source_reference: string | null }[]
-            | null) || []
-        ).map((r) => [
+        (rows || []).map((r) => [
           r.channel,
           { pct: Number(r.commission_pct), source: r.source, sourceReference: r.source_reference },
         ])
-      )
-    );
+      );
+
+    setChannelCommissionRates(toCommissionMap(commissionRatesRes.data as CommissionRow[] | null));
+    // Stessa risoluzione, stessa RLS, anno/mese traslati di uno sull'anno
+    // precedente (sdlyYear/sdlyMonth) - se per un canale non esiste nessuna
+    // riga per il 2025 la mappa semplicemente non lo contiene, la barra LY
+    // resta lorda piena (nessun fallback sulla percentuale corrente).
+    setChannelCommissionRatesLy(toCommissionMap(commissionRatesLyRes.data as CommissionRow[] | null));
 
     if (sdlyIsFullMonth) {
       const row = ((sdlyAsofRes.data as
@@ -1014,21 +1095,159 @@ export default function PerformanceStructureDrilldownPage({
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <AppCard
           title="Periodo di riferimento"
-          subtitle="Clicca una data per l'inizio, un'altra per la fine. Clicca due volte la stessa data per un giorno singolo."
+          subtitle={
+            periodMode === "intervallo"
+              ? "Clicca una data per l'inizio, un'altra per la fine. Clicca due volte la stessa data per un giorno singolo."
+              : periodMode === "mese"
+                ? "Il periodo copre automaticamente dal primo all'ultimo giorno del mese scelto."
+                : "Il periodo copre automaticamente dal 1 gennaio al 31 dicembre dell'anno scelto."
+          }
         >
-          <Calendar
-            value={rangeStart}
-            onChange={() => {}}
-            highlightedDates={highlightedDates}
-            anomalyDates={anomalyDates}
-            rangeMode
-            rangeStart={rangeStart}
-            rangeEnd={rangeEnd}
-            onRangeChange={(start, end) => {
-              setRangeStart(start ?? DEFAULT_MONTH.start);
-              setRangeEnd(end);
-            }}
-          />
+          <div className="mb-3 flex gap-1 rounded-[10px] bg-[#f0ece6] p-1">
+            {(
+              [
+                { key: "intervallo", label: "Intervallo" },
+                { key: "mese", label: "Mese" },
+                { key: "anno", label: "Anno" },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => switchPeriodMode(opt.key)}
+                className={`flex-1 rounded-[8px] py-1.5 text-[12px] font-semibold transition ${
+                  periodMode === opt.key
+                    ? "bg-white text-[#017A92] shadow-sm"
+                    : "text-[#6a6d70] hover:text-[#2B2D2F]"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {periodMode === "intervallo" && (
+            <Calendar
+              value={rangeStart}
+              onChange={() => {}}
+              highlightedDates={highlightedDates}
+              anomalyDates={anomalyDates}
+              rangeMode
+              rangeStart={rangeStart}
+              rangeEnd={rangeEnd}
+              onRangeChange={(start, end) => {
+                setRangeStart(start ?? DEFAULT_MONTH.start);
+                setRangeEnd(end);
+              }}
+            />
+          )}
+
+          {periodMode === "mese" && (
+            <div className="flex flex-wrap gap-3">
+              <div>
+                <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  Mese
+                </label>
+                <select
+                  value={selectedMonth}
+                  onChange={(e) => {
+                    const m = Number(e.target.value);
+                    setSelectedMonth(m);
+                    applyMonthSelection(selectedYear, m);
+                  }}
+                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
+                >
+                  {MONTH_LABELS.map((label, i) => (
+                    <option key={label} value={i + 1}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  Anno
+                </label>
+                <select
+                  value={selectedYear}
+                  onChange={(e) => {
+                    const y = Number(e.target.value);
+                    setSelectedYear(y);
+                    applyMonthSelection(y, selectedMonth);
+                  }}
+                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
+                >
+                  {YEAR_OPTIONS.map((y) => (
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {(selectedYear !== TODAY_YEAR || selectedMonth !== TODAY_MONTH) && (
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedYear(TODAY_YEAR);
+                      setSelectedMonth(TODAY_MONTH);
+                      applyMonthSelection(TODAY_YEAR, TODAY_MONTH);
+                    }}
+                    className="h-11 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+                  >
+                    Mese corrente
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {periodMode === "anno" && (
+            <div className="flex flex-wrap gap-3">
+              <div>
+                <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+                  Anno
+                </label>
+                <select
+                  value={selectedYear}
+                  onChange={(e) => {
+                    const y = Number(e.target.value);
+                    setSelectedYear(y);
+                    applyYearSelection(y);
+                  }}
+                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
+                >
+                  {YEAR_OPTIONS.map((y) => (
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedYear !== TODAY_YEAR && (
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedYear(TODAY_YEAR);
+                      applyYearSelection(TODAY_YEAR);
+                    }}
+                    className="h-11 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+                  >
+                    Anno corrente
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <p className="mt-3 text-[11px] leading-4 text-[#017A92]">
+            Intervallo selezionato: {confirmedStart} → {confirmedEnd}
+          </p>
+
           {loadError && <p className="mt-3 text-sm text-[#8a3a3a]">{loadError}</p>}
         </AppCard>
 
@@ -1208,22 +1427,37 @@ export default function PerformanceStructureDrilldownPage({
             title="Revenue per canale"
             subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
             action={
-              canManage ? (
+              <div className="flex flex-wrap items-center gap-4">
+                {canManage && (
+                  <label className="flex items-center gap-2 text-sm text-[#2B2D2F]">
+                    <input
+                      type="checkbox"
+                      checked={showNetChannelRevenue}
+                      onChange={(e) => setShowNetChannelRevenue(e.target.checked)}
+                    />
+                    Mostra netto
+                  </label>
+                )}
                 <label className="flex items-center gap-2 text-sm text-[#2B2D2F]">
                   <input
                     type="checkbox"
-                    checked={showNetChannelRevenue}
-                    onChange={(e) => setShowNetChannelRevenue(e.target.checked)}
+                    checked={showChannelSdlyCompare}
+                    onChange={(e) => setShowChannelSdlyCompare(e.target.checked)}
                   />
-                  Mostra netto
+                  Confronta anno precedente
                 </label>
-              ) : undefined
+              </div>
             }
           >
             <ChannelRevenueBars
               data={channelRevenue}
               commissionRates={channelCommissionRates}
+              commissionRatesLy={channelCommissionRatesLy}
               showNet={showNetChannelRevenue}
+              compareData={channelRevenueSdly}
+              showCompare={showChannelSdlyCompare}
+              currentYearLabel={periodStart.slice(0, 4)}
+              compareYearLabel={sdlyDate(periodStart).slice(0, 4)}
             />
           </AppCard>
 

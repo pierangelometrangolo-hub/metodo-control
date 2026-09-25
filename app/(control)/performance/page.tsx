@@ -36,6 +36,12 @@ import {
   sumSnapshots,
 } from "@/lib/performanceMetrics";
 import { aggregatePortfolioPerformance, PortfolioComparison } from "@/lib/performance/portfolio";
+import {
+  computeLikeForLike,
+  LikeForLikeComparison,
+  likeForLikeReasonLabels,
+  PortfolioMembership,
+} from "@/lib/performance/likeForLike";
 
 type StructureOption = {
   id: string;
@@ -168,6 +174,13 @@ export default function PerformanceOverviewPage() {
   // aggiornata via inserimento manuale con cadenza propria), ma un'unica
   // riga di sintesi nella descrizione, stesso trattamento per tutte.
   const [latestUploadDate, setLatestUploadDate] = useState<string | null>(null);
+  // Membership del portfolio (consulting_engagements) + l'anno selezionato
+  // al caricamento, per i confronti like-for-like del TOTALE METODO. null =
+  // membership non caricata: nessun confronto L4L mostrato.
+  const [portfolioMembership, setPortfolioMembership] = useState<{
+    engagements: PortfolioMembership[];
+    year: number;
+  } | null>(null);
 
   const isCurrentMonth = selectedYear === TODAY_YEAR && selectedMonth === TODAY_MONTH;
   // selectedMonth === 0 e' il valore sentinella per "Tutto l'anno" (i mesi
@@ -271,7 +284,7 @@ export default function PerformanceOverviewPage() {
       })
     );
 
-    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, lastExtractionRes, ...sdlyResults] = await Promise.all([
+    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, lastExtractionRes, membershipRes, ...sdlyResults] = await Promise.all([
       fetchAllSnapshotRows(start, end, ids, snapshotColumns),
       fetchAllSnapshotRows(lastYearStart, lastYearEnd, ids, snapshotColumns),
       supabase
@@ -284,6 +297,9 @@ export default function PerformanceOverviewPage() {
       // Data ultimo upload (ADR/RevPAR) per struttura: non dipende dal
       // periodo selezionato, e' una fotografia di freschezza del dato.
       supabase.rpc("fn_latest_extraction_per_structure", { p_structure_ids: ids }),
+      // Membership del portfolio per il like-for-like del TOTALE METODO:
+      // solo struttura e date dell'engagement, nessun dato economico.
+      supabase.from("consulting_engagements").select("structure_id, valid_from, valid_to").in("structure_id", ids),
       ...sdlyPromises,
     ]);
 
@@ -292,6 +308,7 @@ export default function PerformanceOverviewPage() {
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (importsRes.error) setLoadError(importsRes.error.message);
     if (lastExtractionRes.error) setLoadError(lastExtractionRes.error.message);
+    if (membershipRes.error) setLoadError(membershipRes.error.message);
     sdlyResults.forEach((res) => {
       if (res.error) setLoadError(res.error.message);
     });
@@ -371,6 +388,13 @@ export default function PerformanceOverviewPage() {
       };
     });
 
+    // Popolazione like-for-like: membership sugli ANNI interi (corrente e
+    // precedente), non sul mese visualizzato ne' sulla finestra dati SDLY.
+    setPortfolioMembership(
+      membershipRes.error
+        ? null
+        : { engagements: (membershipRes.data as PortfolioMembership[]) || [], year: selectedYear }
+    );
     setRows(nextRows);
     setLoading(false);
   }
@@ -394,19 +418,82 @@ export default function PerformanceOverviewPage() {
   // periodo, stesso snapshot per struttura), nessuna query aggiuntiva.
   const portfolio = aggregatePortfolioPerformance(rows, { hasLoadError: loadError !== "" });
   const portfolioOf = `${portfolio.totalStructures}`;
+  // LY e SDLY del totale: like-for-like sulla membership del portfolio nei
+  // due anni confrontati (non sulla presenza di dati storici). Stessa
+  // popolazione per LY e SDLY; i dati restano quelli del periodo scelto.
+  // Budget resta sul confronto per presenza dato: e' nello stesso anno.
+  const l4lInputs = (pickReference: (row: StructureRowData) => number | null) =>
+    rows.map((row) => ({
+      id: row.structure.id,
+      name: row.structure.name,
+      actual: row.monthRevenue,
+      reference: pickReference(row),
+    }));
+  const l4lLastYear = portfolioMembership
+    ? computeLikeForLike(
+        l4lInputs((row) => row.lastYearMonthRevenue),
+        portfolioMembership.engagements,
+        portfolioMembership.year,
+        portfolioMembership.year - 1
+      )
+    : null;
+  const l4lSdly = portfolioMembership
+    ? computeLikeForLike(
+        l4lInputs((row) => row.sdlyMonthRevenue),
+        portfolioMembership.engagements,
+        portfolioMembership.year,
+        portfolioMembership.year - 1
+      )
+    : null;
   const portfolioCoverageParts = [
     `Budget ${portfolio.budget.minimo?.coverage ?? 0}/${portfolioOf}`,
-    `LY ${portfolio.lastYear?.coverage ?? 0}/${portfolioOf}`,
-    `SDLY ${portfolio.sdly?.coverage ?? 0}/${portfolioOf}`,
+    `L4L LY ${l4lLastYear?.included.length ?? 0}/${portfolioOf}`,
+    `L4L SDLY ${l4lSdly?.included.length ?? 0}/${portfolioOf}`,
   ];
   // "su x/y" sotto il valore solo se il confronto copre meno strutture del
   // totale: a colpo d'occhio si vede che il riferimento non e' 6/6.
-  const portfolioCoverageNote = (comparison: PortfolioComparison) =>
-    comparison.coverage < portfolio.totalStructures ? (
+  const portfolioCoverageNote = (coverage: number) =>
+    coverage < portfolio.totalStructures ? (
       <p className="mt-0.5 text-[11px] font-normal text-[#6a6d70]">
-        su {comparison.coverage}/{portfolioOf}
+        su {coverage}/{portfolioOf}
       </p>
     ) : null;
+  const likeForLikeDetail = (l4l: LikeForLikeComparison, referenceLabel: string) => (
+    <>
+      <p className="font-semibold">
+        Like-for-like: {l4l.included.length}/{l4l.total} strutture comparabili
+      </p>
+      <p>L4L confronta le sole strutture presenti nel portfolio Metodo in entrambi gli anni confrontati.</p>
+      <p className="mt-1">
+        Incluse: {l4l.included.length > 0 ? l4l.included.map((s) => s.name).join(", ") : "nessuna"}
+      </p>
+      {/* Escluse raggruppate per motivo: il tooltip cresce per motivo, non
+          per struttura, e resta dentro la tabella anche con piu' esclusioni. */}
+      {Array.from(
+        l4l.excluded.reduce((groups, s) => {
+          const reason = s.reasons.map((r) => likeForLikeReasonLabels[r]).join(" e ");
+          groups.set(reason, [...(groups.get(reason) || []), s.name]);
+          return groups;
+        }, new Map<string, string[]>())
+      ).map(([reason, names]) => (
+        <p key={reason} className="mt-1">
+          Escluse ({reason}): {names.join(", ")}
+        </p>
+      ))}
+      {l4l.actual !== null && l4l.reference !== null && (
+        <>
+          <p className="mt-1">
+            OTB {periodLabel} (strutture incluse): {formatCurrency(l4l.actual)}
+          </p>
+          <p>
+            {referenceLabel}: {formatCurrency(l4l.reference)}
+          </p>
+          <p className="mt-1">Differenza: {formatSignedCurrency(l4l.actual - l4l.reference)}</p>
+          <p>Variazione: {formatDelta(l4l.actual, l4l.reference).text}</p>
+        </>
+      )}
+    </>
+  );
   const portfolioBudgetCell = (comparison: PortfolioComparison | null, label: string) =>
     comparison ? (
       <>
@@ -417,7 +504,7 @@ export default function PerformanceOverviewPage() {
           <p>OTB stesse strutture: {formatCurrency(comparison.actual)}</p>
           <p>Variazione: {formatDelta(comparison.actual, comparison.reference).text}</p>
         </CellTooltip>
-        {portfolioCoverageNote(comparison)}
+        {portfolioCoverageNote(comparison.coverage)}
       </>
     ) : (
       ND
@@ -779,36 +866,31 @@ export default function PerformanceOverviewPage() {
                     </td>
 
                     {[
-                      { comparison: portfolio.sdly, label: `SDLY ${lastYearPeriodLabel} (a parità di anticipo)` },
-                      { comparison: portfolio.lastYear, label: `Consuntivo chiuso ${lastYearPeriodLabel}` },
-                    ].map(({ comparison, label }) => (
+                      { l4l: l4lSdly, label: `SDLY ${lastYearPeriodLabel} (a parità di anticipo)` },
+                      { l4l: l4lLastYear, label: `Consuntivo chiuso ${lastYearPeriodLabel}` },
+                    ].map(({ l4l, label }) => (
                       <td key={label} className="py-3 pr-4 align-top">
-                        {comparison ? (
+                        {l4l ? (
                           <>
                             <CellTooltip
                               placement="top"
+                              widthClassName="w-80"
                               trigger={
-                                <span>
-                                  {formatCurrency(comparison.reference)}{" "}
-                                  <span className={formatDelta(comparison.actual, comparison.reference).colorClass}>
-                                    ({formatDelta(comparison.actual, comparison.reference).text})
+                                l4l.actual !== null && l4l.reference !== null ? (
+                                  <span>
+                                    {formatCurrency(l4l.reference)}{" "}
+                                    <span className={formatDelta(l4l.actual, l4l.reference).colorClass}>
+                                      ({formatDelta(l4l.actual, l4l.reference).text})
+                                    </span>
                                   </span>
-                                </span>
+                                ) : (
+                                  <span className="text-[#6a6d70]">{ND}</span>
+                                )
                               }
                             >
-                              <p>
-                                Confronto omogeneo su {comparison.coverage}/{portfolioOf} strutture con entrambi i dati
-                              </p>
-                              <p className="mt-1">OTB {periodLabel} (stesse strutture): {formatCurrency(comparison.actual)}</p>
-                              <p>
-                                {label}: {formatCurrency(comparison.reference)}
-                              </p>
-                              <p className="mt-1">
-                                Differenza: {formatSignedCurrency(comparison.actual - comparison.reference)}
-                              </p>
-                              <p>Variazione: {formatDelta(comparison.actual, comparison.reference).text}</p>
+                              {likeForLikeDetail(l4l, label)}
                             </CellTooltip>
-                            {portfolioCoverageNote(comparison)}
+                            {portfolioCoverageNote(l4l.included.length)}
                           </>
                         ) : (
                           <span className="text-[#6a6d70]">{ND}</span>

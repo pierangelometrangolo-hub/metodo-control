@@ -17,6 +17,10 @@ type CellTooltipProps = {
   // Default "left" invariato. "right" per le ultime colonne di una tabella,
   // dove un tooltip largo 16rem allineato a sinistra uscirebbe dal bordo.
   align?: "left" | "right";
+  // Default "w-64" invariato. Piu' largo per tooltip con molto testo (es.
+  // like-for-like del TOTALE METODO), cosi' resta basso e non viene
+  // tagliato dal contenitore scrollabile.
+  widthClassName?: string;
 };
 
 // Stesso pattern hover/tap di InfoTooltip, ma pensato per avvolgere il
@@ -29,6 +33,7 @@ export function CellTooltip({
   className = "block w-full",
   placement = "bottom",
   align = "left",
+  widthClassName = "w-64",
 }: CellTooltipProps) {
   const [open, setOpen] = useState(false);
 
@@ -56,7 +61,7 @@ export function CellTooltip({
 
       <span
         role="tooltip"
-        className={`absolute ${align === "right" ? "right-0" : "left-0"} ${placement === "top" ? "bottom-full mb-2" : "top-full mt-2"} z-10 w-64 rounded-[10px] border border-[#e7dfd8] bg-white p-3 text-[11px] font-normal normal-case leading-5 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
+        className={`absolute ${align === "right" ? "right-0" : "left-0"} ${placement === "top" ? "bottom-full mb-2" : "top-full mt-2"} z-10 ${widthClassName} rounded-[10px] border border-[#e7dfd8] bg-white p-3 text-[11px] font-normal normal-case leading-5 text-[#2B2D2F] shadow-[0_8px_20px_rgba(43,45,47,0.14)] transition-opacity ${
           open ? "opacity-100" : "pointer-events-none opacity-0 group-hover:opacity-100"
         }`}
       >

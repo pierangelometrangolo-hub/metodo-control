@@ -23,6 +23,8 @@ function fakeQueryBuilder(result: { data: unknown; error: unknown }) {
   const builder: Record<string, unknown> = {
     select: () => builder,
     eq: () => builder,
+    gte: () => builder,
+    lte: () => builder,
     order: () => builder,
     limit: () => builder,
     maybeSingle: async () => result,
@@ -52,7 +54,9 @@ function makeFakeSupabase() {
       if (table === "performance_daily_snapshot" || table === "guest_nationality") {
         // Nessun dato legacy pre-Foundation in nessuno di questi test.
         return {
-          select: () => ({ eq: () => ({ eq: () => ({ limit: () => Promise.resolve({ data: [], error: null }) }) }) }),
+          // Nessuna riga legacy: stessa risposta vuota anche con i filtri
+          // .gte/.lte sullo scope soggiorno Montecallini.
+          select: () => fakeQueryBuilder({ data: [], error: null }),
         };
       }
       throw new Error(`from("${table}") non atteso in questo test`);

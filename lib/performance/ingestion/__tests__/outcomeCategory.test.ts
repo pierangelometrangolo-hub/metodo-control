@@ -82,6 +82,14 @@ describe("describeOutcome", () => {
     );
   });
 
+  it("conflitto per intervallo di soggiorno parzialmente sovrapposto", () => {
+    const outcome: IngestionOutcome = { status: "conflict", conflictKind: "scope_overlap", eventId: "e6", conflictingEventId: "e0" };
+    expect(describeOutcome(outcome)).toBe(
+      "Conflitto: esiste già un import completato per questa struttura/data su un intervallo di soggiorno parzialmente sovrapposto. Nessuna scrittura."
+    );
+    expect(categorizeOutcome(outcome.status)).toBe("conflict");
+  });
+
   it("duplicati moderni invariati", () => {
     expect(describeOutcome({ status: "skipped_duplicate", reason: "exact_duplicate", eventId: "e4" })).toMatch(/^Duplicato esatto/);
     expect(describeOutcome({ status: "skipped_duplicate", reason: "semantic_duplicate", eventId: "e5" })).toMatch(/^Duplicato semantico/);

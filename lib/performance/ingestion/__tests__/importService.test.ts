@@ -4,6 +4,7 @@ import * as path from "path";
 import { ingestMontecalliniBatch, ingestSingleFile } from "../importService";
 import { parseBdExportCsv } from "../../../bdExportParser";
 import { MONTECALLINI_STRUCTURE_NAME } from "../../../performanceImportRouting";
+import { parseMontecalliniPmsCsv } from "../../../montecalliniPmsParser";
 import { LEGACY_SNAPSHOT_CONFLICT_MESSAGE } from "../repository";
 import { StructureAlias, StructureOption } from "../types";
 
@@ -42,28 +43,43 @@ function fakeQueryBuilder(result: { data: unknown; error: unknown }) {
 // righe legacy per data (letto da loadLegacySnapshotRows/
 // loadLegacyNationalityRows via .order().range()). Una data presente solo
 // in legacyExtractionDates ha un contenuto sicuramente diverso da
-// qualunque file di test (riga sentinella 1999-01-01) - cosi' i test
-// storici "legacy presente -> conflict" mantengono il loro significato.
+// qualunque file di test (riga sentinella, datata al primo giorno dello
+// scope richiesto se la query e' limitata a un intervallo di soggiorno,
+// altrimenti 1999-01-01) - cosi' i test storici "legacy presente ->
+// conflict" mantengono il loro significato. I filtri .gte/.lte su
+// stay_date (scope soggiorno Montecallini) vengono applicati alle righe.
 type LegacyRow = Record<string, unknown>;
 
-function sentinelLegacyRow(table: string): LegacyRow {
+function sentinelLegacyRow(table: string, stayDate = "1999-01-01"): LegacyRow {
   return table === "guest_nationality"
-    ? { stay_date: "1999-01-01", nationality: "ZZ", presences: 1 }
-    : { stay_date: "1999-01-01", revenue_total: 1, rooms_sold: 1, rooms_available: 1, arrivals: null, presences: 1 };
+    ? { stay_date: stayDate, nationality: "ZZ", presences: 1 }
+    : { stay_date: stayDate, revenue_total: 1, rooms_sold: 1, rooms_available: 1, arrivals: null, presences: 1 };
 }
 
 function fakeLegacyTableBuilder(table: string, legacyExtractionDates: string[], legacyRowsByDate: Record<string, LegacyRow[]>) {
   let capturedExtractionDate: string | undefined;
   let range: [number, number] | null = null;
+  let stayFrom: string | undefined;
+  let stayTo: string | undefined;
   const rowsFor = (date: string | undefined): LegacyRow[] => {
     if (date === undefined) return [];
-    if (legacyRowsByDate[date]) return legacyRowsByDate[date];
-    return legacyExtractionDates.includes(date) ? [sentinelLegacyRow(table)] : [];
+    const all = legacyRowsByDate[date] ?? (legacyExtractionDates.includes(date) ? [sentinelLegacyRow(table, stayFrom)] : []);
+    return all.filter(
+      (r) => (stayFrom === undefined || String(r.stay_date) >= stayFrom) && (stayTo === undefined || String(r.stay_date) <= stayTo)
+    );
   };
   const builder: Record<string, unknown> = {
     select: () => builder,
     eq: (col: string, val: string) => {
       if (col === "extraction_date") capturedExtractionDate = val;
+      return builder;
+    },
+    gte: (col: string, val: string) => {
+      if (col === "stay_date") stayFrom = val;
+      return builder;
+    },
+    lte: (col: string, val: string) => {
+      if (col === "stay_date") stayTo = val;
       return builder;
     },
     order: () => builder,
@@ -83,9 +99,23 @@ function fakeLegacyTableBuilder(table: string, legacyExtractionDates: string[], 
   return builder;
 }
 
+type FakeImportedEvent = {
+  id: string;
+  source_checksum: string | null;
+  normalized_content_hash: string | null;
+  stay_date_start?: string | null;
+  stay_date_end?: string | null;
+  // Solo per il fake: a quale extraction_date appartiene l'evento (default:
+  // qualunque, comportamento dei test storici con un solo priorEvent).
+  extraction_date?: string;
+};
+
 type FakeSupabaseOptions = {
   aliases: StructureAlias[];
-  priorEvent: { id: string; source_checksum: string | null; normalized_content_hash: string | null } | null;
+  priorEvent: FakeImportedEvent | null;
+  // Piu' eventi 'imported' (piu' recente per primo), filtrati per
+  // extraction_date se valorizzata sull'evento.
+  priorEvents?: FakeImportedEvent[];
   rpcResult?: { data?: unknown; error?: unknown };
   // extraction_date per cui performance_daily_snapshot/guest_nationality
   // devono risultare gia' popolate (dati legacy pre-Foundation) - default
@@ -110,12 +140,23 @@ function makeFakeSupabase(opts: FakeSupabaseOptions) {
         });
       }
       if (table === "performance_import_events") {
-        return {
-          select: () =>
-            fakeQueryBuilder({
-              data: opts.priorEvent,
+        const events = opts.priorEvents ?? (opts.priorEvent ? [opts.priorEvent] : []);
+        let eventExtractionDate: string | undefined;
+        const eventsBuilder: Record<string, unknown> = {
+          select: () => eventsBuilder,
+          eq: (col: string, val: string) => {
+            if (col === "extraction_date") eventExtractionDate = val;
+            return eventsBuilder;
+          },
+          order: () => eventsBuilder,
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+            Promise.resolve({
+              data: events.filter((e) => e.extraction_date === undefined || e.extraction_date === eventExtractionDate),
               error: null,
-            }),
+            }).then(resolve, reject),
+        };
+        return {
+          select: () => eventsBuilder,
           insert: (payload: Record<string, unknown>) => {
             importEventInserts.push(payload);
             const eventId = `evt-${nextEventId++}`;
@@ -871,5 +912,209 @@ describe("Hardening: guardia legacy dentro la RPC come rete di sicurezza sulla r
     expect(fakeSupabase.__calls().rpcCallCount).toBe(1);
     expect(fakeSupabase.__calls().uploadCallCount).toBe(1);
     expect(fakeSupabase.__calls().importEventInserts).toHaveLength(0); // nessun audit lato client per un import riuscito - solo la RPC scrive l'evento 'imported'
+  });
+});
+
+// ============ Scope soggiorno Montecallini (migration 20260930130000) ============
+// Caso reale 30/09/2026: settembre e ottobre caricati in momenti diversi
+// dello stesso giorno hanno la STESSA extraction_date per CY (oggi) e SDLY
+// (oggi meno un anno). La chiave duplicato/conflitto include ora
+// l'intervallo di soggiorno. Il pre-check TS e' osservabile da: upload
+// (solo su decisione "commit"), eventi legacy scritti lato client, RPC
+// chiamata o no. L'esito finale resta quello della RPC (qui mockata).
+describe("Montecallini: scope soggiorno nella chiave duplicato/conflitto", () => {
+  const MC_ID = "33333333-3333-3333-3333-333333333333";
+  const mcStructures: StructureOption[] = [{ id: MC_ID, name: MONTECALLINI_STRUCTURE_NAME }];
+  type Row = { stayDate: string; revenueTotal: number; roomsSold: number; roomsAvailable: number; arrivals: null; presences: number };
+  const month = (y: number, m: number, seed = 0): Row[] =>
+    Array.from({ length: new Date(Date.UTC(y, m, 0)).getUTCDate() }, (_, i) => ({
+      stayDate: `${y}-${String(m).padStart(2, "0")}-${String(i + 1).padStart(2, "0")}`,
+      revenueTotal: 1000 + i + seed,
+      roomsSold: 10,
+      roomsAvailable: 20,
+      arrivals: null,
+      presences: 20,
+    }));
+  const asLegacy = (rows: Row[]) => rows.map(toLegacySnapshotRow);
+  const imported = { data: { status: "imported", event_id: "evt-rpc", imported_count: 31, bd_import_ids: ["bd-1"] }, error: null };
+
+  async function ingest(fake: ReturnType<typeof makeFakeSupabase>, groups: { kind: "cy" | "sdly" | "ly"; rows: Row[] }[], name = "PlanningForecast.csv") {
+    const file = makeFile(name, name);
+    const result = await ingestMontecalliniBatch({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fake as any,
+      selectedStructureId: MC_ID,
+      structures: mcStructures,
+      uploadedBy: "user-1",
+      today: "2026-09-30",
+      files: [{ fileName: file.name, file, content: new TextEncoder().encode(name).buffer, groups }],
+    });
+    if (result.status !== "ok") throw new Error(`batch non ok: ${result.status}`);
+    return (k: string) => result.batches.find((b) => b.kind === k)!.outcome;
+  }
+
+  const septCyEvent = {
+    id: "evt-sett-cy",
+    source_checksum: "batch-sett",
+    normalized_content_hash: "hash-sett-cy",
+    stay_date_start: "2026-09-01",
+    stay_date_end: "2026-09-30",
+    extraction_date: "2026-09-30",
+  };
+
+  it("3. ottobre CY con settembre CY gia' importato sulla stessa extraction_date -> commit (le righe di settembre non sono legacy dell'ottobre)", async () => {
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      priorEvents: [septCyEvent],
+      // Righe di settembre (scritte dall'import moderno) sulla stessa extraction_date.
+      legacyRowsByDate: { "2026-09-30": asLegacy(month(2026, 9)) },
+      rpcResult: imported,
+    });
+    const outcome = await ingest(fake, [{ kind: "cy", rows: month(2026, 10) }]);
+    expect(outcome("cy").status).toBe("imported");
+    expect(fake.__calls().uploadCallCount).toBe(1); // decisione pre-check = commit
+    expect(fake.__calls().rpcParams).toMatchObject({ p_extraction_date: "2026-09-30", p_dataset: "montecallini_pms" });
+    expect(fake.__calls().importEventInserts).toHaveLength(0); // nessun conflitto legacy lato client
+  });
+
+  it("4. ottobre SDLY con settembre SDLY gia' importato sulla stessa extraction_date -> commit", async () => {
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      priorEvents: [{ ...septCyEvent, id: "evt-sett-sdly", stay_date_start: "2025-09-01", stay_date_end: "2025-09-30", extraction_date: "2025-09-30" }],
+      legacyRowsByDate: { "2025-09-30": asLegacy(month(2025, 9)) },
+      rpcResult: imported,
+    });
+    const outcome = await ingest(fake, [{ kind: "sdly", rows: month(2025, 10) }]);
+    expect(outcome("sdly").status).toBe("imported");
+    expect(fake.__calls().uploadCallCount).toBe(1);
+    expect(fake.__calls().rpcParams).toMatchObject({ p_extraction_date: "2025-09-30" });
+  });
+
+  it("1-2. stesso settembre CY: il pre-check non decide commit (nessun upload), l'esito duplicato/conflitto arriva dalla RPC", async () => {
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      priorEvents: [septCyEvent],
+      rpcResult: { data: { status: "conflict", reason: "content_conflict", event_id: "evt-c", conflicting_event_id: "evt-sett-cy" }, error: null },
+    });
+    const outcome = await ingest(fake, [{ kind: "cy", rows: month(2026, 9, 7) }]);
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    expect(outcome("cy")).toMatchObject({ status: "conflict", conflictKind: "content", conflictingEventId: "evt-sett-cy" });
+  });
+
+  it("9. scope parzialmente sovrapposto -> nessun upload, conflitto scope_overlap con messaggio dedicato", async () => {
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      priorEvents: [septCyEvent],
+      rpcResult: { data: { status: "conflict", reason: "scope_overlap", event_id: "evt-o", conflicting_event_id: "evt-sett-cy" }, error: null },
+    });
+    const rows = [...month(2026, 9), ...month(2026, 10)].slice(14, 45); // 15/09 -> 15/10
+    const outcome = await ingest(fake, [{ kind: "cy", rows }]);
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    expect(outcome("cy")).toMatchObject({ status: "conflict", conflictKind: "scope_overlap" });
+  });
+
+  it("5. LY legacy identico nello scope -> legacy_equivalent, evento con scope soggiorno, nessuna RPC", async () => {
+    const ly = month(2025, 10);
+    const fake = makeFakeSupabase({ aliases: [], priorEvent: null, legacyRowsByDate: { "2025-11-01": asLegacy(ly) } });
+    const outcome = await ingest(fake, [{ kind: "ly", rows: ly }]);
+    expect(outcome("ly")).toMatchObject({ status: "skipped_duplicate", reason: "legacy_equivalent" });
+    expect(fake.__calls().rpcCallCount).toBe(0);
+    expect(fake.__calls().importEventInserts[0]).toMatchObject({
+      extraction_date: "2025-11-01",
+      error_code: "legacy_equivalent",
+      stay_date_start: "2025-10-01",
+      stay_date_end: "2025-10-31",
+    });
+  });
+
+  it("6. LY legacy stesso scope, contenuto diverso -> conflict legacy, nessuna RPC", async () => {
+    const fake = makeFakeSupabase({ aliases: [], priorEvent: null, legacyRowsByDate: { "2025-11-01": asLegacy(month(2025, 10, 3)) } });
+    const outcome = await ingest(fake, [{ kind: "ly", rows: month(2025, 10) }]);
+    expect(outcome("ly")).toMatchObject({ status: "conflict", conflictKind: "legacy" });
+    expect(fake.__calls().rpcCallCount).toBe(0);
+  });
+
+  it("6b. righe legacy di un altro mese sulla stessa extraction_date non bloccano un mese diverso", async () => {
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      legacyRowsByDate: { "2025-12-01": asLegacy(month(2025, 10)) },
+      rpcResult: imported,
+    });
+    const outcome = await ingest(fake, [{ kind: "ly", rows: month(2025, 11) }]);
+    expect(outcome("ly").status).toBe("imported");
+    expect(fake.__calls().rpcCallCount).toBe(1);
+  });
+
+  it("7. due mesi nello stesso batch (set + ott) senza import precedenti -> un commit per kind con scope 01/09-31/10", async () => {
+    const fake = makeFakeSupabase({ aliases: [], priorEvent: null, rpcResult: imported });
+    const outcome = await ingest(fake, [{ kind: "cy", rows: [...month(2026, 9), ...month(2026, 10)] }]);
+    expect(outcome("cy").status).toBe("imported");
+    const rows = fake.__calls().rpcParams!.p_snapshot_rows as { stay_date: string }[];
+    expect(rows[0].stay_date).toBe("2026-09-01");
+    expect(rows[rows.length - 1].stay_date).toBe("2026-10-31");
+  });
+
+  it("10. evento storico senza scope sulla stessa chiave -> regola storica: pre-check non committa (nessun upload)", async () => {
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      priorEvents: [{ id: "evt-storico", source_checksum: "x", normalized_content_hash: "y", extraction_date: "2026-09-30" }],
+      rpcResult: { data: { status: "conflict", reason: "content_conflict", event_id: "evt-c", conflicting_event_id: "evt-storico" }, error: null },
+    });
+    const outcome = await ingest(fake, [{ kind: "cy", rows: month(2026, 10) }]);
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    expect(outcome("cy")).toMatchObject({ status: "conflict", conflictKind: "content" });
+  });
+
+  // 8. Regressione sul file reale: .local-imports/ e' gitignored, copiare li'
+  // i file per eseguirlo (stesso schema degli altri test su file reali).
+  const REAL_DIR = path.join(process.cwd(), ".local-imports", "montecallini_2026-09-30");
+  const SEPT_FILE = "PlanningForecast sett (2).csv";
+  const realAvailable = fs.existsSync(path.join(REAL_DIR, SEPT_FILE));
+
+  it.skipIf(!realAvailable)("8. PlanningForecast sett (2).csv ricaricato: CY/SDLY stesso scope e stesso batch (nessun upload), LY legacy_equivalent", async () => {
+    const buf = fs.readFileSync(path.join(REAL_DIR, SEPT_FILE));
+    const parsed = parseMontecalliniPmsCsv(buf.toString("latin1"));
+    const byKind = (k: string) => parsed.rows.filter((r) => r.kind === k) as unknown as Row[];
+    // Hash reali dell'import del 30/09 09:23 (eventi 3cedd686 / 861cd6d2).
+    const BATCH = "2d4e1309f332d4a79dc96aa5f3d1010a21284d1c865f75f91a951422c865d233";
+    const fake = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      priorEvents: [
+        { id: "3cedd686", source_checksum: BATCH, normalized_content_hash: "4ee99f309f337c7dcecd6831e90c4684eeb4cf76aa4e8652a014ece383985fa9", stay_date_start: "2026-09-01", stay_date_end: "2026-09-30", extraction_date: "2026-09-30" },
+        { id: "861cd6d2", source_checksum: BATCH, normalized_content_hash: "cbb5d5b9b37dc9463a3d1191da90dd0db4970421fc794156c50adc22a43e1632", stay_date_start: "2025-09-01", stay_date_end: "2025-09-30", extraction_date: "2025-09-30" },
+      ],
+      legacyRowsByDate: { "2025-10-01": asLegacy(byKind("ly")) },
+      rpcResult: { data: { status: "skipped_duplicate", reason: "exact_duplicate", event_id: "evt-dup" }, error: null },
+    });
+    const file = new File([buf], SEPT_FILE, { type: "text/csv" });
+    const result = await ingestMontecalliniBatch({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fake as any,
+      selectedStructureId: MC_ID,
+      structures: mcStructures,
+      uploadedBy: "user-1",
+      today: "2026-09-30",
+      files: [{
+        fileName: SEPT_FILE,
+        file,
+        content: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+        groups: (["cy", "sdly", "ly"] as const).map((kind) => ({ kind, rows: byKind(kind) })),
+      }],
+    });
+    if (result.status !== "ok") throw new Error("batch non ok");
+    const out = (k: string) => result.batches.find((b) => b.kind === k)!.outcome;
+    expect(out("cy")).toMatchObject({ status: "skipped_duplicate", reason: "exact_duplicate" });
+    expect(out("sdly")).toMatchObject({ status: "skipped_duplicate", reason: "exact_duplicate" });
+    expect(out("ly")).toMatchObject({ status: "skipped_duplicate", reason: "legacy_equivalent" });
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    // Il batch_hash calcolato dal servizio e' quello reale dell'import del 30/09.
+    expect(fake.__calls().rpcParams).toMatchObject({ p_source_checksum: BATCH });
   });
 });

@@ -5,7 +5,7 @@ import { Dataset, IngestionOutcome, NormalizedNationalityRow, NormalizedSnapshot
 import { sha256Hex } from "./hashing";
 import { computeBatchHash, computeNationalityContentHash, computeSnapshotContentHash } from "./normalization";
 import { resolveMontecalliniStructure, resolveStructureForDataset, structureResolutionErrorMessage } from "./routing";
-import { decideImportAction, decideLegacyAction } from "./conflictPolicy";
+import { decideImportAction, decideLegacyAction, StayScope, stayScopeOf } from "./conflictPolicy";
 import {
   CommitImportResult,
   checkLegacySnapshotExists,
@@ -93,7 +93,8 @@ function mapCommitResult(result: CommitImportResult): IngestionOutcome {
   // contro un import Foundation.
   return {
     status: "conflict",
-    conflictKind: result.conflicting_event_id === null ? "legacy" : "content",
+    conflictKind:
+      result.conflicting_event_id === null ? "legacy" : result.reason === "scope_overlap" ? "scope_overlap" : "content",
     eventId: result.event_id,
     conflictingEventId: result.conflicting_event_id,
   };
@@ -116,9 +117,17 @@ async function resolveLegacySnapshot(
     sourceChecksum: string;
     normalizedContentHash: string;
     batchHash: string | null;
+    // Solo montecallini_pms: il confronto legacy e' limitato alle righe
+    // dentro l'intervallo di soggiorno del file.
+    stayScope?: StayScope | null;
   }
 ): Promise<IngestionOutcome | null> {
-  const scope = { structureId: event.structureId, extractionDate: event.extractionDate, dataset: event.dataset };
+  const scope = {
+    structureId: event.structureId,
+    extractionDate: event.extractionDate,
+    dataset: event.dataset,
+    stayScope: event.stayScope ?? null,
+  };
   const legacyExists = await checkLegacySnapshotExists(supabase, scope);
   if (!legacyExists) return null;
 
@@ -569,6 +578,10 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
     for (const batch of batches) {
       const extractionDate = resolveGroupExtractionDate("montecallini_pms", batch.kind, batch.rows, today, today);
       const normalizedContentHash = await computeSnapshotContentHash(batch.rows);
+      // Scope soggiorno del kind: parte della chiave duplicato/conflitto per
+      // montecallini_pms (mesi diversi sulla stessa extraction_date non sono
+      // lo stesso snapshot) - stessa regola della RPC.
+      const stayScope = stayScopeOf(batch.rows);
 
       // Un run PER KIND (batch.rows e' gia' il singolo kind cy/sdly/ly),
       // cosi' GR-C06 rileva i duplicati di stay_date dentro il kind
@@ -605,6 +618,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
         structureId: selectedStructureId,
         extractionDate,
         dataset: "montecallini_pms",
+        stayScope,
       });
 
       if (!priorEvent) {
@@ -621,6 +635,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
           sourceChecksum: overallBatchHash,
           normalizedContentHash,
           batchHash: overallBatchHash,
+          stayScope,
         });
         if (legacyOutcome) {
           results.push({ kind: batch.kind, outcome: { ...legacyOutcome, guardrailFindings } });
@@ -628,7 +643,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
         }
       }
 
-      const decision = decideImportAction(priorEvent, { sourceChecksum: overallBatchHash, normalizedContentHash });
+      const decision = decideImportAction(priorEvent, { sourceChecksum: overallBatchHash, normalizedContentHash }, stayScope);
 
       let sourceFiles: { file_name: string; file_path: string }[];
       if (decision.action === "commit") {

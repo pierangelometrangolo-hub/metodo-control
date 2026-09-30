@@ -42,9 +42,13 @@ export function describeOutcome(outcome: IngestionOutcome): string {
         ? "Duplicato esatto (stesso file già importato) - nessuna scrittura."
         : "Duplicato semantico (stesso contenuto già importato con un file diverso) - nessuna scrittura.";
     case "conflict":
-      return outcome.conflictKind === "legacy"
-        ? "Conflitto con snapshot legacy: il contenuto già presente è diverso dal file caricato. Nessuna scrittura."
-        : "Conflitto: esiste già un import completato per questa struttura/data con contenuto diverso. Nessuna scrittura.";
+      if (outcome.conflictKind === "legacy") {
+        return "Conflitto con snapshot legacy: il contenuto già presente è diverso dal file caricato. Nessuna scrittura.";
+      }
+      if (outcome.conflictKind === "scope_overlap") {
+        return "Conflitto: esiste già un import completato per questa struttura/data su un intervallo di soggiorno parzialmente sovrapposto. Nessuna scrittura.";
+      }
+      return "Conflitto: esiste già un import completato per questa struttura/data con contenuto diverso. Nessuna scrittura.";
     case "routing_error":
     case "parse_error":
     case "validation_error":

@@ -95,9 +95,16 @@ export type IngestionOutcome = (
   | { status: "imported"; importedCount: number; eventId: string; bdImportIds: string[] }
   | { status: "skipped_duplicate"; reason: "exact_duplicate" | "semantic_duplicate" | "legacy_equivalent"; eventId: string }
   // conflictKind: "content" = contro un import Foundation gia' completato
-  // (conflictingEventId valorizzato); "legacy" = contro righe scritte prima
+  // sullo stesso scope (conflictingEventId valorizzato); "scope_overlap" =
+  // contro un import Foundation con intervallo di soggiorno parzialmente
+  // sovrapposto (montecallini_pms); "legacy" = contro righe scritte prima
   // della Foundation con contenuto diverso (legacy_snapshot_present).
-  | { status: "conflict"; conflictKind: "content" | "legacy"; eventId: string; conflictingEventId: string | null }
+  | {
+      status: "conflict";
+      conflictKind: "content" | "scope_overlap" | "legacy";
+      eventId: string;
+      conflictingEventId: string | null;
+    }
   | { status: "routing_error"; message: string }
   | { status: "parse_error"; message: string }
   | { status: "validation_error"; message: string }

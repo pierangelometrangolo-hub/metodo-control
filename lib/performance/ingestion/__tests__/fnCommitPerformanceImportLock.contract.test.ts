@@ -16,48 +16,53 @@ import * as path from "path";
 // accettabile, non un fallimento. La correttezza a runtime (che il lock
 // davvero serializzi due sessioni concorrenti) resta verificabile solo
 // eseguendo la migration su un Postgres reale.
-const MIGRATION_PATH = path.join(
-  process.cwd(),
-  "supabase",
-  "migrations",
-  "20260908113200_fn_commit_performance_import.sql"
-);
+// Tutte le migration che (ri)definiscono la funzione: la prima versione e
+// quella con lo scope soggiorno (20260930130000, definizione attiva) -
+// entrambe devono rispettare lo stesso contratto sul lock.
+const MIGRATION_FILES = [
+  "20260908113200_fn_commit_performance_import.sql",
+  "20260930130000_performance_import_events_stay_scope.sql",
+];
 
-const sql = fs.readFileSync(MIGRATION_PATH, "utf-8");
+function analyze(file: string) {
+  const MIGRATION_PATH = path.join(process.cwd(), "supabase", "migrations", file);
+  const sql = fs.readFileSync(MIGRATION_PATH, "utf-8");
 
-// Tutte le ricerche sotto partono da QUI, non dall'inizio del file: i
-// commenti sopra "create or replace function" (che spiegano il motivo del
-// lock) citano deliberatamente frammenti di codice come "select * into
-// v_existing" a scopo esplicativo - cercarli dall'inizio del file
-// troverebbe quella citazione invece della riga di codice reale dentro il
-// corpo della funzione, producendo un falso negativo.
-const functionStart = sql.indexOf("create or replace function fn_commit_performance_import(");
-// Fallimento esplicito qui (fuori da un blocco it/describe, prima ancora
-// che vitest esegua i test) se il file non contiene piu' la funzione
-// attesa - meglio di indici -1 silenziosi propagati sotto.
-if (functionStart === -1) {
-  throw new Error("create or replace function fn_commit_performance_import( non trovato nel file di migration");
+  // Tutte le ricerche sotto partono da QUI, non dall'inizio del file: i
+  // commenti sopra "create or replace function" (che spiegano il motivo del
+  // lock) citano deliberatamente frammenti di codice come "select * into
+  // v_existing" a scopo esplicativo - cercarli dall'inizio del file
+  // troverebbe quella citazione invece della riga di codice reale dentro il
+  // corpo della funzione, producendo un falso negativo.
+  const functionStart = sql.indexOf("create or replace function fn_commit_performance_import(");
+  if (functionStart === -1) {
+    throw new Error(`create or replace function fn_commit_performance_import( non trovato in ${file}`);
+  }
+
+  // Indice della singola istruzione di lock e di ogni verifica/scrittura
+  // successiva - usati sotto per confrontare l'ORDINE testuale, che dentro
+  // un corpo plpgsql sequenziale (nessun ramo condizionale prima del lock)
+  // coincide con l'ordine di esecuzione.
+  const lockIndex = sql.indexOf("pg_advisory_xact_lock(", functionStart);
+
+  const checkpoints: Record<string, number> = {
+    "ricerca evento imported (select * into v_existing)": sql.indexOf("select * into v_existing", functionStart),
+    // "into v_legacy_exists" (l'assegnazione dentro le due select...into),
+    // MAI "v_legacy_exists" da solo: quel token compare per primo nella
+    // dichiarazione della variabile ("v_legacy_exists boolean;"), che
+    // precede testualmente anche il lock stesso e farebbe fallire il test
+    // per un motivo sbagliato (dichiarare una variabile non è "un controllo
+    // che precede il lock").
+    "controllo legacy (select ... into v_legacy_exists)": sql.indexOf("into v_legacy_exists", functionStart),
+    "creazione bd_imports": sql.indexOf("insert into bd_imports", functionStart),
+    "insert performance_daily_snapshot": sql.indexOf("insert into performance_daily_snapshot", functionStart),
+    "insert guest_nationality": sql.indexOf("insert into guest_nationality", functionStart),
+  };
+  return { MIGRATION_PATH, sql, functionStart, lockIndex, checkpoints };
 }
 
-// Indice della singola istruzione di lock e di ogni verifica/scrittura
-// successiva - usati sotto per confrontare l'ORDINE testuale, che dentro
-// un corpo plpgsql sequenziale (nessun ramo condizionale prima del lock)
-// coincide con l'ordine di esecuzione.
-const lockIndex = sql.indexOf("pg_advisory_xact_lock(", functionStart);
-
-const checkpoints: Record<string, number> = {
-  "ricerca evento imported (select * into v_existing)": sql.indexOf("select * into v_existing", functionStart),
-  // "into v_legacy_exists" (l'assegnazione dentro le due select...into),
-  // MAI "v_legacy_exists" da solo: quel token compare per primo nella
-  // dichiarazione della variabile ("v_legacy_exists boolean;"), che
-  // precede testualmente anche il lock stesso e farebbe fallire il test
-  // per un motivo sbagliato (dichiarare una variabile non è "un controllo
-  // che precede il lock").
-  "controllo legacy (select ... into v_legacy_exists)": sql.indexOf("into v_legacy_exists", functionStart),
-  "creazione bd_imports": sql.indexOf("insert into bd_imports", functionStart),
-  "insert performance_daily_snapshot": sql.indexOf("insert into performance_daily_snapshot", functionStart),
-  "insert guest_nationality": sql.indexOf("insert into guest_nationality", functionStart),
-};
+describe.each(MIGRATION_FILES)("%s", (file) => {
+const { MIGRATION_PATH, sql, functionStart, lockIndex, checkpoints } = analyze(file);
 
 describe("Migration fn_commit_performance_import - advisory lock transazionale sulla chiave logica", () => {
   it("il file di migration esiste ed e' leggibile", () => {
@@ -122,5 +127,44 @@ describe("Migration fn_commit_performance_import - advisory lock transazionale s
   it("contiene una nota SQL che spiega perché il lock esiste (race check-then-act sotto READ COMMITTED)", () => {
     expect(sql).toMatch(/READ COMMITTED/);
     expect(sql).toMatch(/check-then-act/);
+  });
+});
+});
+
+describe("20260930130000 - scope soggiorno nella chiave (contratto testuale)", () => {
+  const { sql, functionStart, lockIndex } = analyze("20260930130000_performance_import_events_stay_scope.sql");
+  const fn = sql.slice(functionStart);
+
+  it("aggiunge stay_date_start/stay_date_end nullable con vincolo di coerenza", () => {
+    expect(sql).toMatch(/add column stay_date_start date,\s*add column stay_date_end date;/);
+    expect(sql).toMatch(/stay_date_start <= stay_date_end/);
+  });
+
+  it("lo scope viene dal payload (min/max stay_date delle righe), calcolato dopo il lock - mai un parametro del client", () => {
+    const scopeIndex = sql.indexOf("into v_scope_start, v_scope_end", functionStart);
+    expect(scopeIndex).toBeGreaterThan(lockIndex);
+    expect(fn).not.toMatch(/p_stay_date_start|p_stay_date_end/);
+    expect(fn).toMatch(/min\(\(r->>'stay_date'\)::date\), max\(\(r->>'stay_date'\)::date\)/);
+  });
+
+  it("lookup: solo montecallini_pms e' scoped, evento senza scope = sovrapposto a tutto, stesso scope in priorita'", () => {
+    expect(fn).toMatch(/v_scoped boolean := p_dataset = 'montecallini_pms';/);
+    expect(fn).toMatch(/or stay_date_start is null/);
+    expect(fn).toMatch(/stay_date_start <= v_scope_end and stay_date_end >= v_scope_start/);
+  });
+
+  it("sovrapposizione parziale -> conflict scope_overlap, mai scrittura", () => {
+    const overlap = fn.indexOf("'scope_overlap'");
+    expect(overlap).toBeGreaterThan(-1);
+    expect(overlap).toBeLessThan(fn.indexOf("insert into bd_imports"));
+  });
+
+  it("guardia legacy limitata allo scope per montecallini_pms, nationality invariata", () => {
+    expect(fn).toMatch(/stay_date between v_scope_start and v_scope_end/);
+  });
+
+  it("backfill solo eventi imported ricostruibili senza ambiguita'", () => {
+    expect(sql).toMatch(/where e\.status = 'imported'/);
+    expect(sql).toMatch(/ambiguous as \(/);
   });
 });

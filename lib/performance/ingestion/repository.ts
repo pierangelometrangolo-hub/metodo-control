@@ -7,7 +7,7 @@ import {
   NormalizedSnapshotRow,
   StructureAlias,
 } from "./types";
-import { PriorImportedEvent } from "./conflictPolicy";
+import { PriorImportedEvent, selectPriorImportedEvent, StayScope } from "./conflictPolicy";
 
 // Tutto l'I/O Supabase del servizio import in un unico posto - nessuna
 // query sparsa dentro importService.ts o dentro i componenti React.
@@ -30,35 +30,37 @@ export async function loadStructureAliases(supabase: SupabaseClient, source: str
   }));
 }
 
-// Ultimo evento con status='imported' per questa chiave - null se non ne
-// esiste nessuno (nessun import completato in passato, di questa sessione
-// o precedente, per questa struttura+data+dataset). Usato per costruire
-// l'anteprima UI (stessa logica di conflictPolicy.decideImportAction) -
-// mai come autorita' finale: quella resta l'RPC, che rilegge la stessa
-// informazione DENTRO la propria transazione.
+// Evento 'imported' rilevante per questa chiave - null se non ne esiste
+// nessuno. Tutti gli eventi 'imported' di structure_id + extraction_date +
+// dataset (pochi per chiave), poi la stessa selezione per scope soggiorno
+// della RPC (conflictPolicy.selectPriorImportedEvent): stayScope solo per
+// montecallini_pms, null per gli altri dataset (evento piu' recente, come
+// prima). Usato per l'anteprima UI - mai come autorita' finale: quella
+// resta l'RPC, che rilegge la stessa informazione DENTRO la propria
+// transazione.
 export async function findLatestImportedEvent(
   supabase: SupabaseClient,
-  params: { structureId: string; extractionDate: string; dataset: Dataset }
+  params: { structureId: string; extractionDate: string; dataset: Dataset; stayScope?: StayScope | null }
 ): Promise<PriorImportedEvent | null> {
   const { data, error } = await supabase
     .from("performance_import_events")
-    .select("id, source_checksum, normalized_content_hash")
+    .select("id, source_checksum, normalized_content_hash, stay_date_start, stay_date_end")
     .eq("structure_id", params.structureId)
     .eq("extraction_date", params.extractionDate)
     .eq("dataset", params.dataset)
     .eq("status", "imported")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .order("created_at", { ascending: false });
 
   if (error) throw new Error(`Impossibile verificare import precedenti: ${error.message}`);
-  if (!data) return null;
 
-  return {
-    id: data.id as string,
-    sourceChecksum: (data.source_checksum as string | null) ?? null,
-    normalizedContentHash: (data.normalized_content_hash as string | null) ?? null,
-  };
+  const events: PriorImportedEvent[] = ((data ?? []) as Record<string, unknown>[]).map((r) => ({
+    id: r.id as string,
+    sourceChecksum: (r.source_checksum as string | null) ?? null,
+    normalizedContentHash: (r.normalized_content_hash as string | null) ?? null,
+    stayDateStart: (r.stay_date_start as string | null) ?? null,
+    stayDateEnd: (r.stay_date_end as string | null) ?? null,
+  }));
+  return selectPriorImportedEvent(events, params.stayScope ?? null);
 }
 
 export async function uploadSourceFile(supabase: SupabaseClient, storagePath: string, file: File): Promise<void> {
@@ -93,18 +95,22 @@ export async function uploadSourceFile(supabase: SupabaseClient, storagePath: st
 // questa funzione, e' cio' che elimina davvero la finestra di race fra
 // "controllo lato client" e "scrittura", esattamente come gia' avviene
 // per exact/semantic duplicate e conflict via performance_import_events.
+// stayScope (solo montecallini_pms, stessa regola della RPC): solo le righe
+// dentro l'intervallo di soggiorno del file - righe di altri mesi sulla
+// stessa extraction_date non sono lo stesso snapshot.
 export async function checkLegacySnapshotExists(
   supabase: SupabaseClient,
-  scope: { structureId: string; extractionDate: string; dataset: Dataset }
+  scope: { structureId: string; extractionDate: string; dataset: Dataset; stayScope?: StayScope | null }
 ): Promise<boolean> {
   const table = scope.dataset === "nationality" ? "guest_nationality" : "performance_daily_snapshot";
 
-  const { data, error } = await supabase
+  let query = supabase
     .from(table)
     .select("id")
     .eq("structure_id", scope.structureId)
-    .eq("extraction_date", scope.extractionDate)
-    .limit(1);
+    .eq("extraction_date", scope.extractionDate);
+  if (scope.stayScope) query = query.gte("stay_date", scope.stayScope.start).lte("stay_date", scope.stayScope.end);
+  const { data, error } = await query.limit(1);
 
   if (error) throw new Error(`Impossibile verificare snapshot legacy (${table}): ${error.message}`);
   return (data ?? []).length > 0;
@@ -127,7 +133,7 @@ async function fetchAllLegacyRows<T>(
   table: "performance_daily_snapshot" | "guest_nationality",
   columns: string,
   orderColumns: string[],
-  scope: { structureId: string; extractionDate: string }
+  scope: { structureId: string; extractionDate: string; stayScope?: StayScope | null }
 ): Promise<T[]> {
   const all: T[] = [];
   for (let from = 0; ; from += LEGACY_PAGE_SIZE) {
@@ -136,6 +142,7 @@ async function fetchAllLegacyRows<T>(
       .select(columns)
       .eq("structure_id", scope.structureId)
       .eq("extraction_date", scope.extractionDate);
+    if (scope.stayScope) query = query.gte("stay_date", scope.stayScope.start).lte("stay_date", scope.stayScope.end);
     for (const col of orderColumns) query = query.order(col, { ascending: true });
     const { data, error } = await query.range(from, from + LEGACY_PAGE_SIZE - 1);
 
@@ -147,7 +154,7 @@ async function fetchAllLegacyRows<T>(
 
 export async function loadLegacySnapshotRows(
   supabase: SupabaseClient,
-  scope: { structureId: string; extractionDate: string }
+  scope: { structureId: string; extractionDate: string; stayScope?: StayScope | null }
 ): Promise<NormalizedSnapshotRow[]> {
   type Row = {
     stay_date: string;
@@ -214,6 +221,7 @@ export async function logLegacySnapshotEquivalentEvent(
     sourceChecksum: string | null;
     normalizedContentHash: string | null;
     batchHash: string | null;
+    stayScope?: StayScope | null;
   }
 ): Promise<string> {
   const { data, error } = await supabase
@@ -228,6 +236,8 @@ export async function logLegacySnapshotEquivalentEvent(
       normalized_content_hash: event.normalizedContentHash,
       batch_hash: event.batchHash,
       source_file_name: event.sourceFileName,
+      stay_date_start: event.stayScope?.start ?? null,
+      stay_date_end: event.stayScope?.end ?? null,
       error_code: "legacy_equivalent",
       error_message: LEGACY_EQUIVALENT_MESSAGE,
     })
@@ -266,6 +276,7 @@ export async function logLegacySnapshotConflictEvent(
     sourceChecksum: string | null;
     normalizedContentHash: string | null;
     batchHash: string | null;
+    stayScope?: StayScope | null;
   }
 ): Promise<string> {
   const { data, error } = await supabase
@@ -280,6 +291,8 @@ export async function logLegacySnapshotConflictEvent(
       normalized_content_hash: event.normalizedContentHash,
       batch_hash: event.batchHash,
       source_file_name: event.sourceFileName,
+      stay_date_start: event.stayScope?.start ?? null,
+      stay_date_end: event.stayScope?.end ?? null,
       error_code: "legacy_snapshot_present",
       error_message: LEGACY_SNAPSHOT_CONFLICT_MESSAGE,
     })
@@ -309,7 +322,15 @@ export type CommitImportParams = {
 export type CommitImportResult =
   | { status: "imported"; event_id: string; imported_count: number; bd_import_ids: string[] }
   | { status: "skipped_duplicate"; reason: "exact_duplicate" | "semantic_duplicate"; event_id: string }
-  | { status: "conflict"; event_id: string; conflicting_event_id: string | null };
+  | {
+      status: "conflict";
+      // Presente dalla migration 20260930130000 (content_conflict |
+      // scope_overlap | legacy_snapshot_present); assente dalla versione
+      // precedente della RPC.
+      reason?: "content_conflict" | "scope_overlap" | "legacy_snapshot_present";
+      event_id: string;
+      conflicting_event_id: string | null;
+    };
 
 // Unico punto di scrittura - vedi fn_commit_performance_import (migration
 // 20260908113200) per la garanzia di atomicita'. Il caso "dati legacy

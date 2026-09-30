@@ -11,12 +11,24 @@ import { CellTooltip } from "@/components/ui/CellTooltip";
 import { supabase } from "@/lib/supabaseClient";
 import { canViewModule, getUserLevelRank } from "@/lib/permissions";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
-import { ChannelRevenueBars, ChannelRevenueDatum, ChannelCommissionInfo } from "@/components/performance/ChannelRevenueBars";
+import { ChannelRevenueBars, ChannelRevenueDatum } from "@/components/performance/ChannelRevenueBars";
+import {
+  ChannelCommissionSummary,
+  CommissionRateInput,
+  summarizeChannelCommissions,
+} from "@/lib/performance/channelCommissions";
+import {
+  computePeriodBudget,
+  MonthlyBudgetRow,
+  PeriodBudget,
+  periodBudgetTitles,
+  periodKind,
+} from "@/lib/performance/periodBudget";
+import { aggregateMonthlyAsof, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import {
   ND,
   SnapshotRow,
-  BudgetRow,
   todayString,
   sdlyDate,
   monthRange,
@@ -298,7 +310,7 @@ function formatPeriodLabel(start: string, end: string): string {
 // puo' comunque superare 1.000 su periodi lunghi con molti canali).
 const CHANNEL_REVENUE_PAGE_SIZE = 1000;
 
-type ChannelRevenueQueryRow = { channel: string; revenue_gross: number | string };
+type ChannelRevenueQueryRow = { channel: string; period_start: string; revenue_gross: number | string };
 
 async function fetchAllChannelRevenueRows(
   sId: string,
@@ -312,7 +324,7 @@ async function fetchAllChannelRevenueRows(
   while (true) {
     const { data, error } = await supabase
       .from("v_channel_revenue_latest")
-      .select("channel, revenue_gross")
+      .select("channel, period_start, revenue_gross")
       .eq("structure_id", sId)
       .gte("period_start", start)
       .lte("period_start", end)
@@ -476,19 +488,29 @@ export default function PerformanceStructureDrilldownPage({
   // anticipo rispetto ad oggi, non il consuntivo finale. Vedi loadMetrics.
   const [sdlyAsofAgg, setSdlyAsofAgg] = useState<KpiAgg>(EMPTY_KPI_AGG);
   const [comparisonTab, setComparisonTab] = useState<ComparisonTab>("sdly");
-  const [monthSnapshots, setMonthSnapshots] = useState<SnapshotRow[]>([]);
-  const [budgets, setBudgets] = useState<BudgetRow[]>([]);
+  // Budget del periodo selezionato, insieme agli estremi del periodo per cui
+  // e' stato calcolato: il widget lo mostra solo se coincidono col periodo
+  // attivo, mai valori residui di un periodo precedente durante il reload.
+  const [periodBudgetView, setPeriodBudgetView] = useState<{
+    start: string;
+    end: string;
+    budget: PeriodBudget;
+  } | null>(null);
   const [hasChannelData, setHasChannelData] = useState(false);
   const [channelRevenue, setChannelRevenue] = useState<ChannelRevenueDatum[]>([]);
   const [channelRevenueSdly, setChannelRevenueSdly] = useState<ChannelRevenueDatum[]>([]);
-  // Percentuale commissione per canale, per il mese ancora del periodo
-  // selezionato (stesso mese usato da "Mese in corso vs budget") - solo i
-  // canali con una riga in channel_commission_rates per quel mese finiscono
-  // in questa mappa, gli altri restano senza netto calcolato.
-  const [channelCommissionRates, setChannelCommissionRates] = useState<Map<string, ChannelCommissionInfo>>(new Map());
-  const [channelCommissionRatesLy, setChannelCommissionRatesLy] = useState<Map<string, ChannelCommissionInfo>>(
+  // Commissione per canale sul periodo selezionato, calcolata mese per mese
+  // con la tariffa di ciascun mese (summarizeChannelCommissions) - con la
+  // copertura (mesi con tariffa / mesi con revenue) per canale.
+  const [channelCommissionRates, setChannelCommissionRates] = useState<Map<string, ChannelCommissionSummary>>(
     new Map()
   );
+  const [channelCommissionRatesLy, setChannelCommissionRatesLy] = useState<Map<string, ChannelCommissionSummary>>(
+    new Map()
+  );
+  // SDLY anno pieno: mesi dell'anno precedente coperti al cutoff (null per
+  // periodi non annuali), per distinguere copertura parziale da nessun dato.
+  const [sdlyAnnualCoverage, setSdlyAnnualCoverage] = useState<{ covered: number; expected: number } | null>(null);
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
   // Indipendente da "Mostra netto" - entrambi attivabili insieme, mai
   // gated da canManage (channel_revenue non ha la stessa RLS rank>=2 di
@@ -522,10 +544,6 @@ export default function PerformanceStructureDrilldownPage({
 
   const periodStart = confirmedStart;
   const periodEnd = confirmedEnd;
-  // "Mese in corso vs budget" resta un concetto mensile: usa il mese del
-  // primo giorno del periodo attivo come ancora (di default e' gia' il
-  // mese corrente, dato che il periodo di default e' il mese intero).
-  const budgetAnchorDate = periodStart;
   // Anno della vista Mensile "tutto l'anno": segue l'anno del periodo
   // selezionato nel calendario, non e' un selettore separato.
   const detailYear = Number(periodStart.slice(0, 4));
@@ -631,13 +649,17 @@ export default function PerformanceStructureDrilldownPage({
 
     const sdlyStart = sdlyDate(periodStart);
     const sdlyEnd = sdlyDate(periodEnd);
-    const { start: monthStart, end: monthEnd, year, month } = monthRange(budgetAnchorDate);
-    // Stessa ancora di year/month sopra ma traslata di un anno (sdlyStart
-    // e' gia' sdlyDate(periodStart) === sdlyDate(budgetAnchorDate)): stessa
-    // identica semantica "singolo mese anche per l'anno intero" gia' in uso
-    // per le commissioni correnti, solo applicata al periodo LY - MAI la
-    // percentuale 2026 riusata sul 2025.
-    const { year: sdlyYear, month: sdlyMonth } = monthRange(sdlyStart);
+    // Anni coperti dal periodo corrente e da quello SDLY: budget e tariffe
+    // commissione sono mensili, si leggono tutti i mesi di questi anni e si
+    // filtrano poi sui soli mesi del periodo (periodBudget.ts /
+    // channelCommissions.ts) - mai il solo mese di periodStart.
+    const yearsOf = (start: string, end: string) => {
+      const years: number[] = [];
+      for (let y = Number(start.slice(0, 4)); y <= Number(end.slice(0, 4)); y++) years.push(y);
+      return years;
+    };
+    const periodYears = yearsOf(periodStart, periodEnd);
+    const sdlyYears = yearsOf(sdlyStart, sdlyEnd);
 
     const snapshotColumns =
       "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
@@ -651,27 +673,47 @@ export default function PerformanceStructureDrilldownPage({
     // funzione giornaliera - che per periodi 2025 non ancora coperti da
     // performance_daily_snapshot torna ND, onestamente, invece di un dato
     // approssimato.
+    // Anno pieno: stessa fonte del mese pieno (fn_month_snapshot_asof),
+    // ripetuta sui 12 mesi dell'anno precedente allo stesso cutoff e
+    // aggregata in aggregateMonthlyAsof - lo storico 2025 e' caricato a
+    // granularita' mensile, fn_snapshot_asof (giornaliera) tornerebbe ND.
+    // Intervallo custom: invariato, fn_snapshot_asof.
     const sdlyCutoff = sdlyDate(todayString());
     const sdlyIsFullMonth = isFullMonth(periodStart, periodEnd);
-    const sdlyAsofPromise = sdlyIsFullMonth
-      ? supabase.rpc("fn_month_snapshot_asof", {
-          p_structure_ids: [structureId],
-          p_period_year: Number(sdlyStart.slice(0, 4)),
-          p_period_month: Number(sdlyStart.slice(5, 7)),
-          p_cutoff_date: sdlyCutoff,
-        })
-      : supabase.rpc("fn_snapshot_asof", {
-          p_structure_ids: [structureId],
-          p_stay_date_start: sdlyStart,
-          p_stay_date_end: sdlyEnd,
-          p_cutoff_date: sdlyCutoff,
-        });
+    const sdlyIsFullYear = periodKind(periodStart, periodEnd) === "year";
+    const sdlyAsofPromise = sdlyIsFullYear
+      ? Promise.resolve({ data: null, error: null })
+      : sdlyIsFullMonth
+        ? supabase.rpc("fn_month_snapshot_asof", {
+            p_structure_ids: [structureId],
+            p_period_year: Number(sdlyStart.slice(0, 4)),
+            p_period_month: Number(sdlyStart.slice(5, 7)),
+            p_cutoff_date: sdlyCutoff,
+          })
+        : supabase.rpc("fn_snapshot_asof", {
+            p_structure_ids: [structureId],
+            p_stay_date_start: sdlyStart,
+            p_stay_date_end: sdlyEnd,
+            p_cutoff_date: sdlyCutoff,
+          });
+    const sdlyAnnualPromise = sdlyIsFullYear
+      ? Promise.all(
+          Array.from({ length: 12 }, (_, i) =>
+            supabase.rpc("fn_month_snapshot_asof", {
+              p_structure_ids: [structureId],
+              p_period_year: Number(sdlyStart.slice(0, 4)),
+              p_period_month: i + 1,
+              p_cutoff_date: sdlyCutoff,
+            })
+          )
+        )
+      : Promise.resolve(null);
 
     const [
       periodRes,
       sdlyRes,
       sdlyAsofRes,
-      monthRes,
+      sdlyAnnualRes,
       budgetsRes,
       channelRes,
       channelSdlyRes,
@@ -694,18 +736,14 @@ export default function PerformanceStructureDrilldownPage({
         .gte("stay_date", sdlyStart)
         .lte("stay_date", sdlyEnd),
       sdlyAsofPromise,
-      supabase
-        .from("v_snapshot_latest")
-        .select(snapshotColumns)
-        .eq("structure_id", structureId)
-        .gte("stay_date", monthStart)
-        .lte("stay_date", monthEnd),
+      sdlyAnnualPromise,
       supabase
         .from("v_budgets_current")
-        .select("level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target")
+        .select(
+          "season_year, month, level, adr, revenue_target, room_nights_sold_target, room_nights_available, occupancy_pct_target"
+        )
         .eq("structure_id", structureId)
-        .eq("season_year", year)
-        .eq("month", month),
+        .in("season_year", periodYears),
       hasChannelData
         ? fetchAllChannelRevenueRows(structureId, periodStart, periodEnd)
         : Promise.resolve({ data: [], error: null }),
@@ -720,31 +758,27 @@ export default function PerformanceStructureDrilldownPage({
       hasChannelData
         ? fetchAllChannelRevenueRows(structureId, sdlyStart, sdlyEnd)
         : Promise.resolve({ data: [], error: null }),
-      // Percentuali commissione per il toggle "Mostra netto" su Revenue per
-      // canale - ancorate allo stesso mese di budgetAnchorDate/monthRange
-      // gia' usato per "Mese in corso vs budget" (year/month qui sopra).
-      // RLS su channel_commission_rates e' gia' rank >= 2: gated anche qui
-      // lato query per non fare una fetch inutile a chi non la vedrebbe
-      // comunque (torna 0 righe, non un errore).
+      // Tariffe commissione per il toggle "Mostra netto" su Revenue per
+      // canale: tutti i mesi degli anni del periodo, poi applicate mese per
+      // mese (summarizeChannelCommissions) - mai la sola tariffa del mese di
+      // periodStart. RLS su channel_commission_rates e' gia' rank >= 2:
+      // gated anche qui lato query per non fare una fetch inutile a chi non
+      // la vedrebbe comunque (torna 0 righe, non un errore).
       hasChannelData && canManage
         ? supabase
             .from("channel_commission_rates")
-            .select("channel, commission_pct, source, source_reference")
+            .select("channel, period_year, period_month, commission_pct, source, source_reference")
             .eq("structure_id", structureId)
-            .eq("period_year", year)
-            .eq("period_month", month)
+            .in("period_year", periodYears)
         : Promise.resolve({ data: [], error: null }),
-      // Stessa query, stessa RLS, stesso gate canManage - solo period_year/
-      // period_month traslati sull'anno precedente (sdlyYear/sdlyMonth
-      // sopra). Se per quel canale non esiste una riga per il 2025, la barra
-      // LY resta lorda piena (nessun fallback sulla percentuale 2026).
+      // Stessa query sugli anni del periodo SDLY: le tariffe dell'anno
+      // precedente, mai la percentuale corrente riusata sul LY.
       hasChannelData && canManage
         ? supabase
             .from("channel_commission_rates")
-            .select("channel, commission_pct, source, source_reference")
+            .select("channel, period_year, period_month, commission_pct, source, source_reference")
             .eq("structure_id", structureId)
-            .eq("period_year", sdlyYear)
-            .eq("period_month", sdlyMonth)
+            .in("period_year", sdlyYears)
         : Promise.resolve({ data: [], error: null }),
       hasNationalityData
         ? fetchAllNationalityRows(structureId, periodStart, periodEnd)
@@ -775,7 +809,9 @@ export default function PerformanceStructureDrilldownPage({
     if (periodRes.error) setLoadError(periodRes.error.message);
     if (sdlyRes.error) setLoadError(sdlyRes.error.message);
     if (sdlyAsofRes.error) setLoadError(sdlyAsofRes.error.message);
-    if (monthRes.error) setLoadError(monthRes.error.message);
+    sdlyAnnualRes?.forEach((res) => {
+      if (res.error) setLoadError(res.error.message);
+    });
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
     if (channelSdlyRes.error) setLoadError(channelSdlyRes.error.message);
@@ -787,31 +823,54 @@ export default function PerformanceStructureDrilldownPage({
 
     setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
-    setMonthSnapshots((monthRes.data as SnapshotRow[]) || []);
-    setBudgets((budgetsRes.data as BudgetRow[]) || []);
+    setPeriodBudgetView({
+      start: periodStart,
+      end: periodEnd,
+      budget: computePeriodBudget((budgetsRes.data as MonthlyBudgetRow[] | null) || [], periodStart, periodEnd),
+    });
 
     type CommissionRow = {
       channel: string;
-      commission_pct: number;
+      period_year: number;
+      period_month: number;
+      commission_pct: number | string;
       source: "fattura" | "stima";
       source_reference: string | null;
     };
-    const toCommissionMap = (rows: CommissionRow[] | null) =>
-      new Map(
-        (rows || []).map((r) => [
-          r.channel,
-          { pct: Number(r.commission_pct), source: r.source, sourceReference: r.source_reference },
-        ])
+    const toRates = (rows: CommissionRow[] | null): CommissionRateInput[] =>
+      (rows || []).map((r) => ({
+        channel: r.channel,
+        year: Number(r.period_year),
+        month: Number(r.period_month),
+        pct: Number(r.commission_pct),
+        source: r.source,
+        sourceReference: r.source_reference,
+      }));
+    const toRevenueInput = (rows: ChannelRevenueQueryRow[]) =>
+      rows.map((r) => ({ channel: r.channel, stayDate: r.period_start, revenueGross: Number(r.revenue_gross) }));
+
+    setChannelCommissionRates(
+      summarizeChannelCommissions(
+        toRevenueInput(channelRes.data || []),
+        toRates(commissionRatesRes.data as CommissionRow[] | null)
+      )
+    );
+    // Revenue LY con le tariffe LY dei rispettivi mesi - mai la percentuale
+    // corrente riusata sul LY.
+    setChannelCommissionRatesLy(
+      summarizeChannelCommissions(
+        toRevenueInput(channelSdlyRes.data || []),
+        toRates(commissionRatesLyRes.data as CommissionRow[] | null)
+      )
+    );
+
+    if (sdlyIsFullYear) {
+      const annual = aggregateMonthlyAsof(
+        (sdlyAnnualRes ?? []).map((res) => ((res.data as MonthAsofRow[] | null) || [])[0] ?? null)
       );
-
-    setChannelCommissionRates(toCommissionMap(commissionRatesRes.data as CommissionRow[] | null));
-    // Stessa risoluzione, stessa RLS, anno/mese traslati di uno sull'anno
-    // precedente (sdlyYear/sdlyMonth) - se per un canale non esiste nessuna
-    // riga per il 2025 la mappa semplicemente non lo contiene, la barra LY
-    // resta lorda piena (nessun fallback sulla percentuale corrente).
-    setChannelCommissionRatesLy(toCommissionMap(commissionRatesLyRes.data as CommissionRow[] | null));
-
-    if (sdlyIsFullMonth) {
+      setSdlyAnnualCoverage({ covered: annual.monthsCovered, expected: annual.monthsExpected });
+      setSdlyAsofAgg(annual.agg ?? EMPTY_KPI_AGG);
+    } else if (sdlyIsFullMonth) {
       const row = ((sdlyAsofRes.data as
         | { revenue_total: number; rooms_sold: number; rooms_available: number; arrivals: number; presences: number }[]
         | null) || [])[0];
@@ -827,6 +886,7 @@ export default function PerformanceStructureDrilldownPage({
           : EMPTY_KPI_AGG
       );
     } else {
+      setSdlyAnnualCoverage(null);
       const rowsWithStatus = ((sdlyAsofRes.data as SnapshotRow[] | null) || []).map((r) => ({
         ...r,
         status: "otb" as const,
@@ -1036,19 +1096,25 @@ export default function PerformanceStructureDrilldownPage({
   const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
   const comparisonAgg: KpiAgg = comparisonTab === "sdly" ? sdlyAsofAgg : sdlyAgg;
   const comparisonLabel = comparisonTab === "sdly" ? "SDLY" : "Consuntivo anno prec.";
-  const monthToDate = useMemo(() => sumSnapshots(monthSnapshots), [monthSnapshots]);
-
   const directShareCurrent = useMemo(() => directShareOf(channelRevenue), [channelRevenue]);
   const directShareSdly = useMemo(() => directShareOf(channelRevenueSdly), [channelRevenueSdly]);
 
-  const monthPacing = useMemo(
-    () => computePacingStatus(monthToDate.revenue, budgets),
-    [monthToDate.revenue, budgets]
+  // Budget widget: stesso periodo del selettore (periodAgg per il reale,
+  // periodBudget per i livelli) - null finche' il budget del periodo attivo
+  // non e' stato caricato, mai quello di un periodo precedente.
+  const periodBudget =
+    periodBudgetView && periodBudgetView.start === periodStart && periodBudgetView.end === periodEnd
+      ? periodBudgetView.budget
+      : null;
+  const periodBudgets = useMemo(() => periodBudget?.budgets ?? [], [periodBudget]);
+  const periodPacing = useMemo(
+    () => computePacingStatus(periodAgg.revenue, periodBudgets),
+    [periodAgg.revenue, periodBudgets]
   );
-  const monthPacingDetail = useMemo(() => {
-    const minimoBudget = budgets.find((b) => b.level === "minimo");
-    return pacingDetail(monthToDate.revenue, minimoBudget ? Number(minimoBudget.revenue_target) : null);
-  }, [monthToDate.revenue, budgets]);
+  const periodPacingDetail = useMemo(() => {
+    const minimoBudget = periodBudgets.find((b) => b.level === "minimo");
+    return pacingDetail(periodAgg.revenue, minimoBudget ? Number(minimoBudget.revenue_target) : null);
+  }, [periodAgg.revenue, periodBudgets]);
 
   const displayedDetailRows = useMemo(
     () =>
@@ -1058,7 +1124,20 @@ export default function PerformanceStructureDrilldownPage({
     [dailyDetailRows, yearlyDetailRows, detailGranularity]
   );
 
-  const { daysInMonth } = monthRange(budgetAnchorDate);
+  const budgetSubtitleParts: string[] = [];
+  if (periodBudget) {
+    budgetSubtitleParts.push(
+      periodAgg.daysWithData > 0
+        ? `${periodAgg.daysWithData}/${periodBudget.daysInPeriod} giorni con dati (parziale se il periodo non è concluso o mancano import)`
+        : "Nessun dato importato per questo periodo"
+    );
+    if (periodBudget.monthsWithBudget < periodBudget.monthsInPeriod) {
+      budgetSubtitleParts.push(
+        `budget presente per ${periodBudget.monthsWithBudget}/${periodBudget.monthsInPeriod} mesi del periodo`
+      );
+    }
+    if (periodBudget.prorated) budgetSubtitleParts.push("budget dei mesi parziali ripartito pro-rata giorni");
+  }
 
   const hasPeriodAnomaly =
     periodAgg.roomsSold !== null &&
@@ -1082,7 +1161,7 @@ export default function PerformanceStructureDrilldownPage({
       <PageHeader
         eyebrow="Performance"
         title={structureName || "Struttura"}
-        description="Confronto vs stesso periodo anno precedente — SDLY (a parità di anticipo) o Consuntivo finale, a scelta — e mese in corso vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
+        description="Confronto vs stesso periodo anno precedente — SDLY (a parità di anticipo) o Consuntivo finale, a scelta — e periodo selezionato vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
       >
         <p className="text-sm text-[#6a6d70]">
           Ultimo aggiornamento dati (ADR/RevPAR):{" "}
@@ -1295,8 +1374,13 @@ export default function PerformanceStructureDrilldownPage({
                   comparisonAgg.revenue === null &&
                   comparisonAgg.roomsSold === null && (
                     <p className="mb-4 text-sm text-[#6a6d70]">
-                      {ND} — nessun dato disponibile per {sdlyLabel} al cutoff a parità di anticipo (
-                      {formatDateIt(sdlyDate(todayString()))}).
+                      {sdlyAnnualCoverage && sdlyAnnualCoverage.covered > 0
+                        ? `${ND} — copertura parziale per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
+                            sdlyDate(todayString())
+                          )}): ${sdlyAnnualCoverage.covered}/${sdlyAnnualCoverage.expected} mesi disponibili, nessun totale annuale mostrato.`
+                        : `${ND} — nessun dato disponibile per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
+                            sdlyDate(todayString())
+                          )}).`}
                     </p>
                   )}
 
@@ -1353,12 +1437,8 @@ export default function PerformanceStructureDrilldownPage({
           </AppCard>
 
           <AppCard
-            title="Mese in corso vs budget"
-            subtitle={
-              monthToDate.daysWithData > 0
-                ? `${monthToDate.daysWithData}/${daysInMonth} giorni con dati (parziale se il mese non è concluso o mancano import)`
-                : "Nessun dato importato per questo mese"
-            }
+            title={periodBudgetTitles[periodKind(periodStart, periodEnd)]}
+            subtitle={periodBudget ? budgetSubtitleParts.join(" · ") : "Caricamento budget del periodo…"}
             className="p-4"
           >
             <div className="overflow-x-auto">
@@ -1374,17 +1454,17 @@ export default function PerformanceStructureDrilldownPage({
                   <tr className="border-b border-[#f0ece6]">
                     <td className="py-1.5 pr-4 font-semibold text-[#2B2D2F]">Reale</td>
                     <td className="py-1.5 pr-4 text-[#2B2D2F]">
-                      {monthToDate.daysWithData > 0 ? (
+                      {periodAgg.daysWithData > 0 ? (
                         <div className="flex items-start gap-2">
-                          {monthPacing && (
+                          {periodPacing && (
                             <span
-                              className={`mt-1 h-2 w-2 shrink-0 rounded-full ${pacingDotClasses[monthPacing]}`}
+                              className={`mt-1 h-2 w-2 shrink-0 rounded-full ${pacingDotClasses[periodPacing]}`}
                             />
                           )}
                           <div>
-                            <div>{formatCurrency(monthToDate.revenue)}</div>
-                            {monthPacingDetail && (
-                              <div className="text-[12px] text-[#6a6d70]">{monthPacingDetail}</div>
+                            <div>{formatCurrency(periodAgg.revenue)}</div>
+                            {periodPacingDetail && (
+                              <div className="text-[12px] text-[#6a6d70]">{periodPacingDetail}</div>
                             )}
                           </div>
                         </div>
@@ -1393,14 +1473,14 @@ export default function PerformanceStructureDrilldownPage({
                       )}
                     </td>
                     <td className="py-1.5 text-[#2B2D2F]">
-                      {monthToDate.daysWithData > 0
-                        ? formatPercent(occupancy(monthToDate.roomsSold, monthToDate.roomsAvailable))
+                      {periodAgg.daysWithData > 0
+                        ? formatPercent(occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable))
                         : ND}
                     </td>
                   </tr>
 
                   {["minimo", "realistico", "sfidante"].map((level) => {
-                    const budget = budgets.find((b) => b.level === level);
+                    const budget = periodBudgets.find((b) => b.level === level);
 
                     return (
                       <tr key={level} className="border-b border-[#f0ece6] last:border-0">

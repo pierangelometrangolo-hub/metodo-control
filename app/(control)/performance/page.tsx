@@ -38,6 +38,7 @@ import {
   sumSnapshots,
 } from "@/lib/performanceMetrics";
 import { aggregatePortfolioPerformance, PortfolioComparison } from "@/lib/performance/portfolio";
+import { aggregateBudgetRows } from "@/lib/performance/periodBudget";
 import {
   computeLikeForLike,
   LikeForLikeComparison,
@@ -49,35 +50,6 @@ type StructureOption = {
   id: string;
   name: string;
 };
-
-// Aggrega piu' righe budget (una per mese) in un'unica riga equivalente:
-// revenue_target e room_nights_available si sommano, occupancy_pct_target
-// diventa una media pesata sulle camere disponibili di ciascun mese, cosi'
-// che (occupancy_pct_target x room_nights_available) ricostruisca la somma
-// corretta delle camere-obiettivo mese per mese (non la somma di medie
-// slegate, che darebbe un risultato diverso e sbagliato). Su un singolo
-// mese (un solo elemento nell'array) restituisce esattamente la riga di
-// partenza: stessa funzione usata per la modalita' "Tutto l'anno" e per
-// quella mensile, senza bisogno di due percorsi di calcolo separati.
-function aggregateBudgetRows(rows: BudgetRow[]): BudgetRow {
-  const revenue_target = rows.reduce((sum, r) => sum + Number(r.revenue_target), 0);
-  const room_nights_available = rows.reduce((sum, r) => sum + Number(r.room_nights_available), 0);
-  const room_nights_sold_target = rows.reduce((sum, r) => sum + Number(r.room_nights_sold_target), 0);
-  const targetRoomsSoldSum = rows.reduce(
-    (sum, r) => sum + Number(r.occupancy_pct_target) * Number(r.room_nights_available),
-    0
-  );
-  const avgAdr = rows.length > 0 ? rows.reduce((sum, r) => sum + Number(r.adr), 0) / rows.length : 0;
-
-  return {
-    level: rows[0].level,
-    adr: avgAdr,
-    revenue_target,
-    room_nights_sold_target,
-    room_nights_available,
-    occupancy_pct_target: room_nights_available !== 0 ? targetRoomsSoldSum / room_nights_available : 0,
-  };
-}
 
 // PostgREST tronca silenziosamente ogni risposta oltre le 1.000 righe (il
 // suo limite di default) se non si passa un .range() esplicito - nessun

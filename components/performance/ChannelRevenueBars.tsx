@@ -4,32 +4,28 @@ import { formatCurrency, formatDelta, ND } from "@/lib/performanceMetrics";
 import { TruncatedLabelWithTooltip } from "@/components/ui/TruncatedLabelWithTooltip";
 import { AppBadge } from "@/components/ui/AppBadge";
 import { CellTooltip } from "@/components/ui/CellTooltip";
+import type { ChannelCommissionSummary } from "@/lib/performance/channelCommissions";
 
 export type ChannelRevenueDatum = {
   channel: string;
   revenue: number;
 };
 
-export type ChannelCommissionInfo = {
-  // commission_pct e' gia' definito come commissione/lordo*100 (stessa
-  // formula usata dal form di import) - e' direttamente la % di incidenza
-  // da mostrare, nessun ricalcolo separato serve.
-  pct: number;
-  source: "fattura" | "stima";
-  sourceReference: string | null;
-};
+// Commissione del canale sul periodo, gia' calcolata mese per mese con la
+// tariffa di ciascun mese (lib/performance/channelCommissions.ts), con la
+// copertura: "full" = tutti i mesi con revenue hanno una tariffa,
+// "partial" = solo alcuni (il lordo dei mesi scoperti non e' mai
+// commissionato), "none" = nessuno.
+export type ChannelCommissionInfo = ChannelCommissionSummary;
 
 type ChannelRevenueBarsProps = {
   data: ChannelRevenueDatum[];
-  // Solo per i canali con una riga in channel_commission_rates per il mese
-  // corrente - i canali assenti da questa mappa non mostrano il breakdown
-  // netto/commissione, mai un dato inventato.
+  // Commissione per canale sul periodo corrente (vedi ChannelCommissionInfo).
+  // Canale assente o con copertura "none": nessun breakdown, mai un netto
+  // inventato.
   commissionRates?: Map<string, ChannelCommissionInfo>;
-  // Stessa risoluzione di commissionRates ma per l'anno/mese precedente
-  // (period_year/period_month traslati di uno, vedi page.tsx) - mappa
-  // indipendente: un canale con tariffa 2026 non ha automaticamente una
-  // tariffa 2025, e viceversa. Se il canale non e' in questa mappa la
-  // barra LY resta lorda piena, mai un fallback sulla percentuale 2026.
+  // Stessa aggregazione sul periodo dell'anno precedente, con le tariffe
+  // dell'anno precedente - mai la percentuale corrente riusata sul LY.
   commissionRatesLy?: Map<string, ChannelCommissionInfo>;
   showNet?: boolean;
   // Stesso periodo dell'anno precedente (sdlyDate su periodStart/periodEnd),
@@ -46,6 +42,9 @@ const POSITIVE_COLOR = "#017A92";
 const NEGATIVE_COLOR = "#b6423f";
 const NET_COLOR = "#017A92";
 const COMMISSION_COLOR = "#e07a5f";
+// Lordo dei mesi senza tariffa: stesso colore del netto ma attenuato, cosi'
+// non viene letto come netto commissionato.
+const UNCOVERED_OPACITY = 0.35;
 // Stessa famiglia cromatica (teal) della barra 2026 ma piu' tenue - "2025"
 // deve restare un benchmark chiaro, non sparire: non cosi' pallido da
 // sembrare disabilitato (richiesta esplicita), solo visibilmente secondario.
@@ -127,22 +126,49 @@ function ChannelBadge({
   );
 }
 
+// Scomposizione del lordo di un canale: netto e commissione dei soli mesi
+// con tariffa, piu' il lordo dei mesi scoperti (mai commissionato).
+// net + commission + uncovered = gross quando il lordo e' positivo.
+type GrossSplit = { show: boolean; net: number; commission: number; uncovered: number };
+
+function splitGross(gross: number, info: ChannelCommissionInfo | undefined): GrossSplit {
+  if (!info || info.coverage === "none" || gross <= 0) return { show: false, net: 0, commission: 0, uncovered: 0 };
+  const commission = Math.max(0, info.commission);
+  const uncovered = Math.max(0, gross - info.coveredGross);
+  return { show: true, net: Math.max(0, gross - uncovered - commission), commission, uncovered };
+}
+
 // Riga breakdown compatta sotto la barra annuale (obiettivo 2), mai numeri
-// dentro la barra stessa. Nessuna tariffa nota per quel canale/anno ->
-// lordo pieno invariato, testo esplicito "Commissione non disponibile",
-// mai un netto inventato.
+// dentro la barra stessa. Nessuna tariffa nota per nessun mese del periodo
+// -> lordo pieno invariato, testo esplicito "Commissione non disponibile",
+// mai un netto inventato. Copertura parziale: commissione e netto solo sul
+// lordo coperto, con la quota senza tariffa esplicita - mai un "netto" sul
+// lordo totale.
 function formatGrossNetBreakdown(gross: number, info: ChannelCommissionInfo | undefined): string {
-  if (!info) return `Lordo ${formatCurrency(gross)} · Commissione non disponibile`;
-  const commission = gross * (info.pct / 100);
-  const net = gross - commission;
-  return `Lordo ${formatCurrency(gross)} · Netto ${formatCurrency(net)} · Comm. ${formatCurrency(commission)} (${formatPercent1(info.pct)})`;
+  if (!info || info.coverage === "none") return `Lordo ${formatCurrency(gross)} · Commissione non disponibile`;
+  const pct = info.effectivePct !== null ? ` (${formatPercent1(info.effectivePct)})` : "";
+  if (info.coverage === "full") {
+    return `Lordo ${formatCurrency(gross)} · Netto ${formatCurrency(gross - info.commission)} · Comm. ${formatCurrency(info.commission)}${pct}`;
+  }
+  return `Lordo ${formatCurrency(gross)} · Copertura commissionale parziale (${info.monthsCovered}/${info.monthsWithRevenue} mesi): Comm. ${formatCurrency(info.commission)}${pct} su ${formatCurrency(info.coveredGross)} coperti, netto ${formatCurrency(info.coveredGross - info.commission)} · ${formatCurrency(info.uncoveredGross)} senza tariffa`;
 }
 
 // Variante per il Totale: aggregato su piu' canali con tariffe eventualmente
 // diverse (o assenti per alcuni) - nessuna percentuale unica da mostrare,
-// solo i tre importi gia' calcolati (mai un dato inventato).
-function formatTotaleBreakdown(gross: number, net: number, commission: number): string {
-  return `Lordo ${formatCurrency(gross)} · Netto ${formatCurrency(net)} · Comm. ${formatCurrency(commission)}`;
+// solo gli importi gia' calcolati (mai un dato inventato). Il lordo senza
+// tariffa resta separato dal netto.
+function formatTotaleBreakdown(gross: number, net: number, commission: number, uncovered: number): string {
+  const base = `Lordo ${formatCurrency(gross)} · Netto ${formatCurrency(net)} · Comm. ${formatCurrency(commission)}`;
+  return uncovered > 0 ? `${base} · ${formatCurrency(uncovered)} senza tariffa` : base;
+}
+
+function UncoveredSegment({ widthPct, heightClass }: { widthPct: number; heightClass: string }) {
+  return widthPct > 0 ? (
+    <div
+      className={`${heightClass} rounded-r-full`}
+      style={{ width: `${widthPct}%`, backgroundColor: NET_COLOR, opacity: UNCOVERED_OPACITY }}
+    />
+  ) : null;
 }
 
 export function ChannelRevenueBars({
@@ -197,58 +223,62 @@ export function ChannelRevenueBars({
   // - il clamp evita un overflow visivo della barra in quel caso limite.
   let totalNetAmount = 0;
   let totalCommissionAmount = 0;
+  let totalUncoveredAmount = 0;
   // Stessa aggregazione, con le tariffe LY reali (commissionRatesLy) invece
-  // di quelle correnti - un canale senza tariffa 2025 nota contribuisce per
-  // intero al "netto" visivo del Totale 2025, stessa convenzione riga per
-  // riga, mai la % 2026 riusata qui.
+  // di quelle correnti - mai la % corrente riusata qui. Il lordo di canali/
+  // mesi senza tariffa resta "senza tariffa", mai sommato al netto.
   let totalLyNetAmount = 0;
   let totalLyCommissionAmount = 0;
+  let totalLyUncoveredAmount = 0;
   if (showNet) {
     sorted.forEach((row) => {
       if (row.revenue > 0) {
-        const info = commissionRates?.get(row.channel);
-        if (info) {
-          const commission = row.revenue * (info.pct / 100);
-          totalCommissionAmount += commission;
-          totalNetAmount += row.revenue - commission;
+        const split = splitGross(row.revenue, commissionRates?.get(row.channel));
+        if (split.show) {
+          totalNetAmount += split.net;
+          totalCommissionAmount += split.commission;
+          totalUncoveredAmount += split.uncovered;
         } else {
-          totalNetAmount += row.revenue;
+          totalUncoveredAmount += row.revenue;
         }
       }
 
       if (compareAvailable) {
         const lyVal = compareMap.get(row.channel) ?? 0;
         if (lyVal > 0) {
-          const lyInfo = commissionRatesLy?.get(row.channel);
-          if (lyInfo) {
-            const lyCommission = lyVal * (lyInfo.pct / 100);
-            totalLyCommissionAmount += lyCommission;
-            totalLyNetAmount += lyVal - lyCommission;
+          const lySplit = splitGross(lyVal, commissionRatesLy?.get(row.channel));
+          if (lySplit.show) {
+            totalLyNetAmount += lySplit.net;
+            totalLyCommissionAmount += lySplit.commission;
+            totalLyUncoveredAmount += lySplit.uncovered;
           } else {
-            totalLyNetAmount += lyVal;
+            totalLyUncoveredAmount += lyVal;
           }
         }
       }
     });
   }
+  const segmentPcts = (net: number, commission: number, uncovered: number, base: number | null) => {
+    if (!base || base <= 0) return { net: 0, commission: 0, uncovered: 0 };
+    const netPct = Math.min(100, (net / base) * 100);
+    const commissionPct = Math.max(0, Math.min(100 - netPct, (commission / base) * 100));
+    const uncoveredPct = Math.max(0, Math.min(100 - netPct - commissionPct, (uncovered / base) * 100));
+    return { net: netPct, commission: commissionPct, uncovered: uncoveredPct };
+  };
   const showTotalNet = showNet && (totalNetAmount > 0 || totalCommissionAmount > 0);
-  const totalNetSegmentPct = showTotalNet && total > 0 ? Math.min(100, (totalNetAmount / total) * 100) : 0;
-  const totalCommissionSegmentPct =
-    showTotalNet && total > 0
-      ? Math.max(0, Math.min(100 - totalNetSegmentPct, (totalCommissionAmount / total) * 100))
-      : 0;
+  const totalSegments = showTotalNet
+    ? segmentPcts(totalNetAmount, totalCommissionAmount, totalUncoveredAmount, total)
+    : segmentPcts(0, 0, 0, null);
   const totalLyBarWidthPct = totalLy !== null ? barWidthPctFor(totalLy, total) : 0;
   // Segmenti relativi a totalLy (non a "total"): la barra LY del Totale ha
   // gia' la sua larghezza propria (totalLyBarWidthPct, stessa scala del
-  // 2026) - i due segmenti devono dividersi il 100% di QUELLA larghezza,
+  // corrente) - i segmenti devono dividersi il 100% di QUELLA larghezza,
   // stessa tecnica gia' usata riga per riga.
   const showTotalLyNet = showNet && compareAvailable && (totalLyNetAmount > 0 || totalLyCommissionAmount > 0);
-  const totalLyNetSegmentPct =
-    showTotalLyNet && totalLy && totalLy > 0 ? Math.min(100, (totalLyNetAmount / totalLy) * 100) : 0;
-  const totalLyCommissionSegmentPct =
-    showTotalLyNet && totalLy && totalLy > 0
-      ? Math.max(0, Math.min(100 - totalLyNetSegmentPct, (totalLyCommissionAmount / totalLy) * 100))
-      : 0;
+  const totalLySegments = showTotalLyNet
+    ? segmentPcts(totalLyNetAmount, totalLyCommissionAmount, totalLyUncoveredAmount, totalLy)
+    : segmentPcts(0, 0, 0, null);
+  const anyUncovered = showNet && (totalUncoveredAmount > 0 || totalLyUncoveredAmount > 0);
 
   return (
     <div className="space-y-3">
@@ -262,6 +292,15 @@ export function ChannelRevenueBars({
             <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COMMISSION_COLOR }} />
             Commissione
           </span>
+          {anyUncovered && (
+            <span className="flex items-center gap-1.5">
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{ backgroundColor: NET_COLOR, opacity: UNCOVERED_OPACITY }}
+              />
+              Senza tariffa
+            </span>
+          )}
         </div>
       )}
 
@@ -278,17 +317,14 @@ export function ChannelRevenueBars({
         const badgeLeftPct = isNegative ? 4 : Math.min(barWidthPct, 94);
 
         const commissionInfo = commissionRates?.get(row.channel);
-        // Nessun breakdown se il canale non ha una riga di commissione nota
-        // per il periodo - mai un netto inventato per un canale senza dato.
-        // netAmount + commissionAmount = row.revenue esattamente (la
-        // seconda somma sempre il complementare della prima), quindi i due
-        // segmenti sommati combaciano sempre con barWidthPct, nessuno
-        // scarto visivo possibile.
-        const showChannelNet = showNet && !isNegative && commissionInfo !== undefined && row.revenue > 0;
-        const commissionAmount = showChannelNet ? row.revenue * (commissionInfo!.pct / 100) : 0;
-        const netAmount = showChannelNet ? row.revenue - commissionAmount : 0;
-        const netSegmentPct = showChannelNet ? (netAmount / row.revenue) * 100 : 0;
-        const commissionSegmentPct = showChannelNet ? (commissionAmount / row.revenue) * 100 : 0;
+        // Nessun breakdown se il canale non ha nessun mese con tariffa nel
+        // periodo - mai un netto inventato. net + commission + uncovered =
+        // row.revenue, quindi i segmenti combaciano sempre con barWidthPct.
+        const split = splitGross(row.revenue, commissionInfo);
+        const showChannelNet = showNet && !isNegative && split.show;
+        const netSegmentPct = showChannelNet ? (split.net / row.revenue) * 100 : 0;
+        const commissionSegmentPct = showChannelNet ? (split.commission / row.revenue) * 100 : 0;
+        const uncoveredSegmentPct = showChannelNet ? (split.uncovered / row.revenue) * 100 : 0;
 
         // compareAvailable=false -> dataset LY assente per l'intera
         // struttura/periodo (ND, nessuna barra). compareAvailable=true ma
@@ -307,13 +343,13 @@ export function ChannelRevenueBars({
         // percentuale 2026 riusata qui. Canale senza tariffa 2025 nota ->
         // barra lorda piena, stessa regola gia' in uso per il 2026.
         const lyCommissionInfo = commissionRatesLy?.get(row.channel);
-        const showLyChannelNet = showNet && lyValue !== null && lyValue > 0 && lyCommissionInfo !== undefined;
-        const lyCommissionAmount = showLyChannelNet ? lyValue! * (lyCommissionInfo!.pct / 100) : 0;
-        const lyNetAmount = showLyChannelNet ? lyValue! - lyCommissionAmount : 0;
-        const lyNetSegmentPct = showLyChannelNet ? (lyNetAmount / lyValue!) * 100 : 0;
-        const lyCommissionSegmentPct = showLyChannelNet ? (lyCommissionAmount / lyValue!) * 100 : 0;
+        const lySplit = splitGross(lyValue ?? 0, lyCommissionInfo);
+        const showLyChannelNet = showNet && lyValue !== null && lyValue > 0 && lySplit.show;
+        const lyNetSegmentPct = showLyChannelNet ? (lySplit.net / lyValue!) * 100 : 0;
+        const lyCommissionSegmentPct = showLyChannelNet ? (lySplit.commission / lyValue!) * 100 : 0;
+        const lyUncoveredSegmentPct = showLyChannelNet ? (lySplit.uncovered / lyValue!) * 100 : 0;
 
-        const stimaBadge = showChannelNet && commissionInfo!.source === "stima" && (
+        const stimaBadge = showChannelNet && commissionInfo!.hasEstimate && (
           <CellTooltip
             className="inline-flex shrink-0"
             trigger={
@@ -322,7 +358,8 @@ export function ChannelRevenueBars({
               </AppBadge>
             }
           >
-            {commissionInfo!.sourceReference || "Percentuale commissione stimata, non ancora da fattura."}
+            {commissionInfo!.sourceReferences.join(", ") ||
+              "Percentuale commissione stimata, non ancora da fattura (almeno un mese del periodo)."}
           </CellTooltip>
         );
 
@@ -360,9 +397,10 @@ export function ChannelRevenueBars({
                         style={{ width: `${netSegmentPct}%`, backgroundColor: NET_COLOR }}
                       />
                       <div
-                        className="h-6 rounded-r-full"
+                        className={`h-6 ${uncoveredSegmentPct > 0 ? "" : "rounded-r-full"}`}
                         style={{ width: `${commissionSegmentPct}%`, backgroundColor: COMMISSION_COLOR }}
                       />
+                      <UncoveredSegment widthPct={uncoveredSegmentPct} heightClass="h-6" />
                     </div>
                   ) : (
                     <div
@@ -439,9 +477,10 @@ export function ChannelRevenueBars({
                               style={{ width: `${lyNetSegmentPct}%`, backgroundColor: NET_COLOR }}
                             />
                             <div
-                              className="h-5 rounded-r-full"
+                              className={`h-5 ${lyUncoveredSegmentPct > 0 ? "" : "rounded-r-full"}`}
                               style={{ width: `${lyCommissionSegmentPct}%`, backgroundColor: COMMISSION_COLOR }}
                             />
+                            <UncoveredSegment widthPct={lyUncoveredSegmentPct} heightClass="h-5" />
                           </div>
                         ) : (
                           <div
@@ -493,12 +532,13 @@ export function ChannelRevenueBars({
                 <div className="flex h-6 w-full">
                   <div
                     className="h-6 rounded-l-full"
-                    style={{ width: `${totalNetSegmentPct}%`, backgroundColor: NET_COLOR }}
+                    style={{ width: `${totalSegments.net}%`, backgroundColor: NET_COLOR }}
                   />
                   <div
-                    className="h-6 rounded-r-full"
-                    style={{ width: `${totalCommissionSegmentPct}%`, backgroundColor: COMMISSION_COLOR }}
+                    className={`h-6 ${totalSegments.uncovered > 0 ? "" : "rounded-r-full"}`}
+                    style={{ width: `${totalSegments.commission}%`, backgroundColor: COMMISSION_COLOR }}
                   />
+                  <UncoveredSegment widthPct={totalSegments.uncovered} heightClass="h-6" />
                 </div>
               ) : (
                 <div className="h-6 w-full rounded-full" style={{ backgroundColor: POSITIVE_COLOR }} />
@@ -523,7 +563,7 @@ export function ChannelRevenueBars({
             <div className="flex items-center gap-3">
               <span className="w-14 shrink-0" />
               <span className="text-[11px] text-[#6a6d70]">
-                {formatTotaleBreakdown(total, totalNetAmount, totalCommissionAmount)}
+                {formatTotaleBreakdown(total, totalNetAmount, totalCommissionAmount, totalUncoveredAmount)}
               </span>
             </div>
           )}
@@ -545,12 +585,13 @@ export function ChannelRevenueBars({
                       <div className="flex h-5" style={{ width: `${totalLyBarWidthPct}%` }}>
                         <div
                           className="h-5 rounded-l-full"
-                          style={{ width: `${totalLyNetSegmentPct}%`, backgroundColor: NET_COLOR }}
+                          style={{ width: `${totalLySegments.net}%`, backgroundColor: NET_COLOR }}
                         />
                         <div
-                          className="h-5 rounded-r-full"
-                          style={{ width: `${totalLyCommissionSegmentPct}%`, backgroundColor: COMMISSION_COLOR }}
+                          className={`h-5 ${totalLySegments.uncovered > 0 ? "" : "rounded-r-full"}`}
+                          style={{ width: `${totalLySegments.commission}%`, backgroundColor: COMMISSION_COLOR }}
                         />
+                        <UncoveredSegment widthPct={totalLySegments.uncovered} heightClass="h-5" />
                       </div>
                     ) : (
                       <div
@@ -569,7 +610,7 @@ export function ChannelRevenueBars({
                 <div className="flex items-center gap-3">
                   <span className="w-14 shrink-0" />
                   <span className="text-[11px] text-[#6a6d70]">
-                    {formatTotaleBreakdown(totalLy, totalLyNetAmount, totalLyCommissionAmount)}
+                    {formatTotaleBreakdown(totalLy, totalLyNetAmount, totalLyCommissionAmount, totalLyUncoveredAmount)}
                   </span>
                 </div>
               )}

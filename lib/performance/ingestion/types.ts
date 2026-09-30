@@ -93,8 +93,11 @@ export type StructureResolution =
 // per gli esiti che avvengono PRIMA della normalizzazione (routing_error).
 export type IngestionOutcome = (
   | { status: "imported"; importedCount: number; eventId: string; bdImportIds: string[] }
-  | { status: "skipped_duplicate"; reason: "exact_duplicate" | "semantic_duplicate"; eventId: string }
-  | { status: "conflict"; eventId: string; conflictingEventId: string | null }
+  | { status: "skipped_duplicate"; reason: "exact_duplicate" | "semantic_duplicate" | "legacy_equivalent"; eventId: string }
+  // conflictKind: "content" = contro un import Foundation gia' completato
+  // (conflictingEventId valorizzato); "legacy" = contro righe scritte prima
+  // della Foundation con contenuto diverso (legacy_snapshot_present).
+  | { status: "conflict"; conflictKind: "content" | "legacy"; eventId: string; conflictingEventId: string | null }
   | { status: "routing_error"; message: string }
   | { status: "parse_error"; message: string }
   | { status: "validation_error"; message: string }

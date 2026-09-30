@@ -25,6 +25,18 @@ export type ImportDecision =
   | { action: "skip_duplicate"; reason: "exact_duplicate" | "semantic_duplicate" }
   | { action: "conflict"; conflictingEventId: string };
 
+// Righe legacy (pre-Foundation) presenti sulla chiave, nessun evento
+// 'imported': duplicato solo se il normalized_content_hash ricostruito
+// dalle righe legacy (stessa funzione di normalization.ts) coincide con
+// quello del nuovo import; altrimenti conflitto, come prima.
+export type LegacyDecision = { action: "skip_duplicate"; reason: "legacy_equivalent" } | { action: "conflict" };
+
+export function decideLegacyAction(legacyContentHash: string, candidateContentHash: string): LegacyDecision {
+  return legacyContentHash === candidateContentHash
+    ? { action: "skip_duplicate", reason: "legacy_equivalent" }
+    : { action: "conflict" };
+}
+
 // priorImportedEvent = l'ultimo evento con status='imported' per la stessa
 // chiave (structure_id, extraction_date, dataset) - null se non esiste
 // ancora nessun import completato per quella chiave, indipendentemente da

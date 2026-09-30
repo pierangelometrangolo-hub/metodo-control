@@ -109,53 +109,146 @@ export function los(roomsSold: number | null, arrivals: number | null): number |
   return roomsSold / arrivals;
 }
 
-// "pending": mancano sia room night sia revenue, i due valori sono validi.
-// "achieved": il Minimo e' gia' superato in revenue - non serve vendere
-// altro, ADR/RN to goal non hanno senso come numero.
-// "sold_out": le room night mancanti sono gia' esaurite (si e' venduto
-// almeno quanto previsto dall'occupazione target) ma il revenue del
-// Minimo non e' ancora raggiunto - serve un prezzo piu' alto sulle
-// camere gia' vendute, non altre camere: stato distinto da "achieved" e
-// da "ND" (qui i dati ci sono, e' l'esito del calcolo ad essere un
-// esaurimento inventario, non un dato mancante).
-export type GoalGap = {
-  roomsNeeded: number | null;
-  adrNeeded: number | null;
-  status: "pending" | "achieved" | "sold_out";
+// ============ RN / ADR TO GOAL ============
+// Tre grandezze tenute separate, mai fuse in un solo numero:
+//   - target teorico: RN che il budget del livello target prevedeva di
+//     vendere ancora (% Occupazione target x Room night disponibili del
+//     livello) - Room night gia' vendute. Informativo: NON dice quante
+//     camere sono ancora vendibili.
+//   - capacita' reale residua: somma di max(0, rooms_available -
+//     rooms_sold) sui giorni da OGGI INCLUSO a fine periodo, dalle righe
+//     giornaliere di v_snapshot_latest - mai stimata dal budget.
+//   - ADR operativo: gap revenue / capacita' residua.
+// Il layer deterministico NON giudica se l'ADR operativo sia realistico
+// (RN teoriche > RN residue non significa "non raggiungibile": puo'
+// bastare un prezzo piu' alto). L'unica conclusione certa e'
+// "capacity_exhausted": gap > 0 e nessuna camera ancora vendibile.
+
+export type GoalLevel = BudgetRow["level"];
+
+const GOAL_LEVEL_ORDER: GoalLevel[] = ["minimo", "realistico", "sfidante"];
+
+export const goalLevelLabels: Record<GoalLevel, string> = {
+  minimo: "Budget Minimo",
+  realistico: "Budget Realistico",
+  sfidante: "Budget Sfidante",
 };
 
-// Room night e ADR necessari per raggiungere il Budget Minimo, sulle
-// camere che mancano rispetto all'OCCUPAZIONE TARGET del Minimo (non su
-// tutte le camere fisicamente ancora libere nel mese, che sarebbero molte
-// di piu' di quelle davvero previste dal budget):
-//   room night mancanti = (% Occupazione target del Minimo x Room night
-//     disponibili del Minimo) - Room night gia' vendute
-//   ADR necessaria = (Minimo - Revenue OTB mese) / room night mancanti
-// Restituisce null (ND) solo se manca uno degli input; altrimenti sempre
-// un oggetto con uno status esplicito (achieved/sold_out/pending), mai un
-// numero privo di senso.
-export function computeGoalGap(
-  monthRevenue: number | null,
-  minimoBudget: BudgetRow | undefined,
-  roomsSold: number | null
-): GoalGap | null {
-  if (monthRevenue === null || !minimoBudget || roomsSold === null) {
-    return null;
+export type DailyCapacityRow = {
+  stayDate: string;
+  roomsSold: number | null;
+  roomsAvailable: number | null;
+};
+
+export type GoalProgress =
+  | { status: "achieved"; level: GoalLevel }
+  | {
+      // gap > 0 e capacita' residua > 0: adrNeeded sempre finito.
+      status: "pending";
+      level: GoalLevel;
+      gapRevenue: number;
+      theoreticalRoomsNeeded: number | null;
+      remainingRoomNights: number;
+      adrNeeded: number;
+    }
+  | {
+      // gap > 0, nessuna camera vendibile da oggi a fine periodo (periodo
+      // passato o residuo tutto venduto/indisponibile).
+      status: "capacity_exhausted";
+      level: GoalLevel;
+      gapRevenue: number;
+      theoreticalRoomsNeeded: number | null;
+      remainingRoomNights: 0;
+    }
+  | {
+      // Mancano righe giornaliere nel residuo: la capacita' non e'
+      // determinabile, mai stimata dal budget.
+      status: "insufficient_data";
+      level: GoalLevel;
+      gapRevenue: number;
+      theoreticalRoomsNeeded: number | null;
+    };
+
+function finiteOrNull(n: number): number | null {
+  return Number.isFinite(n) ? n : null;
+}
+
+// Primo livello (Minimo -> Realistico -> Sfidante) non ancora raggiunto in
+// revenue; null se tutti i livelli presenti sono raggiunti.
+export function selectGoalLevel(monthRevenue: number, budgets: BudgetRow[]): BudgetRow | null {
+  for (const level of GOAL_LEVEL_ORDER) {
+    const budget = budgets.find((b) => b.level === level);
+    if (budget && monthRevenue < Number(budget.revenue_target)) return budget;
+  }
+  return null;
+}
+
+// Room night ancora vendibili da max(oggi, inizio periodo) a fine periodo,
+// oggi incluso. 0 per un periodo passato; null se anche un solo giorno del
+// residuo non ha una riga (o ha valori mancanti).
+export function computeRemainingRoomNights(
+  dailyRows: DailyCapacityRow[],
+  periodStart: string,
+  periodEnd: string,
+  today: string
+): number | null {
+  const windowStart = today > periodStart ? today : periodStart;
+  if (windowStart > periodEnd) return 0;
+
+  const byDate = new Map(dailyRows.map((r) => [r.stayDate, r]));
+  let remaining = 0;
+  for (let day = windowStart; day <= periodEnd; day = shiftDate(day, 1)) {
+    const row = byDate.get(day);
+    if (!row || row.roomsAvailable === null || row.roomsSold === null) return null;
+    const free = Number(row.roomsAvailable) - Number(row.roomsSold);
+    if (!Number.isFinite(free)) return null;
+    remaining += Math.max(0, free);
+  }
+  return remaining;
+}
+
+// null (ND) se manca l'OTB o il budget Minimo, come prima.
+export function computeGoalProgress(params: {
+  monthRevenue: number | null;
+  roomsSold: number | null;
+  budgets: BudgetRow[];
+  dailyRows: DailyCapacityRow[];
+  periodStart: string;
+  periodEnd: string;
+  today: string;
+}): GoalProgress | null {
+  const { monthRevenue, roomsSold, budgets, dailyRows, periodStart, periodEnd, today } = params;
+  if (monthRevenue === null || !budgets.some((b) => b.level === "minimo")) return null;
+
+  const target = selectGoalLevel(monthRevenue, budgets);
+  if (target === null) {
+    const highest = [...GOAL_LEVEL_ORDER].reverse().find((l) => budgets.some((b) => b.level === l))!;
+    return { status: "achieved", level: highest };
   }
 
-  const minimoTarget = Number(minimoBudget.revenue_target);
-  const remainingRevenue = minimoTarget - monthRevenue;
-  if (remainingRevenue <= 0) {
-    return { roomsNeeded: null, adrNeeded: null, status: "achieved" };
+  const gapRevenue = Number(target.revenue_target) - monthRevenue;
+  const theoretical =
+    roomsSold === null
+      ? null
+      : finiteOrNull(Number(target.occupancy_pct_target) * Number(target.room_nights_available) - roomsSold);
+  const theoreticalRoomsNeeded = theoretical === null ? null : Math.max(0, theoretical);
+
+  const remaining = computeRemainingRoomNights(dailyRows, periodStart, periodEnd, today);
+  if (remaining === null) {
+    return { status: "insufficient_data", level: target.level, gapRevenue, theoreticalRoomsNeeded };
+  }
+  if (remaining === 0) {
+    return { status: "capacity_exhausted", level: target.level, gapRevenue, theoreticalRoomsNeeded, remainingRoomNights: 0 };
   }
 
-  const targetRoomsSold = Number(minimoBudget.occupancy_pct_target) * Number(minimoBudget.room_nights_available);
-  const remainingRooms = targetRoomsSold - roomsSold;
-  if (remainingRooms <= 0) {
-    return { roomsNeeded: null, adrNeeded: null, status: "sold_out" };
-  }
-
-  return { roomsNeeded: remainingRooms, adrNeeded: remainingRevenue / remainingRooms, status: "pending" };
+  return {
+    status: "pending",
+    level: target.level,
+    gapRevenue,
+    theoreticalRoomsNeeded,
+    remainingRoomNights: remaining,
+    adrNeeded: gapRevenue / remaining,
+  };
 }
 
 export function computePacingStatus(

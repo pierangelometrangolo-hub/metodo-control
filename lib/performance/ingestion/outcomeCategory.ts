@@ -28,6 +28,30 @@ export function categorizeOutcome(status: IngestionOutcome["status"]): OutcomeCa
   return "error"; // routing_error | parse_error
 }
 
+// Testo di dettaglio per ogni esito, derivato dallo status/motivo REALE
+// restituito dal servizio (mai un testo unico per tutti i conflitti).
+export function describeOutcome(outcome: IngestionOutcome): string {
+  switch (outcome.status) {
+    case "imported":
+      return `${outcome.importedCount} righe importate`;
+    case "skipped_duplicate":
+      if (outcome.reason === "legacy_equivalent") {
+        return "Duplicato già acquisito: contenuto identico a uno snapshot legacy già presente.";
+      }
+      return outcome.reason === "exact_duplicate"
+        ? "Duplicato esatto (stesso file già importato) - nessuna scrittura."
+        : "Duplicato semantico (stesso contenuto già importato con un file diverso) - nessuna scrittura.";
+    case "conflict":
+      return outcome.conflictKind === "legacy"
+        ? "Conflitto con snapshot legacy: il contenuto già presente è diverso dal file caricato. Nessuna scrittura."
+        : "Conflitto: esiste già un import completato per questa struttura/data con contenuto diverso. Nessuna scrittura.";
+    case "routing_error":
+    case "parse_error":
+    case "validation_error":
+      return outcome.message;
+  }
+}
+
 export const OUTCOME_CATEGORY_LABEL: Record<OutcomeCategory, string> = {
   imported: "Importato",
   duplicate: "Duplicato già acquisito",

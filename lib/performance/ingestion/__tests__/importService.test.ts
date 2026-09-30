@@ -37,18 +37,47 @@ function fakeQueryBuilder(result: { data: unknown; error: unknown }) {
 // il valore passato a .eq("extraction_date", ...) cosi' i test possono
 // simulare "legacy presente SOLO per questa data" (fondamentale per il
 // test 3, dove un solo kind/batch su piu' deve risultare in conflitto).
-function fakeLegacyTableBuilder(legacyExtractionDates: string[]) {
+//
+// Legacy equivalente: legacyRowsByDate fornisce il CONTENUTO reale delle
+// righe legacy per data (letto da loadLegacySnapshotRows/
+// loadLegacyNationalityRows via .order().range()). Una data presente solo
+// in legacyExtractionDates ha un contenuto sicuramente diverso da
+// qualunque file di test (riga sentinella 1999-01-01) - cosi' i test
+// storici "legacy presente -> conflict" mantengono il loro significato.
+type LegacyRow = Record<string, unknown>;
+
+function sentinelLegacyRow(table: string): LegacyRow {
+  return table === "guest_nationality"
+    ? { stay_date: "1999-01-01", nationality: "ZZ", presences: 1 }
+    : { stay_date: "1999-01-01", revenue_total: 1, rooms_sold: 1, rooms_available: 1, arrivals: null, presences: 1 };
+}
+
+function fakeLegacyTableBuilder(table: string, legacyExtractionDates: string[], legacyRowsByDate: Record<string, LegacyRow[]>) {
   let capturedExtractionDate: string | undefined;
+  let range: [number, number] | null = null;
+  const rowsFor = (date: string | undefined): LegacyRow[] => {
+    if (date === undefined) return [];
+    if (legacyRowsByDate[date]) return legacyRowsByDate[date];
+    return legacyExtractionDates.includes(date) ? [sentinelLegacyRow(table)] : [];
+  };
   const builder: Record<string, unknown> = {
     select: () => builder,
     eq: (col: string, val: string) => {
       if (col === "extraction_date") capturedExtractionDate = val;
       return builder;
     },
+    order: () => builder,
     limit: () => builder,
+    range: (from: number, to: number) => {
+      range = [from, to];
+      return builder;
+    },
     then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => {
-      const exists = capturedExtractionDate !== undefined && legacyExtractionDates.includes(capturedExtractionDate);
-      return Promise.resolve({ data: exists ? [{ id: "legacy-row-1" }] : [], error: null }).then(resolve, reject);
+      const rows = rowsFor(capturedExtractionDate);
+      // .limit(1) (checkLegacySnapshotExists) -> solo presenza; .range()
+      // (lettura completa) -> la pagina richiesta.
+      const data = range ? rows.slice(range[0], range[1] + 1) : rows.length > 0 ? [{ id: "legacy-row-1" }] : [];
+      return Promise.resolve({ data, error: null }).then(resolve, reject);
     },
   };
   return builder;
@@ -62,6 +91,7 @@ type FakeSupabaseOptions = {
   // devono risultare gia' popolate (dati legacy pre-Foundation) - default
   // nessuna, cioe' comportamento identico a prima di questa correzione.
   legacyExtractionDates?: string[];
+  legacyRowsByDate?: Record<string, LegacyRow[]>;
 };
 
 function makeFakeSupabase(opts: FakeSupabaseOptions) {
@@ -98,7 +128,7 @@ function makeFakeSupabase(opts: FakeSupabaseOptions) {
         };
       }
       if (table === "performance_daily_snapshot" || table === "guest_nationality") {
-        return fakeLegacyTableBuilder(opts.legacyExtractionDates ?? []);
+        return fakeLegacyTableBuilder(table, opts.legacyExtractionDates ?? [], opts.legacyRowsByDate ?? {});
       }
       // Nessun altro nome di tabella e' atteso: una scrittura diretta su
       // bd_imports/performance_daily_snapshot/guest_nationality da qui
@@ -235,11 +265,11 @@ describe("L. regressione file reale: il set di righe prodotto dalla pipeline coi
 // Gap reale scoperto sullo snapshot BD 08/09/2026 gia' in produzione:
 // nessun performance_import_event esisteva per quella chiave, ma
 // performance_daily_snapshot conteneva gia' righe scritte prima che questo
-// sistema esistesse. I 3 test sotto (1/2/3, dataset diversi) verificano lo
-// stesso comportamento richiesto: conflict/legacy_snapshot_present, zero
-// scritture ai dataset, un evento di audit persistito - MAI una
-// classificazione automatica come duplicato (nessun hash legacy da cui
-// dedurla, verificato esplicitamente nel test 4).
+// sistema esistesse. I 3 test sotto (1/2/3, dataset diversi) verificano,
+// con contenuto legacy DIVERSO dal file, lo stesso comportamento:
+// conflict/legacy_snapshot_present, zero scritture ai dataset, un evento
+// di audit persistito. Il caso contenuto IDENTICO (legacy_equivalent) e'
+// nel describe successivo.
 describe("Compatibilità con snapshot legacy pre-Foundation (nessun performance_import_event, dati già presenti)", () => {
   it("1. legacy ADR/RevPAR presente, nessun evento -> conflict/legacy_snapshot_present, zero tentativi RPC/upload, evento auditato", async () => {
     const fakeSupabase = makeFakeSupabase({
@@ -266,6 +296,7 @@ describe("Compatibilità con snapshot legacy pre-Foundation (nessun performance_
     expect(outcome.status).toBe("conflict");
     if (outcome.status === "conflict") {
       expect(outcome.conflictingEventId).toBeNull(); // conflitto contro dati legacy, non contro un evento
+      expect(outcome.conflictKind).toBe("legacy");
       expect(outcome.eventId).toBeTruthy();
     }
 
@@ -420,6 +451,298 @@ describe("Compatibilità con snapshot legacy pre-Foundation (nessun performance_
   });
 });
 
+// ============ Legacy equivalente ============
+// Righe legacy con contenuto identico al file (stesso normalized_content_hash
+// ricostruito con normalization.ts) -> skipped_duplicate/legacy_equivalent,
+// zero RPC/upload. Le righe legacy arrivano come le restituisce PostgREST
+// (numeric come number, arrivals null).
+function toLegacySnapshotRow(r: { stayDate: string; revenueTotal: number; roomsSold: number; roomsAvailable: number; arrivals: number | null; presences: number }): LegacyRow {
+  return {
+    stay_date: r.stayDate,
+    revenue_total: r.revenueTotal,
+    rooms_sold: r.roomsSold,
+    rooms_available: r.roomsAvailable,
+    arrivals: r.arrivals,
+    presences: r.presences,
+  };
+}
+
+// 30 giorni di settembre dell'anno dato, arrivals null come nel PMS Montecallini.
+function septemberRows(year: number, seed: number) {
+  return Array.from({ length: 30 }, (_, i) => ({
+    stayDate: `${year}-09-${String(i + 1).padStart(2, "0")}`,
+    revenueTotal: Math.round((3000 + seed * 17 + i * 123.45) * 100) / 100,
+    roomsSold: 20 + ((i + seed) % 12),
+    roomsAvailable: 43,
+    arrivals: null,
+    presences: 40 + ((i * 3 + seed) % 20),
+  }));
+}
+
+describe("Legacy equivalente: contenuto identico a uno snapshot legacy -> duplicato, nessuna scrittura", () => {
+  it("1. ADR/RevPAR: legacy identico -> skipped_duplicate/legacy_equivalent, zero RPC/upload, evento auditato", async () => {
+    const rows = [
+      { stayDate: "2026-01-02", revenueTotal: 250.5, roomsSold: 6, roomsAvailable: 10, arrivals: 2, presences: 11 },
+      { stayDate: "2026-01-01", revenueTotal: 100, roomsSold: 5, roomsAvailable: 10, arrivals: 1, presences: 8 },
+    ];
+    const fakeSupabase = makeFakeSupabase({
+      aliases,
+      priorEvent: null,
+      // Ordine diverso dal file: la canonicalizzazione ordina per stay_date.
+      legacyRowsByDate: { "2026-09-08": [...rows].reverse().map(toLegacySnapshotRow) },
+    });
+
+    const outcome = await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      dataset: "adr_revpar",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("irrilevante"),
+      fileContent: new TextEncoder().encode("irrilevante").buffer,
+      extractionDate: "2026-09-08",
+      snapshotRows: rows,
+    });
+
+    expect(outcome.status).toBe("skipped_duplicate");
+    if (outcome.status === "skipped_duplicate") expect(outcome.reason).toBe("legacy_equivalent");
+    expect(fakeSupabase.__calls().rpcCallCount).toBe(0);
+    expect(fakeSupabase.__calls().uploadCallCount).toBe(0);
+
+    const inserts = fakeSupabase.__calls().importEventInserts;
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toMatchObject({
+      structure_id: STRUCTURE_ID,
+      extraction_date: "2026-09-08",
+      dataset: "adr_revpar",
+      status: "skipped_duplicate",
+      error_code: "legacy_equivalent",
+    });
+    expect(inserts[0].normalized_content_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("2. ADR/RevPAR: legacy con un solo valore diverso -> conflict legacy, zero scritture", async () => {
+    const rows = [{ stayDate: "2026-01-01", revenueTotal: 100, roomsSold: 5, roomsAvailable: 10, arrivals: 1, presences: 8 }];
+    const fakeSupabase = makeFakeSupabase({
+      aliases,
+      priorEvent: null,
+      legacyRowsByDate: { "2026-09-08": [toLegacySnapshotRow({ ...rows[0], revenueTotal: 100.01 })] },
+    });
+
+    const outcome = await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      dataset: "adr_revpar",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("irrilevante"),
+      fileContent: new TextEncoder().encode("irrilevante").buffer,
+      extractionDate: "2026-09-08",
+      snapshotRows: rows,
+    });
+
+    expect(outcome.status).toBe("conflict");
+    if (outcome.status === "conflict") expect(outcome.conflictKind).toBe("legacy");
+    expect(fakeSupabase.__calls().rpcCallCount).toBe(0);
+    expect(fakeSupabase.__calls().uploadCallCount).toBe(0);
+    expect(fakeSupabase.__calls().importEventInserts[0]).toMatchObject({ status: "conflict", error_code: "legacy_snapshot_present" });
+  });
+
+  it("3. Nazionalità: legacy identico su piu' di 1000 righe (lettura paginata completa) -> legacy_equivalent", async () => {
+    const nationalities = ["ITALIA", "GERMANIA", "FRANCIA", "USA"];
+    const rows = Array.from({ length: 1200 }, (_, i) => ({
+      stayDate: shiftDay("2026-01-01", Math.floor(i / nationalities.length)),
+      nationality: nationalities[i % nationalities.length],
+      presences: 1 + (i % 7),
+    }));
+    const fakeSupabase = makeFakeSupabase({
+      aliases,
+      priorEvent: null,
+      legacyRowsByDate: {
+        "2026-09-08": rows.map((r) => ({ stay_date: r.stayDate, nationality: r.nationality, presences: r.presences })),
+      },
+    });
+
+    const outcome = await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      dataset: "nationality",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("irrilevante", NATIONALITY_FILE_NAME),
+      fileContent: new TextEncoder().encode("irrilevante").buffer,
+      extractionDate: "2026-09-08",
+      nationalityRows: rows,
+    });
+
+    expect(outcome.status).toBe("skipped_duplicate");
+    if (outcome.status === "skipped_duplicate") expect(outcome.reason).toBe("legacy_equivalent");
+    expect(fakeSupabase.__calls().rpcCallCount).toBe(0);
+    expect(fakeSupabase.__calls().importEventInserts[0]).toMatchObject({
+      dataset: "nationality",
+      status: "skipped_duplicate",
+      error_code: "legacy_equivalent",
+    });
+  });
+
+  it("4. Nazionalità: legacy diverso (presenze diverse su un giorno) -> conflict legacy, zero scritture", async () => {
+    const rows = [
+      { stayDate: "2026-09-08", nationality: "ITALIA", presences: 3 },
+      { stayDate: "2026-09-08", nationality: "GERMANIA", presences: 2 },
+    ];
+    const fakeSupabase = makeFakeSupabase({
+      aliases,
+      priorEvent: null,
+      legacyRowsByDate: {
+        "2026-09-08": [
+          { stay_date: "2026-09-08", nationality: "ITALIA", presences: 3 },
+          { stay_date: "2026-09-08", nationality: "GERMANIA", presences: 4 },
+        ],
+      },
+    });
+
+    const outcome = await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      dataset: "nationality",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("irrilevante", NATIONALITY_FILE_NAME),
+      fileContent: new TextEncoder().encode("irrilevante").buffer,
+      extractionDate: "2026-09-08",
+      nationalityRows: rows,
+    });
+
+    expect(outcome.status).toBe("conflict");
+    if (outcome.status === "conflict") expect(outcome.conflictKind).toBe("legacy");
+    expect(fakeSupabase.__calls().rpcCallCount).toBe(0);
+    expect(fakeSupabase.__calls().importEventInserts[0]).toMatchObject({ status: "conflict", error_code: "legacy_snapshot_present" });
+  });
+
+  it("5. Montecallini 30/09/2026: LY settembre 2025 identico al legacy (extraction_date 2025-10-01) -> legacy_equivalent; CY e SDLY importati normalmente", async () => {
+    const MONTECALLINI_ID = "22222222-2222-2222-2222-222222222222";
+    const montecalliniStructures: StructureOption[] = [{ id: MONTECALLINI_ID, name: MONTECALLINI_STRUCTURE_NAME }];
+    const cy = septemberRows(2026, 1);
+    const sdly = septemberRows(2025, 2);
+    const ly = septemberRows(2025, 2);
+
+    const fakeSupabase = makeFakeSupabase({
+      aliases: [],
+      priorEvent: null,
+      legacyRowsByDate: { "2025-10-01": ly.map(toLegacySnapshotRow) },
+      rpcResult: { data: { status: "imported", event_id: "evt-rpc", imported_count: 30, bd_import_ids: ["bd-1"] }, error: null },
+    });
+
+    const file = makeFile("pms", "PlanningForecast sett (2).csv");
+    const batchResult = await ingestMontecalliniBatch({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      selectedStructureId: MONTECALLINI_ID,
+      structures: montecalliniStructures,
+      uploadedBy: "user-1",
+      today: "2026-09-30",
+      files: [
+        {
+          fileName: file.name,
+          file,
+          content: new TextEncoder().encode("pms").buffer,
+          groups: [
+            { kind: "cy", rows: cy },
+            { kind: "sdly", rows: sdly },
+            { kind: "ly", rows: ly },
+          ],
+        },
+      ],
+    });
+
+    expect(batchResult.status).toBe("ok");
+    if (batchResult.status !== "ok") throw new Error("unreachable");
+    const byKind = (k: string) => batchResult.batches.find((b) => b.kind === k)!.outcome;
+
+    expect(byKind("cy").status).toBe("imported");
+    expect(byKind("sdly").status).toBe("imported");
+    const lyOutcome = byKind("ly");
+    expect(lyOutcome.status).toBe("skipped_duplicate");
+    if (lyOutcome.status === "skipped_duplicate") expect(lyOutcome.reason).toBe("legacy_equivalent");
+
+    // RPC solo per CY e SDLY, con le extraction_date invariate.
+    expect(fakeSupabase.__calls().rpcCallCount).toBe(2);
+    const lyEvents = fakeSupabase.__calls().importEventInserts;
+    expect(lyEvents).toHaveLength(1);
+    expect(lyEvents[0]).toMatchObject({
+      extraction_date: "2025-10-01",
+      dataset: "montecallini_pms",
+      status: "skipped_duplicate",
+      error_code: "legacy_equivalent",
+    });
+  });
+
+  it("6. import moderno gia' presente (evento 'imported'): il ramo legacy non viene mai consultato, decide la RPC come prima", async () => {
+    const fakeSupabase = makeFakeSupabase({
+      aliases,
+      priorEvent: { id: "evt-prior", source_checksum: "altro", normalized_content_hash: "altro" },
+      // Anche con righe presenti sulla chiave, un evento 'imported' esistente
+      // manda sempre al flusso Foundation standard.
+      legacyExtractionDates: ["2026-09-08"],
+      rpcResult: { data: { status: "conflict", event_id: "evt-conflict", conflicting_event_id: "evt-prior" }, error: null },
+    });
+
+    const outcome = await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      dataset: "adr_revpar",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("irrilevante"),
+      fileContent: new TextEncoder().encode("irrilevante").buffer,
+      extractionDate: "2026-09-08",
+      snapshotRows: [{ stayDate: "2026-01-01", revenueTotal: 100, roomsSold: 5, roomsAvailable: 10, arrivals: 1, presences: 8 }],
+    });
+
+    expect(outcome.status).toBe("conflict");
+    if (outcome.status === "conflict") {
+      expect(outcome.conflictKind).toBe("content");
+      expect(outcome.conflictingEventId).toBe("evt-prior");
+    }
+    expect(fakeSupabase.__calls().rpcCallCount).toBe(1);
+    expect(fakeSupabase.__calls().importEventInserts).toHaveLength(0);
+  });
+
+  it("7. import moderno con stesso hash: la RPC risponde semantic_duplicate, esito propagato invariato", async () => {
+    const fakeSupabase = makeFakeSupabase({
+      aliases,
+      priorEvent: { id: "evt-prior", source_checksum: "altro", normalized_content_hash: "altro" },
+      rpcResult: { data: { status: "skipped_duplicate", reason: "semantic_duplicate", event_id: "evt-dup" }, error: null },
+    });
+
+    const outcome = await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fakeSupabase as any,
+      dataset: "adr_revpar",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("irrilevante"),
+      fileContent: new TextEncoder().encode("irrilevante").buffer,
+      extractionDate: "2026-09-08",
+      snapshotRows: [{ stayDate: "2026-01-01", revenueTotal: 100, roomsSold: 5, roomsAvailable: 10, arrivals: 1, presences: 8 }],
+    });
+
+    expect(outcome).toMatchObject({ status: "skipped_duplicate", reason: "semantic_duplicate", eventId: "evt-dup" });
+    expect(fakeSupabase.__calls().importEventInserts).toHaveLength(0);
+  });
+});
+
+function shiftDay(date: string, days: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
 // ============ Hardening: guardia transazionale finale (correzione post-Fase 1, terza revisione) ============
 // Elimina la race documentata nel report precedente: pre-check TS
 // (checkLegacySnapshotExists) -> finestra temporale -> RPC. Questi test
@@ -467,6 +790,7 @@ describe("Hardening: guardia legacy dentro la RPC come rete di sicurezza sulla r
     if (outcome.status === "conflict") {
       expect(outcome.eventId).toBe("evt-server-side-guard"); // l'evento e' quello scritto DALLA RPC, non un doppione lato client
       expect(outcome.conflictingEventId).toBeNull();
+      expect(outcome.conflictKind).toBe("legacy");
     }
 
     // Il pre-check TS ha lasciato proseguire verso commit (non vedeva

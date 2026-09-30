@@ -33,9 +33,20 @@ import {
 import { IngestionOutcome, StructureAlias, StructureResolution } from "@/lib/performance/ingestion/types";
 import { resolveBookingDesignerStructure, structureResolutionErrorMessage } from "@/lib/performance/ingestion/routing";
 import { loadStructureAliases } from "@/lib/performance/ingestion/repository";
-import { categorizeOutcome, OUTCOME_CATEGORY_LABEL, OutcomeCategory } from "@/lib/performance/ingestion/outcomeCategory";
+import {
+  categorizeOutcome,
+  describeOutcome,
+  OUTCOME_CATEGORY_LABEL,
+  OutcomeCategory,
+} from "@/lib/performance/ingestion/outcomeCategory";
 import { groupFindingsForDisplay } from "@/lib/performance/guardrails";
 import type { GuardrailFinding } from "@/lib/performance/guardrails";
+import {
+  CommissionSource,
+  decideCommissionWrite,
+  ExistingCommissionRate,
+  roundCommissionPct,
+} from "@/lib/performance/commissionRates";
 
 // channel_commission_rates ha RLS insert/update a rank >= 2 - il form
 // Commissioni va nascosto del tutto per level=user, non solo disabilitato
@@ -104,23 +115,6 @@ function totalRowsInEntry(entry: FileEntry): number {
 // separato: NON deve MAI finire sotto "Errore parsing/routing" ne' sotto
 // "Errore validazione" (bug UX gia' corretto una volta, STEP 2).
 
-function outcomeDetail(outcome: IngestionOutcome): string {
-  switch (outcome.status) {
-    case "imported":
-      return `${outcome.importedCount} righe importate`;
-    case "skipped_duplicate":
-      return outcome.reason === "exact_duplicate"
-        ? "Duplicato esatto (stesso file già importato) - nessuna scrittura."
-        : "Duplicato semantico (stesso contenuto già importato con un file diverso) - nessuna scrittura.";
-    case "conflict":
-      return "Un import già completato per questa struttura/data ha un contenuto diverso - nessuna scrittura, richiede verifica manuale.";
-    case "routing_error":
-    case "parse_error":
-    case "validation_error":
-      return outcome.message;
-  }
-}
-
 type OutcomeLine = {
   label: string;
   category: OutcomeCategory;
@@ -137,7 +131,7 @@ function outcomeLine(label: string, outcome: IngestionOutcome): OutcomeLine {
   return {
     label,
     category: categorizeOutcome(outcome.status),
-    detail: outcomeDetail(outcome),
+    detail: describeOutcome(outcome),
     findings: outcome.guardrailFindings,
   };
 }
@@ -380,7 +374,7 @@ export default function PerformanceImportPage() {
   );
   const [canManage, setCanManage] = useState(false);
   const [structures, setStructures] = useState<StructureOption[]>([]);
-  const [importType, setImportType] = useState<"adr_revpar" | "commissioni" | "nazionalita">("adr_revpar");
+  const [importType, setImportType] = useState<"adr_revpar" | "nazionalita" | "canali" | "commissioni">("adr_revpar");
   // "Import actual" e' il flusso ricorrente settimanale (5 strutture, una
   // dopo l'altra) - deve essere la tab aperta di default. "Import storico"
   // e' un'operazione occasionale (batch multi-file storico), non quella con
@@ -421,15 +415,16 @@ export default function PerformanceImportPage() {
 
       <PageHeader
         eyebrow="Performance"
-        title="Import"
-        description="Import ADR/RevPAR (storico e actual), Commissioni canale e Nazionalità."
+        title="Aggiornamenti Performance"
+        description="Unico punto per mantenere aggiornati i dati Performance: Performance Core (export BD ADR/RevPAR e PMS Montecallini), Nazionalità, Revenue per canale e Commissioni canale. Ogni upload passa dai controlli duplicato/conflitto: nessuna sovrascrittura silenziosa."
       />
 
       <div className="flex flex-wrap gap-2">
         {[
-          { value: "adr_revpar" as const, label: "ADR/RevPAR" },
-          { value: "commissioni" as const, label: "Commissioni canale" },
+          { value: "adr_revpar" as const, label: "Performance Core" },
           { value: "nazionalita" as const, label: "Nazionalità" },
+          { value: "canali" as const, label: "Revenue per canale" },
+          { value: "commissioni" as const, label: "Commissioni canale" },
         ].map((opt) => (
           <button
             key={opt.value}
@@ -475,13 +470,6 @@ export default function PerformanceImportPage() {
           ) : (
             <ImportActual structures={structures} />
           )}
-
-          <Link
-            href="/performance/inserimento-manuale"
-            className="block text-[12px] font-medium text-[#017A92] hover:underline"
-          >
-            Montecallini: nessun export PMS disponibile per un mese specifico? Inserimento manuale (opzione secondaria) →
-          </Link>
         </>
       )}
 
@@ -495,7 +483,81 @@ export default function PerformanceImportPage() {
         ))}
 
       {importType === "nazionalita" && <ImportNazionalita structures={structures} />}
+
+      {importType === "canali" && <ChannelRevenueStatus structures={structures} />}
     </div>
+  );
+}
+
+// Revenue per canale: nessun importer in-app esiste ancora (i dati attuali
+// sono stati caricati fuori dall'app). Qui solo lo stato di aggiornamento
+// per struttura, in lettura - l'import vero richiede di estendere Import
+// Integrity a channel_revenue (vedi report sprint), non un secondo flusso
+// di scrittura parallelo.
+function ChannelRevenueStatus({ structures }: { structures: StructureOption[] }) {
+  const [latestByStructure, setLatestByStructure] = useState<Map<string, string | null> | null>(null);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    if (structures.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      structures.map((s) =>
+        supabase
+          .from("channel_revenue")
+          .select("extraction_date")
+          .eq("structure_id", s.id)
+          .order("extraction_date", { ascending: false })
+          .limit(1)
+          .then(({ data, error }) => {
+            if (error) throw new Error(error.message);
+            return [s.id, (data?.[0]?.extraction_date as string | undefined) ?? null] as const;
+          })
+      )
+    )
+      .then((entries) => {
+        if (!cancelled) setLatestByStructure(new Map(entries));
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [structures]);
+
+  return (
+    <AppCard
+      title="Revenue per canale"
+      subtitle='Report BD "Revenue per canale" (snapshot annuale per struttura). Il caricamento da questa pagina non è ancora disponibile: richiede di estendere i controlli Import Integrity (duplicato/conflitto/audit) anche a channel_revenue. Fino ad allora lo storico esistente resta invariato e visibile nel dettaglio struttura.'
+    >
+      {loadError && <p className="text-sm text-[#8a3a3a]">Impossibile leggere lo stato: {loadError}</p>}
+      {!loadError && (
+        <div className="space-y-2">
+          <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">Ultima estrazione caricata</p>
+          <ul className="rounded-[14px] border border-[#e7dfd8] bg-white">
+            {structures.map((s) => {
+              const latest = latestByStructure?.get(s.id);
+              return (
+                <li
+                  key={s.id}
+                  className="flex items-center justify-between border-b border-[#f0ece6] px-4 py-3 text-sm text-[#2B2D2F] last:border-0"
+                >
+                  <span>{s.name}</span>
+                  <span className="text-[#6a6d70]">
+                    {latestByStructure === null
+                      ? "…"
+                      : latest
+                        ? latest.split("-").reverse().join("/")
+                        : "Nessun dato"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </AppCard>
   );
 }
 
@@ -1355,6 +1417,7 @@ type CommissioniFormState = {
   totalBookings: string;
   totalCommission: string;
   reference: string;
+  source: CommissionSource;
 };
 
 const EMPTY_COMMISSIONI_FORM: CommissioniFormState = {
@@ -1365,6 +1428,7 @@ const EMPTY_COMMISSIONI_FORM: CommissioniFormState = {
   totalBookings: "",
   totalCommission: "",
   reference: "",
+  source: "fattura",
 };
 
 function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
@@ -1375,6 +1439,9 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  // Valore gia' presente per struttura/canale/mese diverso da quello
+  // calcolato: la sostituzione avviene solo dopo conferma esplicita.
+  const [pendingReplace, setPendingReplace] = useState<ExistingCommissionRate | null>(null);
 
   const totalBookingsNum = Number(form.totalBookings.replace(",", "."));
   const totalCommissionNum = Number(form.totalCommission.replace(",", "."));
@@ -1394,15 +1461,72 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
     form.periodMonth !== "" &&
     computedPct !== null;
 
+  function commissionKey() {
+    return {
+      structure_id: form.structureId,
+      channel: form.channel.trim(),
+      period_year: Number(form.periodYear),
+      period_month: Number(form.periodMonth),
+    };
+  }
+
+  function formatPct(pct: number | string): string {
+    return `${roundCommissionPct(Number(pct)).toLocaleString("it-IT", { maximumFractionDigits: 2 })}%`;
+  }
+
+  // Unica chiave logica (structure_id, channel, period_year, period_month),
+  // UNIQUE sulla tabella: prima si legge il valore esistente, poi
+  // insert (nuovo), nessuna scrittura (identico) o conferma esplicita
+  // (diverso) - mai un upsert che sovrascrive in silenzio.
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
     setSuccessMessage("");
+    setPendingReplace(null);
 
     if (computedPct === null) {
       setError("Totale prenotazioni e totale commissione devono essere numeri validi, il totale prenotazioni maggiore di zero");
       return;
     }
+
+    setSubmitting(true);
+    const key = commissionKey();
+    const { data: existing, error: readError } = await supabase
+      .from("channel_commission_rates")
+      .select("commission_pct, source, source_reference")
+      .match(key)
+      .maybeSingle();
+
+    if (readError) {
+      setSubmitting(false);
+      setError(readError.message);
+      return;
+    }
+
+    const decision = decideCommissionWrite((existing as ExistingCommissionRate | null) ?? null, {
+      commissionPct: computedPct,
+      source: form.source,
+    });
+
+    if (decision.action === "unchanged") {
+      setSubmitting(false);
+      setSuccessMessage(
+        `Già presente con lo stesso valore (${formatPct(computedPct)}, ${form.source}) — nessuna modifica.`
+      );
+      return;
+    }
+
+    if (decision.action === "confirm_replace") {
+      setSubmitting(false);
+      setPendingReplace(decision.existing);
+      return;
+    }
+
+    await writeCommission("insert");
+  }
+
+  async function writeCommission(mode: "insert" | "replace") {
+    if (computedPct === null) return;
 
     const {
       data: { user },
@@ -1411,42 +1535,36 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
 
     if (userError || !user) {
       setError("Sessione non valida, rieffettua il login");
+      setSubmitting(false);
       return;
     }
 
     setSubmitting(true);
+    const key = commissionKey();
+    const values = {
+      commission_pct: roundCommissionPct(computedPct),
+      source: form.source,
+      source_reference: form.reference.trim() || "Inserimento manuale MC",
+      created_by: user.id,
+    };
 
-    // ON CONFLICT su (structure_id, channel, period_year, period_month) -
-    // stesso vincolo unique gia' presente sulla tabella: se la riga esiste
-    // gia' per quel mese/canale/struttura, upsert la aggiorna invece di
-    // duplicarla.
-    const { error: upsertError } = await supabase
-      .from("channel_commission_rates")
-      .upsert(
-        {
-          structure_id: form.structureId,
-          channel: form.channel.trim(),
-          period_year: Number(form.periodYear),
-          period_month: Number(form.periodMonth),
-          commission_pct: Math.round(computedPct * 100) / 100,
-          source: "fattura",
-          source_reference: form.reference.trim() || "Inserimento manuale MC",
-          created_by: user.id,
-        },
-        { onConflict: "structure_id,channel,period_year,period_month" }
-      );
+    const { error: writeError } =
+      mode === "insert"
+        ? await supabase.from("channel_commission_rates").insert({ ...key, ...values })
+        : await supabase.from("channel_commission_rates").update(values).match(key);
 
     setSubmitting(false);
+    setPendingReplace(null);
 
-    if (upsertError) {
-      setError(upsertError.message);
+    if (writeError) {
+      setError(writeError.message);
       return;
     }
 
     setSuccessMessage(
-      `Salvato: ${form.channel.trim()} — ${MONTH_LABELS[Number(form.periodMonth) - 1]} ${form.periodYear} — ${(
-        Math.round(computedPct * 100) / 100
-      ).toLocaleString("it-IT", { maximumFractionDigits: 2 })}%`
+      `${mode === "insert" ? "Salvato" : "Sostituito"}: ${key.channel} — ${MONTH_LABELS[key.period_month - 1]} ${
+        key.period_year
+      } — ${formatPct(computedPct)}`
     );
     setForm((f) => ({ ...f, totalBookings: "", totalCommission: "", reference: "" }));
   }
@@ -1454,7 +1572,7 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
   return (
     <AppCard
       title="Commissioni canale"
-      subtitle="Inserimento manuale da fattura: calcola automaticamente la percentuale commissione e salva (o aggiorna se già presente per struttura/canale/mese)."
+      subtitle="Inserimento da fattura/documento del canale: inserisci i totali letti dal documento, la percentuale viene calcolata automaticamente. Se per struttura/canale/mese esiste già un valore diverso, la sostituzione richiede conferma."
     >
       <form onSubmit={handleSubmit} className="space-y-5">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1555,6 +1673,20 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
               placeholder="es. numero fattura"
             />
           </div>
+
+          <div>
+            <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
+              Fonte
+            </label>
+            <select
+              value={form.source}
+              onChange={(e) => setForm((f) => ({ ...f, source: e.target.value as CommissionSource }))}
+              className="h-11 w-full rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none"
+            >
+              <option value="fattura">Fattura</option>
+              <option value="stima">Stima</option>
+            </select>
+          </div>
         </div>
 
         {computedPct !== null && (
@@ -1573,8 +1705,28 @@ function ImportCommissioni({ structures }: { structures: StructureOption[] }) {
           </p>
         )}
 
+        {pendingReplace && computedPct !== null && (
+          <div className="rounded-[14px] border border-[#e7dcc4] bg-[#faf5e8] px-4 py-3 text-sm text-[#2B2D2F]">
+            <p className="font-semibold">Esiste già un valore per questa struttura/canale/mese.</p>
+            <p className="mt-1">
+              Attuale: {formatPct(pendingReplace.commission_pct)} ({pendingReplace.source}
+              {pendingReplace.source_reference ? `, ${pendingReplace.source_reference}` : ""}) — Nuovo:{" "}
+              {formatPct(computedPct)} ({form.source}
+              {form.reference.trim() ? `, ${form.reference.trim()}` : ""})
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <AppButton type="button" variant="secondary" onClick={() => setPendingReplace(null)} disabled={submitting}>
+                Annulla
+              </AppButton>
+              <AppButton type="button" variant="primary" onClick={() => writeCommission("replace")} disabled={submitting}>
+                Conferma sostituzione
+              </AppButton>
+            </div>
+          </div>
+        )}
+
         <div className="flex justify-end">
-          <AppButton type="submit" variant="primary" disabled={!canSubmit || submitting}>
+          <AppButton type="submit" variant="primary" disabled={!canSubmit || submitting || pendingReplace !== null}>
             {submitting ? "Salvataggio..." : "Salva commissione"}
           </AppButton>
         </div>

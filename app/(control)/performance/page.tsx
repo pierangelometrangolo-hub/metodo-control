@@ -27,8 +27,10 @@ import {
   occupancy,
   adr,
   revPar,
-  computeGoalGap,
-  GoalGap,
+  computeGoalProgress,
+  DailyCapacityRow,
+  GoalProgress,
+  goalLevelLabels,
   computePacingStatus,
   pacingLabels,
   pacingDotClasses,
@@ -137,6 +139,11 @@ type StructureRowData = {
   lastYearMonthRevenue: number | null;
   budgetsForMonth: BudgetRow[];
   pacing: ReturnType<typeof computePacingStatus>;
+  // Righe giornaliere del periodo + suoi estremi, per la capacita' residua
+  // di RN/ADR TO GOAL (vedi computeGoalProgress).
+  dailyCapacity: DailyCapacityRow[];
+  periodStart: string;
+  periodEnd: string;
 };
 
 // "YYYY-MM-DD" -> "DD/MM/YYYY" senza passare da Date (eviterebbe scarti di
@@ -145,11 +152,66 @@ function formatDateIt(dateStr: string): string {
   return dateStr.split("-").reverse().join("/");
 }
 
-function GoalCell({ goal, render }: { goal: GoalGap | null; render: (g: GoalGap) => string }) {
+function formatRoomNights(n: number | null): string {
+  return n === null ? ND : formatNumber(Math.ceil(n));
+}
+
+// Dettaglio comune ai tooltip di RN e ADR TO GOAL: sempre gap, RN teoriche
+// e RN realmente disponibili, mai il solo numero teorico.
+function GoalTooltipBody({ goal }: { goal: Exclude<GoalProgress, { status: "achieved" }> }) {
+  return (
+    <>
+      <p className="font-semibold">Target: {goalLevelLabels[goal.level]}</p>
+      <p>Gap: {formatCurrency(goal.gapRevenue)}</p>
+      <p>RN teoriche necessarie: {formatRoomNights(goal.theoreticalRoomsNeeded)}</p>
+      <p>
+        RN disponibili nel periodo residuo:{" "}
+        {goal.status === "insufficient_data" ? "dati insufficienti" : formatRoomNights(goal.remainingRoomNights)}
+      </p>
+      {goal.status === "pending" && (
+        <p className="mt-1">
+          ADR medio necessario sulle {formatRoomNights(goal.remainingRoomNights)} room nights ancora disponibili per
+          raggiungere il {goalLevelLabels[goal.level]}: {formatCurrency(goal.adrNeeded)}.
+        </p>
+      )}
+      {goal.status === "capacity_exhausted" && (
+        <p className="mt-1">Target non più raggiungibile per esaurimento capacità residua.</p>
+      )}
+      {goal.status === "insufficient_data" && (
+        <p className="mt-1">Mancano righe giornaliere nel periodo residuo: capacità non determinabile.</p>
+      )}
+    </>
+  );
+}
+
+function GoalCell({ goal, metric }: { goal: GoalProgress | null; metric: "rooms" | "adr" }) {
   if (goal === null) return <>{ND}</>;
   if (goal.status === "achieved") return <span className="text-[#2f7d43]">✓ Raggiunto</span>;
-  if (goal.status === "sold_out") return <span className="text-[#6a6d70]">Esaurito</span>;
-  return <>{render(goal)}</>;
+
+  let trigger: React.ReactNode;
+  if (goal.status === "pending") {
+    trigger =
+      metric === "rooms" ? (
+        <span>
+          {formatRoomNights(goal.theoreticalRoomsNeeded)} necessarie
+          <span className="block text-[12px] text-[#6a6d70]">
+            {formatRoomNights(goal.remainingRoomNights)} disponibili
+          </span>
+        </span>
+      ) : (
+        formatCurrency(goal.adrNeeded)
+      );
+  } else if (goal.status === "capacity_exhausted") {
+    trigger = <span className="text-[#6a6d70]">{metric === "rooms" ? "Non raggiungibile" : "N/A"}</span>;
+  } else {
+    trigger = <span className="text-[#6a6d70]">N/A</span>;
+  }
+
+  return (
+    <CellTooltip trigger={trigger}>
+      <GoalTooltipBody goal={goal} />
+    </CellTooltip>
+  );
 }
 
 const [TODAY_YEAR, TODAY_MONTH] = todayString().split("-").map(Number);
@@ -171,7 +233,7 @@ export default function PerformanceOverviewPage() {
   const [loadError, setLoadError] = useState("");
   // Data dell'ultimo upload piu' recente tra tutte le strutture - non una
   // colonna per riga (le strutture hanno date diverse, es. Montecallini
-  // aggiornata via inserimento manuale con cadenza propria), ma un'unica
+  // aggiornata via export PMS con cadenza propria), ma un'unica
   // riga di sintesi nella descrizione, stesso trattamento per tutte.
   const [latestUploadDate, setLatestUploadDate] = useState<string | null>(null);
   // Membership del portfolio (consulting_engagements) + l'anno selezionato
@@ -385,6 +447,13 @@ export default function PerformanceOverviewPage() {
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
+        dailyCapacity: monthSnapshots.map((s) => ({
+          stayDate: s.stay_date,
+          roomsSold: s.rooms_sold === null ? null : Number(s.rooms_sold),
+          roomsAvailable: s.rooms_available === null ? null : Number(s.rooms_available),
+        })),
+        periodStart: start,
+        periodEnd: end,
       };
     });
 
@@ -519,13 +588,7 @@ export default function PerformanceOverviewPage() {
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
           <Link href="/performance/import" className="text-sm font-medium text-[#017A92] hover:underline">
-            Vai a Import (storico / actual) →
-          </Link>
-          <Link
-            href="/performance/inserimento-manuale"
-            className="text-sm font-medium text-[#017A92] hover:underline"
-          >
-            Vai all'inserimento manuale (Montecallini) →
+            Vai ad Aggiornamenti Performance (import) →
           </Link>
           <Link href="/performance/budget" className="text-sm font-medium text-[#017A92] hover:underline">
             Vai a Budget →
@@ -665,11 +728,11 @@ export default function PerformanceOverviewPage() {
                   </th>
                   <th className="pb-3 pr-4">
                     RN TO GOAL
-                    <InfoTooltip text="Room night mancanti rispetto all'occupazione target del Budget Minimo: (% Occupazione target × Room night disponibili del Minimo) − Room night già vendute. '✓ Raggiunto' se il Minimo è già superato in revenue, 'Esaurito' se le room night target sono già tutte vendute ma manca ancora revenue (serve un prezzo più alto, non altre camere)." />
+                    <InfoTooltip text="Target progressivo: Minimo, poi Realistico, poi Sfidante (il primo non ancora raggiunto in revenue). RN necessarie = (% Occupazione target × Room night disponibili del livello) − Room night già vendute; RN disponibili = camere ancora vendibili (disponibili − vendute) da oggi incluso a fine periodo. 'Non raggiungibile' solo se non resta nessuna camera vendibile; 'N/A' se mancano dati giornalieri; '✓ Raggiunto' se anche lo Sfidante è superato." />
                   </th>
                   <th className="pb-3 pr-4">
                     ADR TO GOAL
-                    <InfoTooltip text="ADR necessaria sulle room night mancanti (colonna RN TO GOAL) per raggiungere il Budget Minimo: (Budget Minimo − Revenue OTB) / RN TO GOAL. Stessi stati '✓ Raggiunto' / 'Esaurito' di RN TO GOAL." />
+                    <InfoTooltip text="ADR medio necessario sulle room night ancora disponibili per raggiungere il target progressivo: (Target − Revenue OTB) / RN disponibili da oggi a fine periodo. 'N/A' se non resta nessuna camera vendibile o se mancano dati giornalieri." />
                   </th>
                   <th className="pb-3 pr-4">
                     Min.
@@ -697,7 +760,15 @@ export default function PerformanceOverviewPage() {
 
                   const sdlyDelta = formatDelta(row.monthRevenue, row.sdlyMonthRevenue);
                   const lastYearDelta = formatDelta(row.monthRevenue, row.lastYearMonthRevenue);
-                  const goal = computeGoalGap(row.monthRevenue, minimoBudget, row.monthRoomsSold);
+                  const goal = computeGoalProgress({
+                    monthRevenue: row.monthRevenue,
+                    roomsSold: row.monthRoomsSold,
+                    budgets: row.budgetsForMonth,
+                    dailyRows: row.dailyCapacity,
+                    periodStart: row.periodStart,
+                    periodEnd: row.periodEnd,
+                    today: todayString(),
+                  });
 
                   return (
                     <tr
@@ -783,11 +854,11 @@ export default function PerformanceOverviewPage() {
                       <td className="py-3 pr-4 text-[#2B2D2F]">{formatPercent(monthOcc)}</td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
-                        <GoalCell goal={goal} render={(g) => formatNumber(Math.ceil(g.roomsNeeded ?? 0))} />
+                        <GoalCell goal={goal} metric="rooms" />
                       </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">
-                        <GoalCell goal={goal} render={(g) => formatCurrency(g.adrNeeded)} />
+                        <GoalCell goal={goal} metric="adr" />
                       </td>
 
                       <td className="py-3 pr-4 text-[#2B2D2F]">

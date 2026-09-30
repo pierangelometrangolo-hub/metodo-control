@@ -63,9 +63,7 @@ export type GroupKind = "cy" | "sdly" | "ly";
 
 // Unica struttura senza export BD - usa invece il proprio export PMS
 // "PlanningForecast" (CSV, un file per mese). Nome hardcoded qui per il
-// controllo formato<->struttura (vedi matchFileToStructure): stesso
-// pattern gia' in uso in app/(control)/performance/inserimento-manuale/page.tsx
-// (STRUCTURE_NAME), non una convenzione nuova.
+// controllo formato<->struttura (vedi matchFileToStructure).
 export const MONTECALLINI_STRUCTURE_NAME = "Montecallini";
 
 // ATTENZIONE: da quando BD supporta anche l'export CSV (oltre a .xls/.xlsx

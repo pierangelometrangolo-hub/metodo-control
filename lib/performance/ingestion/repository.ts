@@ -1,5 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { Dataset, ImportEventStatus, ImportSource, StructureAlias } from "./types";
+import {
+  Dataset,
+  ImportEventStatus,
+  ImportSource,
+  NormalizedNationalityRow,
+  NormalizedSnapshotRow,
+  StructureAlias,
+} from "./types";
 import { PriorImportedEvent } from "./conflictPolicy";
 
 // Tutto l'I/O Supabase del servizio import in un unico posto - nessuna
@@ -103,6 +110,134 @@ export async function checkLegacySnapshotExists(
   return (data ?? []).length > 0;
 }
 
+// ---------- Legacy equivalente (correzione post-Fase 1) ----------
+//
+// Righe legacy COMPLETE della chiave (structure_id, extraction_date), per
+// ricostruirne il normalized_content_hash con la STESSA funzione usata per
+// i nuovi import (normalization.ts) - mai una canonicalizzazione parallela.
+// Stessa paginazione a pagine da 1000 gia' in uso in Dashboard
+// (fetchAllSnapshotRows): PostgREST tronca silenziosamente oltre il
+// max-rows, e una lettura parziale produrrebbe un hash diverso (conflitto
+// spurio, mai un falso duplicato). Ordinamento totale sulla chiave UNIQUE
+// della tabella, cosi' la paginazione e' deterministica.
+const LEGACY_PAGE_SIZE = 1000;
+
+async function fetchAllLegacyRows<T>(
+  supabase: SupabaseClient,
+  table: "performance_daily_snapshot" | "guest_nationality",
+  columns: string,
+  orderColumns: string[],
+  scope: { structureId: string; extractionDate: string }
+): Promise<T[]> {
+  const all: T[] = [];
+  for (let from = 0; ; from += LEGACY_PAGE_SIZE) {
+    let query = supabase
+      .from(table)
+      .select(columns)
+      .eq("structure_id", scope.structureId)
+      .eq("extraction_date", scope.extractionDate);
+    for (const col of orderColumns) query = query.order(col, { ascending: true });
+    const { data, error } = await query.range(from, from + LEGACY_PAGE_SIZE - 1);
+
+    if (error) throw new Error(`Impossibile leggere lo snapshot legacy (${table}): ${error.message}`);
+    all.push(...((data ?? []) as T[]));
+    if (!data || data.length < LEGACY_PAGE_SIZE) return all;
+  }
+}
+
+export async function loadLegacySnapshotRows(
+  supabase: SupabaseClient,
+  scope: { structureId: string; extractionDate: string }
+): Promise<NormalizedSnapshotRow[]> {
+  type Row = {
+    stay_date: string;
+    revenue_total: number | string;
+    rooms_sold: number | string;
+    rooms_available: number | string;
+    arrivals: number | string | null;
+    presences: number | string;
+  };
+  const rows = await fetchAllLegacyRows<Row>(
+    supabase,
+    "performance_daily_snapshot",
+    "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences",
+    ["stay_date"],
+    scope
+  );
+  return rows.map((r) => ({
+    stayDate: r.stay_date,
+    revenueTotal: Number(r.revenue_total),
+    roomsSold: Number(r.rooms_sold),
+    roomsAvailable: Number(r.rooms_available),
+    arrivals: r.arrivals === null ? null : Number(r.arrivals),
+    presences: Number(r.presences),
+    sourceIndex: 0,
+  }));
+}
+
+export async function loadLegacyNationalityRows(
+  supabase: SupabaseClient,
+  scope: { structureId: string; extractionDate: string }
+): Promise<NormalizedNationalityRow[]> {
+  type Row = { stay_date: string; nationality: string; presences: number | string };
+  const rows = await fetchAllLegacyRows<Row>(
+    supabase,
+    "guest_nationality",
+    "stay_date, nationality, presences",
+    ["stay_date", "nationality"],
+    scope
+  );
+  return rows.map((r) => ({
+    stayDate: r.stay_date,
+    nationality: r.nationality,
+    presences: Number(r.presences),
+    sourceIndex: 0,
+  }));
+}
+
+export const LEGACY_EQUIVALENT_MESSAGE =
+  "Contenuto identico (stesso normalized_content_hash) a uno snapshot legacy già presente per questa struttura/data/dataset. Nessuna scrittura.";
+
+// Registra l'esito 'skipped_duplicate' / legacy_equivalent - stesso
+// principio di logLegacySnapshotConflictEvent (un solo insert, fuori da
+// qualunque RPC, fallimento propagato). Gli hash salvati sono quelli del
+// file/batch in ingresso: coincidono per definizione con quello
+// ricostruito dal lato legacy.
+export async function logLegacySnapshotEquivalentEvent(
+  supabase: SupabaseClient,
+  event: {
+    structureId: string;
+    extractionDate: string;
+    dataset: Dataset;
+    source: ImportSource;
+    sourceFileName: string | null;
+    sourceChecksum: string | null;
+    normalizedContentHash: string | null;
+    batchHash: string | null;
+  }
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("performance_import_events")
+    .insert({
+      structure_id: event.structureId,
+      extraction_date: event.extractionDate,
+      dataset: event.dataset,
+      source: event.source,
+      status: "skipped_duplicate",
+      source_checksum: event.sourceChecksum,
+      normalized_content_hash: event.normalizedContentHash,
+      batch_hash: event.batchHash,
+      source_file_name: event.sourceFileName,
+      error_code: "legacy_equivalent",
+      error_message: LEGACY_EQUIVALENT_MESSAGE,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data) throw new Error(`Impossibile registrare l'evento legacy equivalente: ${error?.message}`);
+  return data.id as string;
+}
+
 export const LEGACY_SNAPSHOT_CONFLICT_MESSAGE =
   "Esiste già uno snapshot precedente alla Import Integrity Foundation per questa struttura/data/dataset. Non è possibile stabilire automaticamente se il file sia duplicato o differente. Import bloccato e richiesta verifica umana.";
 
@@ -116,10 +251,10 @@ export const LEGACY_SNAPSHOT_CONFLICT_MESSAGE =
 // legacy sia garantito, non "a tentativo".
 //
 // MAI un source_checksum/normalized_content_hash inventato per il lato
-// legacy (che non esiste, per definizione: e' dato scritto prima che
-// questo sistema calcolasse hash) - i valori salvati qui sono SEMPRE e
-// SOLO quelli del file/batch in ingresso appena calcolati dal chiamante,
-// mai una ricostruzione a ritroso dei dati legacy.
+// legacy - i valori salvati qui sono SEMPRE e SOLO quelli del file/batch
+// in ingresso appena calcolati dal chiamante. L'hash ricostruito dalle
+// righe legacy (loadLegacySnapshotRows/loadLegacyNationalityRows) serve
+// solo al confronto, non viene mai salvato.
 export async function logLegacySnapshotConflictEvent(
   supabase: SupabaseClient,
   event: {

@@ -5,14 +5,17 @@ import { Dataset, IngestionOutcome, NormalizedNationalityRow, NormalizedSnapshot
 import { sha256Hex } from "./hashing";
 import { computeBatchHash, computeNationalityContentHash, computeSnapshotContentHash } from "./normalization";
 import { resolveMontecalliniStructure, resolveStructureForDataset, structureResolutionErrorMessage } from "./routing";
-import { decideImportAction } from "./conflictPolicy";
+import { decideImportAction, decideLegacyAction } from "./conflictPolicy";
 import {
   CommitImportResult,
   checkLegacySnapshotExists,
   commitImport,
   findLatestImportedEvent,
+  loadLegacyNationalityRows,
+  loadLegacySnapshotRows,
   loadStructureAliases,
   logLegacySnapshotConflictEvent,
+  logLegacySnapshotEquivalentEvent,
   logPreflightEvent,
   uploadSourceFile,
 } from "./repository";
@@ -48,9 +51,11 @@ import {
 //      'imported' precedente, un controllo ESPLICITO aggiuntivo
 //      (checkLegacySnapshotExists) verifica se il dataset target contiene
 //      gia' righe scritte PRIMA che performance_import_events esistesse -
-//      in quel caso l'esito e' SEMPRE conflict/legacy_snapshot_present,
-//      mai una classificazione automatica come duplicato (nessun hash
-//      legacy da cui dedurla) - vedi repository.ts.
+//      in quel caso le righe legacy vengono rilette per intero e il loro
+//      normalized_content_hash ricostruito con la STESSA funzione di
+//      normalization.ts: uguale -> skipped_duplicate/legacy_equivalent,
+//      diverso -> conflict/legacy_snapshot_present. Mai scritture ai
+//      dataset in nessuno dei due casi (resolveLegacySnapshot).
 //   13. guardrail esistenti (validazioni parser BD/RevPAR, controllo
 //      cella-formato-data, ecc.): gia' applicati dal parser a monte,
 //      nessuna duplicazione qui. STEP 3: un `parseErrors` non vuoto
@@ -83,7 +88,54 @@ function mapCommitResult(result: CommitImportResult): IngestionOutcome {
   if (result.status === "skipped_duplicate") {
     return { status: "skipped_duplicate", reason: result.reason, eventId: result.event_id };
   }
-  return { status: "conflict", eventId: result.event_id, conflictingEventId: result.conflicting_event_id };
+  // La RPC restituisce conflicting_event_id null solo per la sua guardia
+  // legacy (legacy_snapshot_present), sempre valorizzato per un conflitto
+  // contro un import Foundation.
+  return {
+    status: "conflict",
+    conflictKind: result.conflicting_event_id === null ? "legacy" : "content",
+    eventId: result.event_id,
+    conflictingEventId: result.conflicting_event_id,
+  };
+}
+
+// Gestione legacy (nessun evento 'imported' sulla chiave, ma righe gia'
+// presenti nel dataset target): null se non ci sono righe legacy (si
+// prosegue col flusso Foundation normale); altrimenti l'esito gia'
+// auditato - skipped_duplicate/legacy_equivalent se il contenuto
+// ricostruito ha lo stesso normalized_content_hash, conflict/
+// legacy_snapshot_present altrimenti. In entrambi i casi zero scritture
+// ai dataset: mai upload, mai RPC.
+async function resolveLegacySnapshot(
+  supabase: SupabaseClient,
+  event: {
+    structureId: string;
+    extractionDate: string;
+    dataset: Dataset;
+    sourceFileName: string;
+    sourceChecksum: string;
+    normalizedContentHash: string;
+    batchHash: string | null;
+  }
+): Promise<IngestionOutcome | null> {
+  const scope = { structureId: event.structureId, extractionDate: event.extractionDate, dataset: event.dataset };
+  const legacyExists = await checkLegacySnapshotExists(supabase, scope);
+  if (!legacyExists) return null;
+
+  const legacyContentHash =
+    event.dataset === "nationality"
+      ? await computeNationalityContentHash(await loadLegacyNationalityRows(supabase, scope))
+      : await computeSnapshotContentHash(await loadLegacySnapshotRows(supabase, scope));
+
+  const eventParams = { ...event, source: "manual_upload" as const };
+  const decision = decideLegacyAction(legacyContentHash, event.normalizedContentHash);
+  if (decision.action === "skip_duplicate") {
+    const eventId = await logLegacySnapshotEquivalentEvent(supabase, eventParams);
+    return { status: "skipped_duplicate", reason: "legacy_equivalent", eventId };
+  }
+
+  const eventId = await logLegacySnapshotConflictEvent(supabase, eventParams);
+  return { status: "conflict", conflictKind: "legacy", eventId, conflictingEventId: null };
 }
 
 type CommonParams = {
@@ -262,22 +314,18 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
       // (esempio reale: lo snapshot BD 08/09/2026). Verifica ESPLICITA
       // prima di tentare qualunque insert, mai una collisione scoperta
       // solo dal vincolo UNIQUE dentro l'RPC.
-      const legacyExists = await checkLegacySnapshotExists(supabase, { structureId: selectedStructureId, extractionDate, dataset });
-      if (legacyExists) {
-        const eventId = await logLegacySnapshotConflictEvent(supabase, {
-          structureId: selectedStructureId,
-          extractionDate,
-          dataset,
-          source: "manual_upload",
-          sourceFileName: fileName,
-          sourceChecksum,
-          normalizedContentHash,
-          batchHash: null,
-        });
-        // Zero scritture ai dataset: si esce qui, MAI si arriva
-        // all'upload/RPC di commit per questa chiave.
-        return { status: "conflict", eventId, conflictingEventId: null, guardrailFindings };
-      }
+      const legacyOutcome = await resolveLegacySnapshot(supabase, {
+        structureId: selectedStructureId,
+        extractionDate,
+        dataset,
+        sourceFileName: fileName,
+        sourceChecksum,
+        normalizedContentHash,
+        batchHash: null,
+      });
+      // Zero scritture ai dataset: si esce qui, MAI si arriva
+      // all'upload/RPC di commit per questa chiave.
+      if (legacyOutcome) return { ...legacyOutcome, guardrailFindings };
     }
 
     const decision = decideImportAction(priorEvent, { sourceChecksum, normalizedContentHash });
@@ -565,26 +613,17 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
         // batch/kind - mai quello di un altro kind dello stesso file. Un
         // conflitto legacy su un kind non blocca gli altri kind del batch
         // (stesso principio di scoping gia' in uso per conflict/routing_error).
-        const legacyExists = await checkLegacySnapshotExists(supabase, {
+        const legacyOutcome = await resolveLegacySnapshot(supabase, {
           structureId: selectedStructureId,
           extractionDate,
           dataset: "montecallini_pms",
+          sourceFileName: batch.sourceFiles.map((sf) => sf.fileName).join(", "),
+          sourceChecksum: overallBatchHash,
+          normalizedContentHash,
+          batchHash: overallBatchHash,
         });
-        if (legacyExists) {
-          const eventId = await logLegacySnapshotConflictEvent(supabase, {
-            structureId: selectedStructureId,
-            extractionDate,
-            dataset: "montecallini_pms",
-            source: "manual_upload",
-            sourceFileName: batch.sourceFiles.map((sf) => sf.fileName).join(", "),
-            sourceChecksum: overallBatchHash,
-            normalizedContentHash,
-            batchHash: overallBatchHash,
-          });
-          results.push({
-            kind: batch.kind,
-            outcome: { status: "conflict", eventId, conflictingEventId: null, guardrailFindings },
-          });
+        if (legacyOutcome) {
+          results.push({ kind: batch.kind, outcome: { ...legacyOutcome, guardrailFindings } });
           continue;
         }
       }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { categorizeOutcome, OUTCOME_CATEGORY_LABEL, OutcomeCategory } from "../outcomeCategory";
+import { categorizeOutcome, describeOutcome, OUTCOME_CATEGORY_LABEL, OutcomeCategory } from "../outcomeCategory";
 import type { IngestionOutcome } from "../types";
 
 // ============ STEP 3 — test L: categorizzazione UI ============
@@ -56,5 +56,34 @@ describe("OUTCOME_CATEGORY_LABEL", () => {
   it("l'etichetta di warning e' distinta sia da error sia da validationError", () => {
     expect(OUTCOME_CATEGORY_LABEL.warning).not.toBe(OUTCOME_CATEGORY_LABEL.error);
     expect(OUTCOME_CATEGORY_LABEL.warning).not.toBe(OUTCOME_CATEGORY_LABEL.validationError);
+  });
+});
+
+// Messaggi distinti per duplicato legacy, conflitto legacy e conflitto
+// moderno - derivati dallo status/motivo reale, mai un testo unico.
+describe("describeOutcome", () => {
+  it("duplicato legacy equivalente", () => {
+    const outcome: IngestionOutcome = { status: "skipped_duplicate", reason: "legacy_equivalent", eventId: "e1" };
+    expect(describeOutcome(outcome)).toBe("Duplicato già acquisito: contenuto identico a uno snapshot legacy già presente.");
+    expect(categorizeOutcome(outcome.status)).toBe("duplicate");
+  });
+
+  it("conflitto legacy reale", () => {
+    const outcome: IngestionOutcome = { status: "conflict", conflictKind: "legacy", eventId: "e2", conflictingEventId: null };
+    expect(describeOutcome(outcome)).toBe(
+      "Conflitto con snapshot legacy: il contenuto già presente è diverso dal file caricato. Nessuna scrittura."
+    );
+  });
+
+  it("conflitto moderno", () => {
+    const outcome: IngestionOutcome = { status: "conflict", conflictKind: "content", eventId: "e3", conflictingEventId: "e0" };
+    expect(describeOutcome(outcome)).toBe(
+      "Conflitto: esiste già un import completato per questa struttura/data con contenuto diverso. Nessuna scrittura."
+    );
+  });
+
+  it("duplicati moderni invariati", () => {
+    expect(describeOutcome({ status: "skipped_duplicate", reason: "exact_duplicate", eventId: "e4" })).toMatch(/^Duplicato esatto/);
+    expect(describeOutcome({ status: "skipped_duplicate", reason: "semantic_duplicate", eventId: "e5" })).toMatch(/^Duplicato semantico/);
   });
 });

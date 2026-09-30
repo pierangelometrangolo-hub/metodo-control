@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { GroupKind, ImportableRow, resolveGroupExtractionDate } from "../../performanceImportRouting";
+import { GroupKind, ImportableRow } from "../../performanceImportRouting";
 import { ParsedNationalityRow } from "../../nationalityParser";
 import { Dataset, IngestionOutcome, NormalizedNationalityRow, NormalizedSnapshotRow, StructureOption } from "./types";
 import { sha256Hex } from "./hashing";
@@ -42,8 +42,9 @@ import {
 //        si riparsano mai i file).
 //   3. resolve struttura via alias DB (routing.ts) - o nome esatto
 //      "Montecallini" per il dataset montecallini_pms.
-//   4. extraction_date: invariato, calcolato dal chiamante
-//      (resolveGroupExtractionDate, riusato qui solo per Montecallini).
+//   4. extraction_date: dal chiamante per ADR/RevPAR e Nazionalita';
+//      per Montecallini calcolata per riga (mese di soggiorno) in
+//      buildMontecalliniBatches, un gruppo per (kind, extraction_date).
 //   5. parse: gia' fatto dal chiamante.
 //   6-9. normalize + hash: qui sotto.
 //   10-12. dedup/conflict: pre-check locale (conflictPolicy.ts) + verifica
@@ -409,7 +410,10 @@ export type MontecalliniBatchResult =
   // singolo kind: il parsing e' file-wide, avviene prima della divisione
   // per kind, quindi un file inaffidabile non e' isolabile a un kind solo.
   | { status: "validation_error"; message: string }
-  | { status: "ok"; batches: { kind: GroupKind; outcome: IngestionOutcome }[] };
+  // Un elemento per gruppo (kind, extraction_date): piu' elementi con lo
+  // stesso kind quando il batch contiene mesi con date diverse (LY, CY
+  // mese chiuso/aperto).
+  | { status: "ok"; batches: { kind: GroupKind; extractionDate: string; outcome: IngestionOutcome }[] };
 
 export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestParams): Promise<MontecalliniBatchResult> {
   const { supabase, selectedStructureId, structures, uploadedBy, files, today } = params;
@@ -551,8 +555,10 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
       groups: f.groups,
     }));
 
-    const batches = buildMontecalliniBatches(batchInputs);
-    const results: { kind: GroupKind; outcome: IngestionOutcome }[] = [];
+    // Un gruppo per (kind, extraction_date), data calcolata per riga dal
+    // mese di soggiorno - vedi buildMontecalliniBatches.
+    const batches = buildMontecalliniBatches(batchInputs, today);
+    const results: { kind: GroupKind; extractionDate: string; outcome: IngestionOutcome }[] = [];
 
     // Un file che contribuisce a piu' kind (il caso comune: lo stesso
     // PlanningForecast ha quasi sempre righe cy+sdly+ly) va caricato su
@@ -576,7 +582,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
     }
 
     for (const batch of batches) {
-      const extractionDate = resolveGroupExtractionDate("montecallini_pms", batch.kind, batch.rows, today, today);
+      const extractionDate = batch.extractionDate;
       const normalizedContentHash = await computeSnapshotContentHash(batch.rows);
       // Scope soggiorno del kind: parte della chiave duplicato/conflitto per
       // montecallini_pms (mesi diversi sulla stessa extraction_date non sono
@@ -610,7 +616,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
           errorMessage: message,
         });
 
-        results.push({ kind: batch.kind, outcome: { status: "validation_error", message, guardrailFindings } });
+        results.push({ kind: batch.kind, extractionDate, outcome: { status: "validation_error", message, guardrailFindings } });
         continue;
       }
 
@@ -638,7 +644,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
           stayScope,
         });
         if (legacyOutcome) {
-          results.push({ kind: batch.kind, outcome: { ...legacyOutcome, guardrailFindings } });
+          results.push({ kind: batch.kind, extractionDate, outcome: { ...legacyOutcome, guardrailFindings } });
           continue;
         }
       }
@@ -682,7 +688,7 @@ export async function ingestMontecalliniBatch(params: MontecalliniBatchIngestPar
 
       const batchOutcome = mapCommitResult(result);
       batchOutcome.guardrailFindings = guardrailFindings;
-      results.push({ kind: batch.kind, outcome: batchOutcome });
+      results.push({ kind: batch.kind, extractionDate, outcome: batchOutcome });
     }
 
     return { status: "ok", batches: results };

@@ -99,11 +99,11 @@ async function makeMcFile(
   return { fileName, file: new File([byteMarker], fileName, { type: "text/csv" }), content, groups };
 }
 
-// Due file dello STESSO import settimanale, mesi CY diversi (settembre e
-// ancora settembre ma giorni diversi - il CY resta lo stesso mese aperto,
-// invariato per non toccare la logica di resolveGroupExtractionDate, gia'
-// esistente e fuori scope) e LY di mesi storici DIVERSI (settembre 2025 e
-// ottobre 2025) - il caso esplicitamente richiesto dal test 5.
+// Due file dello STESSO import settimanale, CY dello stesso mese aperto
+// (settembre 2026, giorni diversi: stessa extraction_date = oggi) e LY di
+// mesi storici DIVERSI (settembre 2025 e ottobre 2025) - il caso del test 5:
+// l'extraction_date LY e' calcolata per riga (primo giorno del mese
+// successivo), quindi i due mesi LY sono DUE gruppi distinti.
 // stay_date deliberatamente TUTTE diverse tra cy/sdly/ly e tra i due file,
 // cosi' i test possono identificare senza ambiguita' a quale kind/file
 // appartiene ogni riga nel payload RPC.
@@ -142,7 +142,9 @@ describe("Montecallini multi-file batch orchestration (bugfix 14/09/2026)", () =
 
     expect(result.status).toBe("ok");
     const { rpcCallsParams } = fakeSupabase.__calls();
-    expect(rpcCallsParams).toHaveLength(3); // cy, sdly, ly - un solo commit per kind
+    // cy, sdly, ly settembre (2025-10-01), ly ottobre (2025-11-01): un commit
+    // per (kind, extraction_date).
+    expect(rpcCallsParams).toHaveLength(4);
 
     const batchHashes = new Set(rpcCallsParams.map((p) => p.p_batch_hash));
     const sourceChecksums = new Set(rpcCallsParams.map((p) => p.p_source_checksum));
@@ -226,7 +228,7 @@ describe("Montecallini multi-file batch orchestration (bugfix 14/09/2026)", () =
     expect(snapshotRowsOf(sdlyCalls[0]).map((r) => r.stay_date).sort()).toEqual(["2025-09-11", "2025-09-21"]);
   });
 
-  it("5. LY di mesi storici diversi (settembre e ottobre 2025) restano righe dello STESSO batch, mai un conflitto file-vs-file", async () => {
+  it("5. LY di mesi storici diversi (settembre e ottobre 2025) -> due gruppi, ciascuno con la propria extraction_date, mai un conflitto file-vs-file", async () => {
     const { file1, file2 } = await buildTwoFiles();
     const fakeSupabase = makeFakeSupabase();
 
@@ -244,14 +246,16 @@ describe("Montecallini multi-file batch orchestration (bugfix 14/09/2026)", () =
     if (result.status !== "ok") throw new Error("unreachable");
 
     const lyBatches = result.batches.filter((b) => b.kind === "ly");
-    expect(lyBatches).toHaveLength(1); // un solo outcome "ly", non uno per mese/file
-    expect(lyBatches[0].outcome.status).toBe("imported"); // MAI conflict solo perche' due mesi diversi nello stesso batch
+    expect(lyBatches.map((b) => b.extractionDate)).toEqual(["2025-10-01", "2025-11-01"]);
+    for (const b of lyBatches) expect(b.outcome.status).toBe("imported"); // MAI conflict fra i due mesi
 
-    const lyCall = fakeSupabase
+    const lyCalls = fakeSupabase
       .__calls()
-      .rpcCallsParams.find((p) => snapshotRowsOf(p).some((r) => r.stay_date === "2025-09-05" || r.stay_date === "2025-10-25"));
-    expect(lyCall).toBeDefined();
-    expect(snapshotRowsOf(lyCall!).map((r) => r.stay_date).sort()).toEqual(["2025-09-05", "2025-10-25"]);
+      .rpcCallsParams.filter((p) => snapshotRowsOf(p).some((r) => r.stay_date === "2025-09-05" || r.stay_date === "2025-10-25"));
+    expect(lyCalls.map((p) => [p.p_extraction_date, snapshotRowsOf(p).map((r) => r.stay_date)])).toEqual([
+      ["2025-10-01", ["2025-09-05"]],
+      ["2025-11-01", ["2025-10-25"]],
+    ]);
   });
 
   it("6+7. un file con errore di parsing bloccante -> ZERO chiamate RPC per l'intero batch (anche gli altri file, di per se' validi, restano non committati)", async () => {
@@ -316,7 +320,7 @@ describe("Montecallini multi-file batch orchestration (bugfix 14/09/2026)", () =
 
     expect(result.status).toBe("ok");
     if (result.status !== "ok") throw new Error("unreachable");
-    expect(result.batches).toHaveLength(3);
+    expect(result.batches).toHaveLength(4); // cy, sdly, ly settembre, ly ottobre
     for (const b of result.batches) expect(b.outcome.status).toBe("imported");
   });
 
@@ -340,7 +344,7 @@ describe("Montecallini multi-file batch orchestration (bugfix 14/09/2026)", () =
     expect(uploads.some((p) => p.includes("PlanningForecast (2).csv"))).toBe(true);
   });
 
-  it("bd_imports/source_file_name: la RPC riceve la lista COMPLETA dei file del batch per ciascun kind (gia' supportato da fn_commit_performance_import, string_agg - nessuna migration necessaria)", async () => {
+  it("bd_imports/source_file_name: la RPC riceve la lista dei file che hanno contribuito righe a ciascun gruppo (kind, extraction_date)", async () => {
     const { file1, file2 } = await buildTwoFiles();
     const fakeSupabase = makeFakeSupabase();
 
@@ -354,11 +358,19 @@ describe("Montecallini multi-file batch orchestration (bugfix 14/09/2026)", () =
       files: [file1, file2],
     });
 
-    for (const params of fakeSupabase.__calls().rpcCallsParams) {
-      const sourceFiles = params.p_source_files as { file_name: string; file_path: string }[];
-      expect(sourceFiles.map((f) => f.file_name).sort()).toEqual(["PlanningForecast (1).csv", "PlanningForecast (2).csv"]);
-      expect(sourceFiles.every((f) => f.file_path.length > 0)).toBe(true);
-    }
+    const filesByExtraction = new Map(
+      fakeSupabase.__calls().rpcCallsParams.map((params) => {
+        const sourceFiles = params.p_source_files as { file_name: string; file_path: string }[];
+        expect(sourceFiles.every((f) => f.file_path.length > 0)).toBe(true);
+        return [params.p_extraction_date as string, sourceFiles.map((f) => f.file_name).sort()];
+      })
+    );
+    // CY e SDLY: entrambi i file contribuiscono allo stesso gruppo.
+    expect(filesByExtraction.get("2026-09-14")).toEqual(["PlanningForecast (1).csv", "PlanningForecast (2).csv"]);
+    expect(filesByExtraction.get("2025-09-14")).toEqual(["PlanningForecast (1).csv", "PlanningForecast (2).csv"]);
+    // LY: ogni mese solo dal file che lo contiene.
+    expect(filesByExtraction.get("2025-10-01")).toEqual(["PlanningForecast (1).csv"]);
+    expect(filesByExtraction.get("2025-11-01")).toEqual(["PlanningForecast (2).csv"]);
   });
 
   it("9. regressione: la firma/il comportamento di ingestMontecalliniBatch per Booking Designer e Nationality resta quello di ingestSingleFile, MAI toccato da questo fix", async () => {

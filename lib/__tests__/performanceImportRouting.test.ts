@@ -9,6 +9,7 @@ import {
   firstDayOfMonthAfter,
   oneYearBefore,
   computeMontecalliniGroupExtractionDate,
+  computeMontecalliniRowExtractionDate,
   resolveGroupExtractionDate,
   MONTECALLINI_STRUCTURE_NAME,
   StructureOption,
@@ -235,5 +236,32 @@ describe("resolveGroupExtractionDate", () => {
     expect(resolveGroupExtractionDate("montecallini_pms", "cy", [row("2026-08-05")], "1999-01-01", "2026-08-19")).toBe("2026-08-19");
     expect(resolveGroupExtractionDate("montecallini_pms", "sdly", [row("2025-08-05")], "1999-01-01", "2026-08-19")).toBe("2025-08-19");
     expect(resolveGroupExtractionDate("montecallini_pms", "ly", [row("2025-09-15")], "1999-01-01", "2026-08-19")).toBe("2025-10-01");
+  });
+});
+
+describe("computeMontecalliniRowExtractionDate - stessa regola, per singola riga", () => {
+  it("LY: primo giorno del mese successivo al soggiorno, anche a cavallo d'anno", () => {
+    expect(computeMontecalliniRowExtractionDate("ly", "2025-09-15", "2026-09-24")).toBe("2025-10-01");
+    expect(computeMontecalliniRowExtractionDate("ly", "2025-11-30", "2026-09-24")).toBe("2025-12-01");
+    expect(computeMontecalliniRowExtractionDate("ly", "2025-12-10", "2026-09-24")).toBe("2026-01-01");
+  });
+
+  it("CY: mese chiuso -> primo giorno del mese successivo, mese aperto/futuro -> oggi", () => {
+    expect(computeMontecalliniRowExtractionDate("cy", "2026-08-31", "2026-09-24")).toBe("2026-09-01");
+    expect(computeMontecalliniRowExtractionDate("cy", "2026-09-01", "2026-09-24")).toBe("2026-09-24");
+    expect(computeMontecalliniRowExtractionDate("cy", "2026-11-15", "2026-09-24")).toBe("2026-09-24");
+    // ultimo giorno del mese = oggi -> mese non ancora chiuso
+    expect(computeMontecalliniRowExtractionDate("cy", "2026-09-10", "2026-09-30")).toBe("2026-09-30");
+  });
+
+  it("SDLY: sempre oggi meno un anno, qualunque sia il mese", () => {
+    expect(computeMontecalliniRowExtractionDate("sdly", "2025-09-01", "2026-09-24")).toBe("2025-09-24");
+    expect(computeMontecalliniRowExtractionDate("sdly", "2025-11-30", "2026-09-24")).toBe("2025-09-24");
+  });
+
+  it("la versione per gruppo coincide con la versione per riga su rows[0]", () => {
+    expect(computeMontecalliniGroupExtractionDate("ly", [row("2025-11-02"), row("2025-09-02")], "2026-09-24")).toBe(
+      computeMontecalliniRowExtractionDate("ly", "2025-11-02", "2026-09-24")
+    );
   });
 });

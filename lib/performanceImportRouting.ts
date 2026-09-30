@@ -132,17 +132,29 @@ export function oneYearBefore(dateStr: string): string {
 //   ly   -> sempre primo giorno del mese successivo alla stay_date storica
 //           (LY e' per definizione un anno gia' chiuso, nessun caso "in
 //           corso" possibile).
-export function computeMontecalliniGroupExtractionDate(kind: GroupKind, rows: ImportableRow[], today: string): string {
-  if (rows.length === 0) return today; // nessuna riga da cui dedurre il mese, fallback difensivo
-
+// Stessa regola, applicata a UNA riga (il suo mese di soggiorno): e' la
+// funzione usata dal batching Montecallini, che raggruppa le righe per
+// (kind, extraction_date) - mai piu' una sola data per un gruppo che
+// contiene mesi diversi (bug 24/09/2026: LY set+ott+nov tutti su
+// 2025-12-01, presa dal mese di rows[0], cioe' dal primo file in ordine
+// alfabetico).
+export function computeMontecalliniRowExtractionDate(kind: GroupKind, stayDate: string, today: string): string {
   if (kind === "sdly") return oneYearBefore(today);
-  if (kind === "ly") return firstDayOfMonthAfter(rows[0].stayDate);
+  if (kind === "ly") return firstDayOfMonthAfter(stayDate);
 
   // kind === "cy"
-  const [year, month] = rows[0].stayDate.split("-").map(Number);
+  const [year, month] = stayDate.split("-").map(Number);
   const monthEndDate = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
   const isClosedMonth = monthEndDate < today;
-  return isClosedMonth ? firstDayOfMonthAfter(rows[0].stayDate) : today;
+  return isClosedMonth ? firstDayOfMonthAfter(stayDate) : today;
+}
+
+// Versione per gruppo: corretta SOLO se tutte le righe del gruppo producono
+// la stessa data (un solo mese, o SDLY) - valuta rows[0]. Il servizio
+// Montecallini non la usa piu' (vedi buildMontecalliniBatches).
+export function computeMontecalliniGroupExtractionDate(kind: GroupKind, rows: ImportableRow[], today: string): string {
+  if (rows.length === 0) return today; // nessuna riga da cui dedurre il mese, fallback difensivo
+  return computeMontecalliniRowExtractionDate(kind, rows[0].stayDate, today);
 }
 
 // Punto unico per risolvere l'extraction_date di un gruppo, qualunque sia

@@ -765,8 +765,8 @@ function ImportStorico({ structures }: { structures: StructureOption[] }) {
             detail: batchResult.message,
           });
         } else {
-          for (const { kind, outcome } of batchResult.batches) {
-            lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()}]`, outcome));
+          for (const { kind, extractionDate, outcome } of batchResult.batches) {
+            lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()} · estrazione ${extractionDate}]`, outcome));
           }
         }
       }
@@ -1082,8 +1082,8 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
             detail: batchResult.message,
           });
         } else {
-          for (const { kind, outcome } of batchResult.batches) {
-            lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()}]`, outcome));
+          for (const { kind, extractionDate, outcome } of batchResult.batches) {
+            lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()} · estrazione ${extractionDate}]`, outcome));
           }
         }
       }
@@ -1169,8 +1169,8 @@ function ImportActual({ structures }: { structures: StructureOption[] }) {
           detail: batchResult.message,
         });
       } else {
-        for (const { kind, outcome } of batchResult.batches) {
-          lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()}]`, outcome));
+        for (const { kind, extractionDate, outcome } of batchResult.batches) {
+          lines.push(outcomeLine(`Montecallini [${kind.toUpperCase()} · estrazione ${extractionDate}]`, outcome));
         }
       }
     } else {

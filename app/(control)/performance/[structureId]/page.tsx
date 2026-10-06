@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { use as usePromise } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,6 +28,8 @@ import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/
 import { sdlyCutoffFromRows } from "@/lib/performance/sdlyCutoff";
 import { DailyRow, resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "@/lib/performance/sdlyComparison";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
+import { MonthlyPerformanceTable } from "@/components/performance/MonthlyPerformanceTable";
+import { buildMonthlyPerformance, monthlyAsofRequests, MonthlySnapshotRow } from "@/lib/performance/monthlyPerformance";
 import {
   ND,
   SnapshotRow,
@@ -572,6 +574,22 @@ export default function PerformanceStructureDrilldownPage({
   const [yearlyDetailRows, setYearlyDetailRows] = useState<DetailRow[] | null>(null);
   const [yearlyDetailLoading, setYearlyDetailLoading] = useState(false);
 
+  // Performance mensile: righe giornaliere dell'anno e dell'anno precedente
+  // (v_snapshot_latest) piu' l'OTB as-of dei soli mesi futuri - caricate una
+  // volta per anno (loadMonthlyPerformance), non ad ogni cambio di mese.
+  // Budget mensile e chiusure arrivano da loadMetrics, che li legge gia'.
+  const [monthlyData, setMonthlyData] = useState<{
+    year: number;
+    currentRows: MonthlySnapshotRow[];
+    previousRows: MonthlySnapshotRow[];
+    asofByMonth: Map<number, MonthAsofRow | null>;
+  } | null>(null);
+  const [monthlyBudgetRows, setMonthlyBudgetRows] = useState<MonthlyBudgetRow[]>([]);
+  const [structureClosures, setStructureClosures] = useState<ClosureRange[]>([]);
+  // Anno dell'ultima richiesta: una risposta arrivata dopo un cambio anno
+  // viene scartata.
+  const monthlyYearRef = useRef<number | null>(null);
+
   const periodStart = confirmedStart;
   const periodEnd = confirmedEnd;
   // Anno della vista Mensile "tutto l'anno": segue l'anno del periodo
@@ -872,6 +890,16 @@ export default function PerformanceStructureDrilldownPage({
 
     setPeriodSnapshots((periodRes.data as SnapshotRow[]) || []);
     setSdlySnapshots((sdlyRes.data as SnapshotRow[]) || []);
+    setMonthlyBudgetRows((budgetsRes.data as MonthlyBudgetRow[] | null) || []);
+    setStructureClosures((closuresRes.data as ClosureRange[] | null) || []);
+    // Anno pieno: le righe appena lette sono gia' quelle della Performance
+    // mensile, nessuna seconda lettura di v_snapshot_latest.
+    if (sdlyIsFullYear && !periodRes.error && !sdlyRes.error) {
+      void loadMonthlyPerformance(Number(periodStart.slice(0, 4)), {
+        currentRows: (periodRes.data as unknown as MonthlySnapshotRow[] | null) || [],
+        previousRows: (sdlyRes.data as unknown as MonthlySnapshotRow[] | null) || [],
+      });
+    }
     setPeriodBudgetView({
       start: periodStart,
       end: periodEnd,
@@ -1046,6 +1074,73 @@ export default function PerformanceStructureDrilldownPage({
     setNationalitySdlyAvailable((nationalitySdlyYearCountRes.count || 0) > 0);
 
     setLoadingMetrics(false);
+  }
+
+  useEffect(() => {
+    // In modalita' Anno le righe arrivano da loadMetrics (vedi sopra).
+    if (accessState !== "granted" || periodKind(periodStart, periodEnd) === "year") return;
+    if (monthlyData?.year === detailYear) return;
+    void loadMonthlyPerformance(detailYear);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessState, detailYear, periodStart, periodEnd]);
+
+  // Massimo 2 letture annuali di v_snapshot_latest (<= 366 righe ciascuna
+  // per una sola struttura: sotto il limite PostgREST di 1.000, nessuna
+  // paginazione necessaria) + una fn_month_snapshot_asof per ciascun mese
+  // interamente futuro con dato. Mai il pattern 12+12 di loadYearlyDetail.
+  async function loadMonthlyPerformance(
+    year: number,
+    preloaded?: { currentRows: MonthlySnapshotRow[]; previousRows: MonthlySnapshotRow[] }
+  ) {
+    monthlyYearRef.current = year;
+
+    let currentRows = preloaded?.currentRows;
+    let previousRows = preloaded?.previousRows;
+
+    if (!currentRows || !previousRows) {
+      const columns = "stay_date, extraction_date, revenue_total, rooms_sold, rooms_available, arrivals, presences";
+      const yearRows = (y: number) =>
+        supabase
+          .from("v_snapshot_latest")
+          .select(columns)
+          .eq("structure_id", structureId)
+          .gte("stay_date", `${y}-01-01`)
+          .lte("stay_date", `${y}-12-31`);
+      const [currentRes, previousRes] = await Promise.all([yearRows(year), yearRows(year - 1)]);
+
+      if (currentRes.error || previousRes.error) {
+        setLoadError((currentRes.error || previousRes.error)!.message);
+        return;
+      }
+      currentRows = (currentRes.data as unknown as MonthlySnapshotRow[] | null) || [];
+      previousRows = (previousRes.data as unknown as MonthlySnapshotRow[] | null) || [];
+    }
+
+    const asofResults = await Promise.all(
+      monthlyAsofRequests(year, todayString(), currentRows).map(async ({ month, cutoff }) => {
+        const res = await supabase.rpc("fn_month_snapshot_asof", {
+          p_structure_ids: [structureId],
+          p_period_year: year - 1,
+          p_period_month: month,
+          p_cutoff_date: cutoff,
+        });
+        return { month, row: ((res.data as MonthAsofRow[] | null) || [])[0] ?? null, error: res.error };
+      })
+    );
+
+    const asofError = asofResults.find((r) => r.error)?.error;
+    if (asofError) {
+      setLoadError(asofError.message);
+      return;
+    }
+    if (monthlyYearRef.current !== year) return;
+
+    setMonthlyData({
+      year,
+      currentRows,
+      previousRows,
+      asofByMonth: new Map(asofResults.map((r) => [r.month, r.row])),
+    });
   }
 
   useEffect(() => {
@@ -1233,6 +1328,24 @@ export default function PerformanceStructureDrilldownPage({
     const minimoBudget = periodBudgets.find((b) => b.level === "minimo");
     return pacingDetail(periodAgg.revenue, minimoBudget ? Number(minimoBudget.revenue_target) : null);
   }, [periodAgg.revenue, periodBudgets]);
+
+  // null finche' i dati dell'anno visualizzato non sono caricati: mai le
+  // righe di un altro anno durante il reload.
+  const monthlyPerformanceRows = useMemo(
+    () =>
+      monthlyData && monthlyData.year === detailYear
+        ? buildMonthlyPerformance({
+            year: detailYear,
+            today: todayString(),
+            currentRows: monthlyData.currentRows,
+            previousRows: monthlyData.previousRows,
+            budgets: monthlyBudgetRows,
+            closures: structureClosures,
+            asofByMonth: monthlyData.asofByMonth,
+          })
+        : null,
+    [monthlyData, detailYear, monthlyBudgetRows, structureClosures]
+  );
 
   const displayedDetailRows = useMemo(
     () =>
@@ -1657,6 +1770,8 @@ export default function PerformanceStructureDrilldownPage({
           </AppCard>
         </div>
       </div>
+
+      <MonthlyPerformanceTable year={detailYear} rows={monthlyPerformanceRows} />
 
       {hasChannelData && (
         <>

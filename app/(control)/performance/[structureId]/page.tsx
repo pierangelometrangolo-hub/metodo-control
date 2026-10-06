@@ -26,6 +26,7 @@ import {
 } from "@/lib/performance/periodBudget";
 import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
 import { sdlyCutoffFromRows } from "@/lib/performance/sdlyCutoff";
+import { DailyRow, resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "@/lib/performance/sdlyComparison";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import {
   ND,
@@ -518,6 +519,26 @@ export default function PerformanceStructureDrilldownPage({
     // Mesi senza snapshot valorizzati a 0 per chiusura dichiarata.
     closedMonths: number[];
   } | null>(null);
+  // Tab "SDLY" del periodo caricato (stessa regola della Vista d'insieme,
+  // lib/performance/sdlyComparison): produzione maturata fino alla data di
+  // osservazione per i periodi gia' iniziati - in quel caso currentAgg e'
+  // il lato corrente del confronto, limitato ai giorni maturati - oppure
+  // OTB as-of dell'intero periodo per i periodi interamente futuri.
+  const [sdlyInfo, setSdlyInfo] = useState<{
+    mode: SdlyMode;
+    currentAgg: KpiAgg | null;
+    actualDetail: string | null;
+    referenceDetail: string | null;
+    unavailableReason: string | null;
+    zeroNote: string | null;
+  }>({
+    mode: "production",
+    currentAgg: null,
+    actualDetail: null,
+    referenceDetail: null,
+    unavailableReason: null,
+    zeroNote: null,
+  });
   // Cutoff SDLY effettivamente usato per il periodo caricato.
   const [sdlyCutoffUsed, setSdlyCutoffUsed] = useState(sdlyDate(todayString()));
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
@@ -699,12 +720,19 @@ export default function PerformanceStructureDrilldownPage({
     // aggregata in aggregateMonthlyAsof - lo storico 2025 e' caricato a
     // granularita' mensile, fn_snapshot_asof (giornaliera) tornerebbe ND.
     // Intervallo custom: invariato, fn_snapshot_asof.
-    const sdlyCutoff =
-      sdlyCutoffFromRows((periodRes.data as unknown as { extraction_date: string | null }[] | null) || []).cutoff ??
-      sdlyDate(todayString());
+    //
+    // Le RPC as-of servono solo per un periodo interamente futuro (OTB
+    // as-of). Per un periodo gia' iniziato lo SDLY e' produzione maturata:
+    // righe giornaliere del periodo e dello stesso periodo dell'anno
+    // precedente, gia' caricate qui sotto, nessuna RPC.
+    const sdlyObservation = sdlyCutoffFromRows(
+      (periodRes.data as unknown as { extraction_date: string | null }[] | null) || []
+    );
+    const sdlyCutoff = sdlyObservation.cutoff ?? sdlyDate(todayString());
+    const sdlyMode = sdlyModeForPeriod(periodStart, todayString());
     const sdlyIsFullMonth = isFullMonth(periodStart, periodEnd);
     const sdlyIsFullYear = periodKind(periodStart, periodEnd) === "year";
-    const sdlyAsofPromise = sdlyIsFullYear
+    const sdlyAsofPromise = sdlyMode === "production" || sdlyIsFullYear
       ? Promise.resolve({ data: null, error: null })
       : sdlyIsFullMonth
         ? supabase.rpc("fn_month_snapshot_asof", {
@@ -719,7 +747,7 @@ export default function PerformanceStructureDrilldownPage({
             p_stay_date_end: sdlyEnd,
             p_cutoff_date: sdlyCutoff,
           });
-    const sdlyAnnualPromise = sdlyIsFullYear
+    const sdlyAnnualPromise = sdlyMode === "otb_asof" && sdlyIsFullYear
       ? Promise.all(
           Array.from({ length: 12 }, (_, i) =>
             supabase.rpc("fn_month_snapshot_asof", {
@@ -886,7 +914,50 @@ export default function PerformanceStructureDrilldownPage({
     );
 
     setSdlyCutoffUsed(sdlyCutoff);
-    if (sdlyIsFullYear) {
+    setSdlyAnnualCoverage(null);
+    const rangeLabel = (startDate: string, endDate: string) => `${formatDateIt(startDate)} → ${formatDateIt(endDate)}`;
+    if (sdlyMode === "production") {
+      const production = resolveProductionSdly({
+        periodStart,
+        periodEnd,
+        observationDate: sdlyObservation.observationDate,
+        currentRows: (periodRes.data as unknown as DailyRow[] | null) || [],
+        previousRows: (sdlyRes.data as unknown as DailyRow[] | null) || [],
+        closures: (closuresRes.data as ClosureRange[] | null) || [],
+      });
+      const previousYear = sdlyStart.slice(0, 4);
+      if (production.status === "no_matured") {
+        setSdlyAsofAgg(EMPTY_KPI_AGG);
+        setSdlyInfo({
+          mode: sdlyMode,
+          currentAgg: EMPTY_KPI_AGG,
+          actualDetail: null,
+          referenceDetail: null,
+          unavailableReason: sdlyObservation.observationDate
+            ? `snapshot corrente del ${formatDateIt(sdlyObservation.observationDate)} precedente all’inizio del periodo, nessuna produzione maturata`
+            : "nessun dato nel periodo selezionato",
+          zeroNote: null,
+        });
+      } else {
+        setSdlyAsofAgg(production.previous ?? EMPTY_KPI_AGG);
+        setSdlyInfo({
+          mode: sdlyMode,
+          currentAgg: production.current ?? EMPTY_KPI_AGG,
+          actualDetail: rangeLabel(production.currentStart, production.currentEnd),
+          referenceDetail: rangeLabel(production.previousStart, production.previousEnd),
+          unavailableReason:
+            production.status === "ok"
+              ? null
+              : production.status === "partial"
+                ? `storico ${previousYear} incompleto: ${production.daysCovered}/${production.daysExpected} giorni dell’intervallo`
+                : `storico ${previousYear} non disponibile per l’intervallo`,
+          zeroNote:
+            production.closedDays > 0
+              ? `Chiusura dichiarata ${previousYear} valorizzata a 0: ${production.closedDays} giorni.`
+              : null,
+        });
+      }
+    } else if (sdlyIsFullYear) {
       // Stessa regola della Vista d'insieme: mese con dato reale -> dato
       // reale; mese senza dato ma chiuso per intero da una chiusura
       // dichiarata -> 0; altrimenti mancante e nessun totale annuale.
@@ -898,6 +969,21 @@ export default function PerformanceStructureDrilldownPage({
       );
       setSdlyAnnualCoverage({ covered: annual.monthsCovered, expected: annual.monthsExpected, closedMonths });
       setSdlyAsofAgg(annual.agg ?? EMPTY_KPI_AGG);
+    }
+    if (sdlyMode === "otb_asof") {
+      setSdlyInfo({
+        mode: sdlyMode,
+        currentAgg: null,
+        actualDetail: sdlyObservation.observationDate
+          ? `snapshot del ${formatDateIt(sdlyObservation.observationDate)}`
+          : null,
+        referenceDetail: `al ${formatDateIt(sdlyCutoff)}`,
+        unavailableReason: null,
+        zeroNote: null,
+      });
+    }
+    if (sdlyMode === "production" || sdlyIsFullYear) {
+      // Produzione maturata e OTB as-of annuale: gia' risolti sopra.
     } else if (sdlyIsFullMonth) {
       const row = ((sdlyAsofRes.data as
         | { revenue_total: number; rooms_sold: number; rooms_available: number; arrivals: number; presences: number }[]
@@ -914,7 +1000,6 @@ export default function PerformanceStructureDrilldownPage({
           : EMPTY_KPI_AGG
       );
     } else {
-      setSdlyAnnualCoverage(null);
       const rowsWithStatus = ((sdlyAsofRes.data as SnapshotRow[] | null) || []).map((r) => ({
         ...r,
         status: "otb" as const,
@@ -1124,6 +1209,11 @@ export default function PerformanceStructureDrilldownPage({
   const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
   const comparisonAgg: KpiAgg = comparisonTab === "sdly" ? sdlyAsofAgg : sdlyAgg;
   const comparisonLabel = comparisonTab === "sdly" ? "SDLY" : "Consuntivo anno prec.";
+  // Lato corrente delle card KPI: nel tab SDLY di un periodo gia' iniziato
+  // e' la sola produzione maturata (stesso intervallo del riferimento);
+  // negli altri casi resta l'intero periodo selezionato.
+  const kpiCurrentAgg: KpiAgg =
+    comparisonTab === "sdly" && sdlyInfo.mode === "production" && sdlyInfo.currentAgg ? sdlyInfo.currentAgg : periodAgg;
   const directShareCurrent = useMemo(() => directShareOf(channelRevenue), [channelRevenue]);
   const directShareSdly = useMemo(() => directShareOf(channelRevenueSdly), [channelRevenueSdly]);
 
@@ -1398,7 +1488,36 @@ export default function PerformanceStructureDrilldownPage({
                   ))}
                 </div>
 
+                {comparisonTab === "sdly" && (
+                  <p className="mb-4 text-sm text-[#6a6d70]">
+                    {sdlyInfo.mode === "production"
+                      ? `Produzione vs SDLY: produzione maturata${
+                          sdlyInfo.actualDetail ? ` ${sdlyInfo.actualDetail}` : ""
+                        } confrontata con lo stesso intervallo dell’anno precedente${
+                          sdlyInfo.referenceDetail ? ` (${sdlyInfo.referenceDetail})` : ""
+                        }. La parte futura del periodo non entra nel confronto.`
+                      : `OTB vs SDLY: OTB del periodo osservato alla data corrente${
+                          sdlyInfo.actualDetail ? ` (${sdlyInfo.actualDetail})` : ""
+                        } confrontato con l’OTB dello stesso periodo osservato alla stessa data dell’anno precedente${
+                          sdlyInfo.referenceDetail ? ` (${sdlyInfo.referenceDetail})` : ""
+                        }.`}
+                    {sdlyInfo.zeroNote ? ` ${sdlyInfo.zeroNote}` : ""}
+                  </p>
+                )}
+
                 {comparisonTab === "sdly" &&
+                  sdlyInfo.mode === "production" &&
+                  comparisonAgg.revenue === null &&
+                  comparisonAgg.roomsSold === null && (
+                    <p className="mb-4 text-sm text-[#6a6d70]">
+                      {ND} — confronto non disponibile
+                      {sdlyInfo.unavailableReason ? `: ${sdlyInfo.unavailableReason}` : ""}. Un giorno senza dati vale 0
+                      solo se coperto da una chiusura registrata nel Budget.
+                    </p>
+                  )}
+
+                {comparisonTab === "sdly" &&
+                  sdlyInfo.mode === "otb_asof" &&
                   comparisonAgg.revenue === null &&
                   comparisonAgg.roomsSold === null && (
                     <p className="mb-4 text-sm text-[#6a6d70]">
@@ -1425,32 +1544,32 @@ export default function PerformanceStructureDrilldownPage({
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
                   <KpiCard
                     label="Revenue"
-                    current={formatCurrency(periodAgg.revenue)}
-                    currentRaw={periodAgg.revenue}
+                    current={formatCurrency(kpiCurrentAgg.revenue)}
+                    currentRaw={kpiCurrentAgg.revenue}
                     comparison={formatCurrency(comparisonAgg.revenue)}
                     comparisonRaw={comparisonAgg.revenue}
                     comparisonLabel={comparisonLabel}
                   />
                   <KpiCard
                     label="Occupazione"
-                    current={formatPercent(occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable))}
-                    currentRaw={occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable)}
+                    current={formatPercent(occupancy(kpiCurrentAgg.roomsSold, kpiCurrentAgg.roomsAvailable))}
+                    currentRaw={occupancy(kpiCurrentAgg.roomsSold, kpiCurrentAgg.roomsAvailable)}
                     comparison={formatPercent(occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable))}
                     comparisonRaw={occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable)}
                     comparisonLabel={comparisonLabel}
                   />
                   <KpiCard
                     label="Arrivi"
-                    current={formatNumber(periodAgg.arrivals)}
-                    currentRaw={periodAgg.arrivals}
+                    current={formatNumber(kpiCurrentAgg.arrivals)}
+                    currentRaw={kpiCurrentAgg.arrivals}
                     comparison={formatNumber(comparisonAgg.arrivals)}
                     comparisonRaw={comparisonAgg.arrivals}
                     comparisonLabel={comparisonLabel}
                   />
                   <KpiCard
                     label="Presenze"
-                    current={formatNumber(periodAgg.presences)}
-                    currentRaw={periodAgg.presences}
+                    current={formatNumber(kpiCurrentAgg.presences)}
+                    currentRaw={kpiCurrentAgg.presences}
                     comparison={formatNumber(comparisonAgg.presences)}
                     comparisonRaw={comparisonAgg.presences}
                     comparisonLabel={comparisonLabel}
@@ -1458,10 +1577,10 @@ export default function PerformanceStructureDrilldownPage({
                   <KpiCard
                     label="LOS"
                     current={(() => {
-                      const value = los(periodAgg.roomsSold, periodAgg.arrivals);
+                      const value = los(kpiCurrentAgg.roomsSold, kpiCurrentAgg.arrivals);
                       return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
                     })()}
-                    currentRaw={los(periodAgg.roomsSold, periodAgg.arrivals)}
+                    currentRaw={los(kpiCurrentAgg.roomsSold, kpiCurrentAgg.arrivals)}
                     comparison={(() => {
                       const value = los(comparisonAgg.roomsSold, comparisonAgg.arrivals);
                       return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;

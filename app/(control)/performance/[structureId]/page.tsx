@@ -24,7 +24,8 @@ import {
   periodBudgetTitles,
   periodKind,
 } from "@/lib/performance/periodBudget";
-import { aggregateMonthlyAsof, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
+import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
+import { sdlyCutoffFromRows } from "@/lib/performance/sdlyCutoff";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import {
   ND,
@@ -483,9 +484,10 @@ export default function PerformanceStructureDrilldownPage({
   // rappresenta).
   const [sdlySnapshots, setSdlySnapshots] = useState<SnapshotRow[]>([]);
   // "SDLY" vero: stesso periodo di un anno fa, ma con l'estrazione
-  // disponibile al cutoff = oggi meno un anno (fn_month_snapshot_asof per
-  // un mese pieno, fn_snapshot_asof per un periodo custom) - a parita' di
-  // anticipo rispetto ad oggi, non il consuntivo finale. Vedi loadMetrics.
+  // disponibile al cutoff = data dello snapshot corrente della struttura
+  // meno un anno (fn_month_snapshot_asof per un mese pieno, fn_snapshot_asof
+  // per un periodo custom) - stessa data di osservazione, non il consuntivo
+  // finale. Vedi loadMetrics.
   const [sdlyAsofAgg, setSdlyAsofAgg] = useState<KpiAgg>(EMPTY_KPI_AGG);
   const [comparisonTab, setComparisonTab] = useState<ComparisonTab>("sdly");
   // Budget del periodo selezionato, insieme agli estremi del periodo per cui
@@ -510,7 +512,14 @@ export default function PerformanceStructureDrilldownPage({
   );
   // SDLY anno pieno: mesi dell'anno precedente coperti al cutoff (null per
   // periodi non annuali), per distinguere copertura parziale da nessun dato.
-  const [sdlyAnnualCoverage, setSdlyAnnualCoverage] = useState<{ covered: number; expected: number } | null>(null);
+  const [sdlyAnnualCoverage, setSdlyAnnualCoverage] = useState<{
+    covered: number;
+    expected: number;
+    // Mesi senza snapshot valorizzati a 0 per chiusura dichiarata.
+    closedMonths: number[];
+  } | null>(null);
+  // Cutoff SDLY effettivamente usato per il periodo caricato.
+  const [sdlyCutoffUsed, setSdlyCutoffUsed] = useState(sdlyDate(todayString()));
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
   // Indipendente da "Mostra netto" - entrambi attivabili insieme, mai
   // gated da canManage (channel_revenue non ha la stessa RLS rank>=2 di
@@ -662,12 +671,24 @@ export default function PerformanceStructureDrilldownPage({
     const sdlyYears = yearsOf(sdlyStart, sdlyEnd);
 
     const snapshotColumns =
-      "stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
+      "stay_date, extraction_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
+
+    // Le righe del periodo corrente si leggono per prime: la loro
+    // extraction_date piu' recente e' la data di osservazione dell'OTB
+    // mostrato, da cui dipende il cutoff SDLY.
+    const periodRes = await supabase
+      .from("v_snapshot_latest")
+      .select(snapshotColumns)
+      .eq("structure_id", structureId)
+      .gte("stay_date", periodStart)
+      .lte("stay_date", periodEnd);
 
     // Tab "SDLY": OTB del periodo di un anno fa cosi' come si presentava
-    // allo stesso cutoff di oggi (oggi meno un anno), non il consuntivo
-    // finale - stessa convenzione gia' validata sulla Dashboard
-    // (fn_month_snapshot_asof, sdlyCutoff = sdlyDate(todayString())). Per
+    // alla stessa data di osservazione dell'OTB corrente (snapshot corrente
+    // della struttura meno un anno, non genericamente oggi meno un anno),
+    // non il consuntivo finale - stessa regola della Vista d'insieme
+    // (sdlyCutoffFromRows). Senza righe nel periodo corrente non esiste una
+    // data di osservazione: si ricade su oggi meno un anno. Per
     // un mese pieno usa la funzione mensile (unica fonte per lo storico
     // 2025, caricato a granularita' mensile); per un periodo custom usa la
     // funzione giornaliera - che per periodi 2025 non ancora coperti da
@@ -678,7 +699,9 @@ export default function PerformanceStructureDrilldownPage({
     // aggregata in aggregateMonthlyAsof - lo storico 2025 e' caricato a
     // granularita' mensile, fn_snapshot_asof (giornaliera) tornerebbe ND.
     // Intervallo custom: invariato, fn_snapshot_asof.
-    const sdlyCutoff = sdlyDate(todayString());
+    const sdlyCutoff =
+      sdlyCutoffFromRows((periodRes.data as unknown as { extraction_date: string | null }[] | null) || []).cutoff ??
+      sdlyDate(todayString());
     const sdlyIsFullMonth = isFullMonth(periodStart, periodEnd);
     const sdlyIsFullYear = periodKind(periodStart, periodEnd) === "year";
     const sdlyAsofPromise = sdlyIsFullYear
@@ -710,7 +733,7 @@ export default function PerformanceStructureDrilldownPage({
       : Promise.resolve(null);
 
     const [
-      periodRes,
+      closuresRes,
       sdlyRes,
       sdlyAsofRes,
       sdlyAnnualRes,
@@ -723,12 +746,9 @@ export default function PerformanceStructureDrilldownPage({
       nationalitySdlyRes,
       nationalitySdlyYearCountRes,
     ] = await Promise.all([
-      supabase
-        .from("v_snapshot_latest")
-        .select(snapshotColumns)
-        .eq("structure_id", structureId)
-        .gte("stay_date", periodStart)
-        .lte("stay_date", periodEnd),
+      // Chiusure dichiarate (stesso registro del Budget): unica fonte per
+      // riconoscere un mese di chiusura stagionale nello SDLY annuale.
+      supabase.from("structure_closures").select("start_date, end_date").eq("structure_id", structureId),
       supabase
         .from("v_snapshot_latest")
         .select(snapshotColumns)
@@ -807,6 +827,7 @@ export default function PerformanceStructureDrilldownPage({
     ]);
 
     if (periodRes.error) setLoadError(periodRes.error.message);
+    if (closuresRes.error) setLoadError(closuresRes.error.message);
     if (sdlyRes.error) setLoadError(sdlyRes.error.message);
     if (sdlyAsofRes.error) setLoadError(sdlyAsofRes.error.message);
     sdlyAnnualRes?.forEach((res) => {
@@ -864,11 +885,18 @@ export default function PerformanceStructureDrilldownPage({
       )
     );
 
+    setSdlyCutoffUsed(sdlyCutoff);
     if (sdlyIsFullYear) {
-      const annual = aggregateMonthlyAsof(
-        (sdlyAnnualRes ?? []).map((res) => ((res.data as MonthAsofRow[] | null) || [])[0] ?? null)
+      // Stessa regola della Vista d'insieme: mese con dato reale -> dato
+      // reale; mese senza dato ma chiuso per intero da una chiusura
+      // dichiarata -> 0; altrimenti mancante e nessun totale annuale.
+      const { result: annual, closedMonths } = aggregateMonthlyAsofWithClosures(
+        (sdlyAnnualRes ?? []).map((res) => ((res.data as MonthAsofRow[] | null) || [])[0] ?? null),
+        Array.from({ length: 12 }, (_, i) => i + 1),
+        Number(sdlyStart.slice(0, 4)),
+        (closuresRes.data as ClosureRange[] | null) || []
       );
-      setSdlyAnnualCoverage({ covered: annual.monthsCovered, expected: annual.monthsExpected });
+      setSdlyAnnualCoverage({ covered: annual.monthsCovered, expected: annual.monthsExpected, closedMonths });
       setSdlyAsofAgg(annual.agg ?? EMPTY_KPI_AGG);
     } else if (sdlyIsFullMonth) {
       const row = ((sdlyAsofRes.data as
@@ -1376,11 +1404,21 @@ export default function PerformanceStructureDrilldownPage({
                     <p className="mb-4 text-sm text-[#6a6d70]">
                       {sdlyAnnualCoverage && sdlyAnnualCoverage.covered > 0
                         ? `${ND} — copertura parziale per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
-                            sdlyDate(todayString())
-                          )}): ${sdlyAnnualCoverage.covered}/${sdlyAnnualCoverage.expected} mesi disponibili, nessun totale annuale mostrato.`
+                            sdlyCutoffUsed
+                          )}): ${sdlyAnnualCoverage.covered}/${sdlyAnnualCoverage.expected} mesi disponibili, nessun totale annuale mostrato. Un mese senza dati vale 0 solo se coperto per intero da una chiusura registrata nel Budget.`
                         : `${ND} — nessun dato disponibile per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
-                            sdlyDate(todayString())
+                            sdlyCutoffUsed
                           )}).`}
+                    </p>
+                  )}
+
+                {comparisonTab === "sdly" &&
+                  comparisonAgg.revenue !== null &&
+                  sdlyAnnualCoverage &&
+                  sdlyAnnualCoverage.closedMonths.length > 0 && (
+                    <p className="mb-4 text-sm text-[#6a6d70]">
+                      SDLY al cutoff {formatDateIt(sdlyCutoffUsed)} · chiusura stagionale valorizzata a 0:{" "}
+                      {sdlyAnnualCoverage.closedMonths.map((m) => MONTH_LABELS[m - 1]).join(", ")}.
                     </p>
                   )}
 

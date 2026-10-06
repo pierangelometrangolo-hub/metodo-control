@@ -55,3 +55,60 @@ export function aggregateMonthlyAsof(monthResults: (MonthAsofRow | null | undefi
     monthsExpected,
   };
 }
+
+// ============ Mesi di chiusura stagionale ============
+//
+// Una struttura stagionale non opera 12 mesi: i mesi di chiusura non hanno
+// (e non avranno mai) snapshot. Valgono 0 ai fini del confronto annuale,
+// ma SOLO se la chiusura e' dichiarata in structure_closures (registro
+// manuale delle chiusure, lo stesso usato dal Budget) e copre l'intero
+// mese - mai dedotta dalla sola assenza di snapshot. Un mese senza dato e
+// senza chiusura dichiarata resta mancante (copertura parziale -> ND).
+
+export type ClosureRange = { start_date: string; end_date: string };
+
+const CLOSED_MONTH: MonthAsofRow = { revenue_total: 0, rooms_sold: 0, rooms_available: 0, arrivals: 0, presences: 0 };
+
+// Tutti i giorni del mese coperti dall'unione delle chiusure dichiarate
+// (anche da piu' intervalli contigui o sovrapposti).
+export function isMonthFullyClosed(closures: ClosureRange[], year: number, month: number): boolean {
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  for (let day = 1; day <= lastDay; day++) {
+    const date = `${year}-${pad2(month)}-${pad2(day)}`;
+    if (!closures.some((c) => c.start_date <= date && date <= c.end_date)) return false;
+  }
+  return true;
+}
+
+// months[i] e' il mese (1-12) di monthResults[i]. Un mese con dato reale
+// resta quello reale anche se dichiarato chiuso; solo un mese senza dato e
+// interamente chiuso diventa 0. closedMonths = mesi valorizzati a 0.
+export function applySeasonalClosures(
+  monthResults: (MonthAsofRow | null | undefined)[],
+  months: number[],
+  year: number,
+  closures: ClosureRange[]
+): { monthResults: (MonthAsofRow | null)[]; closedMonths: number[] } {
+  const closedMonths: number[] = [];
+  const filled = monthResults.map((row, i) => {
+    if (row) return row;
+    if (!isMonthFullyClosed(closures, year, months[i])) return null;
+    closedMonths.push(months[i]);
+    return CLOSED_MONTH;
+  });
+  return { monthResults: filled, closedMonths };
+}
+
+// SDLY annuale completo di regola stagionale, unico punto condiviso da
+// Vista d'insieme e Dettaglio struttura: totale solo se ogni mese e'
+// coperto da dato reale o da chiusura dichiarata, altrimenti ND.
+export function aggregateMonthlyAsofWithClosures(
+  monthResults: (MonthAsofRow | null | undefined)[],
+  months: number[],
+  year: number,
+  closures: ClosureRange[]
+): { result: AnnualAsofResult; closedMonths: number[] } {
+  const filled = applySeasonalClosures(monthResults, months, year, closures);
+  return { result: aggregateMonthlyAsof(filled.monthResults), closedMonths: filled.closedMonths };
+}

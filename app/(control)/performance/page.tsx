@@ -39,6 +39,8 @@ import {
 } from "@/lib/performanceMetrics";
 import { aggregatePortfolioPerformance, PortfolioComparison } from "@/lib/performance/portfolio";
 import { aggregateBudgetRows } from "@/lib/performance/periodBudget";
+import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
+import { groupStructuresBySdlyCutoff, observationDateByStructure } from "@/lib/performance/sdlyCutoff";
 import {
   computeLikeForLike,
   LikeForLikeComparison,
@@ -68,7 +70,7 @@ type StructureOption = {
 // .range() potrebbero saltare o ripetere righe tra una chiamata e l'altra.
 const SNAPSHOT_PAGE_SIZE = 1000;
 
-type SnapshotRowWithStructure = SnapshotRow & { structure_id: string };
+type SnapshotRowWithStructure = SnapshotRow & { structure_id: string; extraction_date: string | null };
 
 async function fetchAllSnapshotRows(
   start: string,
@@ -108,6 +110,16 @@ type StructureRowData = {
   monthRoomsSold: number | null;
   monthRoomsAvailable: number | null;
   sdlyMonthRevenue: number | null;
+  // Data di osservazione dell'OTB corrente (extraction_date piu' recente
+  // tra le righe del periodo) e cutoff SDLY che ne deriva (- 1 anno); mesi
+  // dell'anno precedente coperti a quel cutoff sui mesi attesi.
+  observationDate: string | null;
+  sdlyCutoff: string | null;
+  sdlyMonthsCovered: number;
+  sdlyMonthsExpected: number;
+  // Mesi dell'anno precedente senza snapshot valorizzati a 0 perche'
+  // interamente coperti da una chiusura dichiarata (structure_closures).
+  sdlyClosedMonths: number[];
   lastYearMonthRevenue: number | null;
   budgetsForMonth: BudgetRow[];
   pacing: ReturnType<typeof computePacingStatus>;
@@ -183,6 +195,31 @@ function GoalCell({ goal, metric }: { goal: GoalProgress | null; metric: "rooms"
     <CellTooltip trigger={trigger}>
       <GoalTooltipBody goal={goal} />
     </CellTooltip>
+  );
+}
+
+// Gerarchia comune alle colonne di confronto (OTB vs SDLY, OTB vs
+// Consuntivo LY), sia sulle righe struttura sia sul TOTALE METODO: valore
+// dell'anno corrente in primo piano, variazione subito sotto, riferimento
+// dell'anno precedente piu' piccolo e secondario - mai il contrario.
+function ComparisonValue({
+  actual,
+  reference,
+  referenceLabel,
+}: {
+  actual: number | null;
+  reference: number | null;
+  referenceLabel: string;
+}) {
+  const delta = formatDelta(actual, reference);
+  return (
+    <span className="block">
+      <span className="block font-semibold text-[#2B2D2F]">{formatCurrency(actual)}</span>
+      <span className={`block ${delta.colorClass}`}>{delta.text}</span>
+      <span className="block whitespace-nowrap text-[12px] font-normal text-[#6a6d70]">
+        {referenceLabel}: {formatCurrency(reference)}
+      </span>
+    </span>
   );
 }
 
@@ -283,13 +320,11 @@ export default function PerformanceOverviewPage() {
     const lastYearEnd = isWholeYear ? `${selectedYear - 1}-12-31` : lastYearMonthRange.end;
 
     // Mesi per il confronto SDLY "a parita' di anticipo": 1 solo mese in
-    // modalita' mensile, fino al mese di oggi se l'anno corrente e' quello
-    // selezionato (non ha senso confrontare con mesi dell'anno scorso non
-    // ancora "iniziati" a quel punto dell'anno), altrimenti tutti e 12 per
-    // un anno passato concluso.
-    const sdlyMonthsInScope = isWholeYear
-      ? Array.from({ length: selectedYear === TODAY_YEAR ? TODAY_MONTH : 12 }, (_, i) => i + 1)
-      : [selectedMonth];
+    // modalita' mensile, sempre tutti e 12 in "Tutto l'anno" - stesso
+    // periodo di soggiorno (1 gen - 31 dic) del Revenue OTB qui sopra,
+    // anno corrente incluso: fermarsi al mese di oggi confrontava l'OTB
+    // gen-dic con un riferimento gen-ott.
+    const sdlyMonthsInScope = isWholeYear ? Array.from({ length: 12 }, (_, i) => i + 1) : [selectedMonth];
 
     // Mesi per il target di budget: sempre l'intero anno (1-12) in "Tutto
     // l'anno", anche per l'anno corrente - deve coprire lo stesso periodo
@@ -303,22 +338,15 @@ export default function PerformanceOverviewPage() {
     // Confronto SDLY "a parità di anticipo": non l'OTB dell'ultima estrazione
     // disponibile per il mese dell'anno scorso (sarebbe il consuntivo finale,
     // già coperto dalla colonna "Consuntivo anno prec."), ma l'OTB di quel
-    // mese così come si presentava un anno esatto fa rispetto ad oggi.
-    const sdlyCutoff = sdlyDate(todayString());
-
+    // mese così come si presentava un anno esatto prima della data di
+    // osservazione dell'OTB corrente. La data di osservazione e' per
+    // struttura (extraction_date piu' recente tra le righe del periodo in
+    // v_snapshot_latest), non "oggi": una struttura aggiornata il 30/09 si
+    // confronta con cio' che era noto al 30/09 dell'anno prima.
     const snapshotColumns =
-      "structure_id, stay_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
+      "structure_id, stay_date, extraction_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    const sdlyPromises = sdlyMonthsInScope.map((m) =>
-      supabase.rpc("fn_month_snapshot_asof", {
-        p_structure_ids: ids,
-        p_period_year: selectedYear - 1,
-        p_period_month: m,
-        p_cutoff_date: sdlyCutoff,
-      })
-    );
-
-    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, lastExtractionRes, membershipRes, ...sdlyResults] = await Promise.all([
+    const [monthRes, lastYearMonthRes, budgetsRes, importsRes, lastExtractionRes, membershipRes, closuresRes] = await Promise.all([
       fetchAllSnapshotRows(start, end, ids, snapshotColumns),
       fetchAllSnapshotRows(lastYearStart, lastYearEnd, ids, snapshotColumns),
       supabase
@@ -334,8 +362,28 @@ export default function PerformanceOverviewPage() {
       // Membership del portfolio per il like-for-like del TOTALE METODO:
       // solo struttura e date dell'engagement, nessun dato economico.
       supabase.from("consulting_engagements").select("structure_id, valid_from, valid_to").in("structure_id", ids),
-      ...sdlyPromises,
+      // Chiusure dichiarate (stesso registro del Budget): unica fonte per
+      // riconoscere un mese di chiusura stagionale nel confronto SDLY.
+      supabase.from("structure_closures").select("structure_id, start_date, end_date").in("structure_id", ids),
     ]);
+
+    // Una chiamata per (cutoff distinto, mese): le strutture con la stessa
+    // data di osservazione condividono il cutoff. Struttura senza righe nel
+    // periodo = nessuna data di osservazione, nessun confronto SDLY.
+    const observationDates = observationDateByStructure(monthRes.data || []);
+    const sdlyResults = await Promise.all(
+      Array.from(groupStructuresBySdlyCutoff(observationDates)).flatMap(([cutoff, structureIds]) =>
+        sdlyMonthsInScope.map(async (m) => {
+          const res = await supabase.rpc("fn_month_snapshot_asof", {
+            p_structure_ids: structureIds,
+            p_period_year: selectedYear - 1,
+            p_period_month: m,
+            p_cutoff_date: cutoff,
+          });
+          return { month: m, data: res.data as (MonthAsofRow & { structure_id: string })[] | null, error: res.error };
+        })
+      )
+    );
 
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (lastYearMonthRes.error) setLoadError(lastYearMonthRes.error.message);
@@ -343,6 +391,7 @@ export default function PerformanceOverviewPage() {
     if (importsRes.error) setLoadError(importsRes.error.message);
     if (lastExtractionRes.error) setLoadError(lastExtractionRes.error.message);
     if (membershipRes.error) setLoadError(membershipRes.error.message);
+    if (closuresRes.error) setLoadError(closuresRes.error.message);
     sdlyResults.forEach((res) => {
       if (res.error) setLoadError(res.error.message);
     });
@@ -366,16 +415,22 @@ export default function PerformanceOverviewPage() {
     // fn_month_snapshot_asof restituisce già un totale mensile risolto per
     // struttura (riga performance_monthly_snapshot se disponibile al cutoff,
     // altrimenti somma dei giorni disponibili in performance_daily_snapshot).
-    // In modalità "Tutto l'anno" si somma su più mesi: se anche un solo
-    // mese ha copertura si mostra la somma parziale, "ND" solo se nessun
-    // mese in ambito ha alcuna copertura per quella struttura.
-    const sdlySumByStructure = new Map<string, number>();
-    const sdlyCoverageByStructure = new Map<string, number>();
+    // In modalità "Tutto l'anno" si somma su 12 mesi con la stessa regola
+    // del dettaglio struttura (aggregateMonthlyAsof): totale solo con
+    // copertura completa, "ND" se manca anche un solo mese - mai una somma
+    // parziale presentata come confronto annuale.
+    const sdlyMonthsByStructure = new Map<string, Map<number, MonthAsofRow>>();
     sdlyResults.forEach((res) => {
-      (res.data || []).forEach((r: { structure_id: string; revenue_total: number }) => {
-        sdlySumByStructure.set(r.structure_id, (sdlySumByStructure.get(r.structure_id) || 0) + Number(r.revenue_total));
-        sdlyCoverageByStructure.set(r.structure_id, (sdlyCoverageByStructure.get(r.structure_id) || 0) + 1);
+      (res.data || []).forEach((r) => {
+        const months = sdlyMonthsByStructure.get(r.structure_id) || new Map<number, MonthAsofRow>();
+        months.set(res.month, r);
+        sdlyMonthsByStructure.set(r.structure_id, months);
       });
+    });
+
+    const closuresByStructure = new Map<string, ClosureRange[]>();
+    ((closuresRes.data as (ClosureRange & { structure_id: string })[] | null) || []).forEach((c) => {
+      closuresByStructure.set(c.structure_id, [...(closuresByStructure.get(c.structure_id) || []), c]);
     });
 
     const budgetRowsByStructureLevel = new Map<string, BudgetRow[]>();
@@ -402,6 +457,16 @@ export default function PerformanceOverviewPage() {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
       const lastYearMonthToDate = sumSnapshots(lastYearMonthByStructure.get(structure.id) || []);
+      const observationDate = observationDates.get(structure.id) ?? null;
+      // Senza data di osservazione non c'e' confronto: nessun mese viene
+      // riempito. Altrimenti un mese senza snapshot vale 0 solo se chiuso
+      // per intero da una chiusura dichiarata, mai per sola assenza di dato.
+      const { result: sdlyAsof, closedMonths: sdlyClosedMonths } = aggregateMonthlyAsofWithClosures(
+        sdlyMonthsInScope.map((m) => sdlyMonthsByStructure.get(structure.id)?.get(m) ?? null),
+        sdlyMonthsInScope,
+        selectedYear - 1,
+        observationDate ? closuresByStructure.get(structure.id) || [] : []
+      );
 
       const budgetsForMonth: BudgetRow[] = ["minimo", "realistico", "sfidante"]
         .map((level) => budgetRowsByStructureLevel.get(`${structure.id}::${level}`))
@@ -413,9 +478,12 @@ export default function PerformanceOverviewPage() {
         monthRevenue: monthToDate.revenue,
         monthRoomsSold: monthToDate.roomsSold,
         monthRoomsAvailable: monthToDate.roomsAvailable,
-        sdlyMonthRevenue: (sdlyCoverageByStructure.get(structure.id) || 0) > 0
-          ? sdlySumByStructure.get(structure.id) ?? 0
-          : null,
+        sdlyMonthRevenue: sdlyAsof.agg ? sdlyAsof.agg.revenue : null,
+        observationDate,
+        sdlyCutoff: observationDate ? sdlyDate(observationDate) : null,
+        sdlyMonthsCovered: sdlyAsof.monthsCovered,
+        sdlyMonthsExpected: sdlyAsof.monthsExpected,
+        sdlyClosedMonths,
         lastYearMonthRevenue: lastYearMonthToDate.revenue,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
@@ -493,41 +561,78 @@ export default function PerformanceOverviewPage() {
   ];
   // "su x/y" sotto il valore solo se il confronto copre meno strutture del
   // totale: a colpo d'occhio si vede che il riferimento non e' 6/6.
-  const portfolioCoverageNote = (coverage: number) =>
+  const portfolioCoverageNote = (coverage: number, prefix = "") =>
     coverage < portfolio.totalStructures ? (
       <p className="mt-0.5 text-[11px] font-normal text-[#6a6d70]">
-        su {coverage}/{portfolioOf}
+        {prefix}su {coverage}/{portfolioOf}
       </p>
     ) : null;
-  const likeForLikeDetail = (l4l: LikeForLikeComparison, referenceLabel: string) => (
+
+  // Testi dei due confronti con l'anno precedente, condivisi da
+  // intestazioni, righe struttura e TOTALE METODO: stessa definizione
+  // ovunque, declinata sul periodo selezionato (mese o intero anno).
+  const sdlyComparison = {
+    title: "OTB vs stesso momento dello scorso anno",
+    intro: isWholeYear
+      ? `Confronta l’OTB dell’intero ${selectedYear} osservato alla data dello snapshot corrente con l’OTB dell’intero ${selectedYear - 1} osservato alla stessa data dell’anno precedente.`
+      : `Confronta l’OTB di ${periodLabel} osservato alla data dello snapshot corrente con l’OTB di ${lastYearPeriodLabel} osservato alla stessa data dell’anno precedente.`,
+    actualLabel: `OTB ${periodLabel} alla data osservata`,
+    referenceLabel: `OTB ${lastYearPeriodLabel} alla stessa data`,
+  };
+  const consuntivoComparison = {
+    title: `OTB ${periodLabel} completo vs consuntivo finale ${lastYearPeriodLabel}`,
+    intro: isWholeYear
+      ? `Confronta l’OTB complessivo dell’anno ${selectedYear} con il consuntivo finale chiuso del ${selectedYear - 1}.`
+      : `Confronta l’OTB complessivo di ${periodLabel} con il consuntivo finale chiuso di ${lastYearPeriodLabel}.`,
+    actualLabel: `OTB completo ${periodLabel}`,
+    referenceLabel: `Consuntivo finale ${lastYearPeriodLabel}`,
+  };
+  // Motivo di esclusione specifico dello SDLY: storico dell'anno precedente
+  // presente ma incompleto al cutoff (es. 7/12 mesi) - piu' esplicito del
+  // generico "dato di confronto non disponibile".
+  const sdlyPartialCoverageReason = (structureId: string) => {
+    const row = rows.find((r) => r.structure.id === structureId);
+    return row && row.sdlyMonthRevenue === null && row.sdlyMonthsCovered > 0
+      ? `storico SDLY incompleto: ${row.sdlyMonthsCovered}/${row.sdlyMonthsExpected} mesi`
+      : null;
+  };
+  const likeForLikeDetail = (
+    l4l: LikeForLikeComparison,
+    comparison: { title: string; intro: string; actualLabel: string; referenceLabel: string },
+    reasonOverride?: (structureId: string) => string | null
+  ) => (
     <>
-      <p className="font-semibold">
-        Like-for-like: {l4l.included.length}/{l4l.total} strutture comparabili
+      <p className="font-semibold">{comparison.title}</p>
+      <p>
+        {comparison.intro} Il totale considera solo le strutture presenti nel portafoglio Metodo in entrambi gli
+        anni.
       </p>
-      <p>L4L confronta le sole strutture presenti nel portfolio Metodo in entrambi gli anni confrontati.</p>
       <p className="mt-1">
-        Incluse: {l4l.included.length > 0 ? l4l.included.map((s) => s.name).join(", ") : "nessuna"}
+        Strutture incluse ({l4l.included.length}/{l4l.total}):{" "}
+        {l4l.included.length > 0 ? l4l.included.map((s) => s.name).join(", ") : "nessuna"}
       </p>
       {/* Escluse raggruppate per motivo: il tooltip cresce per motivo, non
           per struttura, e resta dentro la tabella anche con piu' esclusioni. */}
       {Array.from(
         l4l.excluded.reduce((groups, s) => {
-          const reason = s.reasons.map((r) => likeForLikeReasonLabels[r]).join(" e ");
+          const reason =
+            (s.reasons.includes("missing_reference_data") ? reasonOverride?.(s.id) : null) ??
+            s.reasons.map((r) => likeForLikeReasonLabels[r]).join(" e ");
           groups.set(reason, [...(groups.get(reason) || []), s.name]);
           return groups;
         }, new Map<string, string[]>())
       ).map(([reason, names]) => (
         <p key={reason} className="mt-1">
-          Escluse ({reason}): {names.join(", ")}
+          Strutture escluse ({reason}): {names.join(", ")}
         </p>
       ))}
       {l4l.actual !== null && l4l.reference !== null && (
         <>
           <p className="mt-1">
-            OTB {periodLabel} (strutture incluse): {formatCurrency(l4l.actual)}
+            {comparison.actualLabel}: {formatCurrency(l4l.actual)}
           </p>
           <p>
-            {referenceLabel}: {formatCurrency(l4l.reference)}
+            {comparison.referenceLabel}: {formatCurrency(l4l.reference)}
           </p>
           <p className="mt-1">Differenza: {formatSignedCurrency(l4l.actual - l4l.reference)}</p>
           <p>Variazione: {formatDelta(l4l.actual, l4l.reference).text}</p>
@@ -679,12 +784,16 @@ export default function PerformanceOverviewPage() {
                     <InfoTooltip text="Confronta il Revenue OTB del mese selezionato con i tre livelli di budget dello stesso mese: rosso sotto Minimo, giallo tra Minimo e Realistico, verde sopra Realistico. Passa il mouse (o tocca) sulla riga per il dettaglio in euro dal Budget Minimo." />
                   </th>
                   <th className="pb-3 pr-4">
-                    SDLY
-                    <InfoTooltip text="Revenue on-the-books dell'intero mese selezionato confrontato con l'OTB dello stesso mese dell'anno scorso, preso allo stesso punto di anticipo (cutoff sull'estrazione a un anno esatto da oggi) — non il consuntivo finale. Usa lo storico mensile se disponibile a quella data, altrimenti la somma dei giorni disponibili. 'ND' quando manca copertura per quel mese. Passa il mouse (o tocca) sulla riga per i valori assoluti." />
+                    OTB vs SDLY
+                    <InfoTooltip
+                      text={`${sdlyComparison.intro} La data di osservazione è quella dell’ultimo snapshot di ciascuna struttura. 'ND' quando lo storico dell’anno precedente non copre l’intero periodo a quella data (nessuna somma parziale). Passa il mouse (o tocca) sulla riga per i valori assoluti.`}
+                    />
                   </th>
                   <th className="pb-3 pr-4">
-                    Consuntivo anno prec. vs OTB
-                    <InfoTooltip text="Revenue totale chiuso dello stesso mese dell'anno precedente rispetto al mese selezionato, confrontato con il Revenue OTB del mese selezionato. 'ND' quando manca lo storico per quel mese. Passa il mouse (o tocca) sulla riga per i valori assoluti." />
+                    OTB vs Consuntivo LY
+                    <InfoTooltip
+                      text={`${consuntivoComparison.intro} 'ND' quando manca lo storico per quel periodo. Passa il mouse (o tocca) sulla riga per i valori assoluti.`}
+                    />
                   </th>
                   <th className="pb-3 pr-4">
                     ADR
@@ -774,15 +883,27 @@ export default function PerformanceOverviewPage() {
                       <td className="py-3 pr-4">
                         {row.sdlyMonthRevenue !== null ? (
                           <CellTooltip
+                            widthClassName="w-80"
                             trigger={
-                              <span className="text-[#2B2D2F]">
-                                {formatCurrency(row.sdlyMonthRevenue)}{" "}
-                                <span className={sdlyDelta.colorClass}>({sdlyDelta.text})</span>
-                              </span>
+                              <ComparisonValue
+                                actual={row.monthRevenue}
+                                reference={row.sdlyMonthRevenue}
+                                referenceLabel={`vs ${sdlyComparison.referenceLabel}`}
+                              />
                             }
                           >
-                            <p>OTB {periodLabel}: {formatCurrency(row.monthRevenue)}</p>
-                            <p>SDLY {lastYearPeriodLabel} (a parità di anticipo): {formatCurrency(row.sdlyMonthRevenue)}</p>
+                            <p className="font-semibold">{sdlyComparison.title}</p>
+                            <p>{sdlyComparison.intro}</p>
+                            <p className="mt-1">
+                              {sdlyComparison.actualLabel}
+                              {row.observationDate ? ` (${formatDateIt(row.observationDate)})` : ""}:{" "}
+                              {formatCurrency(row.monthRevenue)}
+                            </p>
+                            <p>
+                              {sdlyComparison.referenceLabel}
+                              {row.sdlyCutoff ? ` (${formatDateIt(row.sdlyCutoff)})` : ""}:{" "}
+                              {formatCurrency(row.sdlyMonthRevenue)}
+                            </p>
                             <p className="mt-1">
                               Differenza:{" "}
                               {formatSignedCurrency(
@@ -790,6 +911,19 @@ export default function PerformanceOverviewPage() {
                               )}
                             </p>
                             <p>Variazione: {sdlyDelta.text}</p>
+                            {row.sdlyClosedMonths.length > 0 && (
+                              <p className="mt-1">
+                                Chiusura stagionale {selectedYear - 1} valorizzata a 0:{" "}
+                                {row.sdlyClosedMonths.map((m) => MONTH_LABELS[m - 1]).join(", ")}.
+                              </p>
+                            )}
+                          </CellTooltip>
+                        ) : row.sdlyMonthsCovered > 0 ? (
+                          <CellTooltip trigger={<span className="text-[#6a6d70]">{ND}</span>}>
+                            Copertura parziale per {lastYearPeriodLabel}
+                            {row.sdlyCutoff ? ` al ${formatDateIt(row.sdlyCutoff)}` : ""}: {row.sdlyMonthsCovered}/
+                            {row.sdlyMonthsExpected} mesi disponibili, nessun totale annuale mostrato. Un mese senza
+                            dati vale 0 solo se coperto per intero da una chiusura registrata nel Budget.
                           </CellTooltip>
                         ) : (
                           <span className="text-[#6a6d70]">{ND}</span>
@@ -799,15 +933,23 @@ export default function PerformanceOverviewPage() {
                       <td className="py-3 pr-4">
                         {row.lastYearMonthRevenue !== null ? (
                           <CellTooltip
+                            widthClassName="w-80"
                             trigger={
-                              <span className="text-[#2B2D2F]">
-                                {formatCurrency(row.lastYearMonthRevenue)}{" "}
-                                <span className={lastYearDelta.colorClass}>({lastYearDelta.text})</span>
-                              </span>
+                              <ComparisonValue
+                                actual={row.monthRevenue}
+                                reference={row.lastYearMonthRevenue}
+                                referenceLabel={`vs Consuntivo ${lastYearPeriodLabel}`}
+                              />
                             }
                           >
-                            <p>Revenue OTB {periodLabel}: {formatCurrency(row.monthRevenue)}</p>
-                            <p>Consuntivo chiuso {lastYearPeriodLabel}: {formatCurrency(row.lastYearMonthRevenue)}</p>
+                            <p className="font-semibold">{consuntivoComparison.title}</p>
+                            <p>{consuntivoComparison.intro}</p>
+                            <p className="mt-1">
+                              {consuntivoComparison.actualLabel}: {formatCurrency(row.monthRevenue)}
+                            </p>
+                            <p>
+                              {consuntivoComparison.referenceLabel}: {formatCurrency(row.lastYearMonthRevenue)}
+                            </p>
                             <p className="mt-1">
                               Differenza:{" "}
                               {formatSignedCurrency(
@@ -909,10 +1051,20 @@ export default function PerformanceOverviewPage() {
                     </td>
 
                     {[
-                      { l4l: l4lSdly, label: `SDLY ${lastYearPeriodLabel} (a parità di anticipo)` },
-                      { l4l: l4lLastYear, label: `Consuntivo chiuso ${lastYearPeriodLabel}` },
-                    ].map(({ l4l, label }) => (
-                      <td key={label} className="py-3 pr-4 align-top">
+                      {
+                        l4l: l4lSdly,
+                        comparison: sdlyComparison,
+                        referenceLabel: `vs ${sdlyComparison.referenceLabel}`,
+                        reasonOverride: sdlyPartialCoverageReason,
+                      },
+                      {
+                        l4l: l4lLastYear,
+                        comparison: consuntivoComparison,
+                        referenceLabel: `vs Consuntivo ${lastYearPeriodLabel}`,
+                        reasonOverride: undefined,
+                      },
+                    ].map(({ l4l, comparison, referenceLabel, reasonOverride }) => (
+                      <td key={comparison.title} className="py-3 pr-4 align-top">
                         {l4l ? (
                           <>
                             <CellTooltip
@@ -920,20 +1072,19 @@ export default function PerformanceOverviewPage() {
                               widthClassName="w-80"
                               trigger={
                                 l4l.actual !== null && l4l.reference !== null ? (
-                                  <span>
-                                    {formatCurrency(l4l.reference)}{" "}
-                                    <span className={formatDelta(l4l.actual, l4l.reference).colorClass}>
-                                      ({formatDelta(l4l.actual, l4l.reference).text})
-                                    </span>
-                                  </span>
+                                  <ComparisonValue
+                                    actual={l4l.actual}
+                                    reference={l4l.reference}
+                                    referenceLabel={referenceLabel}
+                                  />
                                 ) : (
                                   <span className="text-[#6a6d70]">{ND}</span>
                                 )
                               }
                             >
-                              {likeForLikeDetail(l4l, label)}
+                              {likeForLikeDetail(l4l, comparison, reasonOverride)}
                             </CellTooltip>
-                            {portfolioCoverageNote(l4l.included.length)}
+                            {portfolioCoverageNote(l4l.included.length, "L4L ")}
                           </>
                         ) : (
                           <span className="text-[#6a6d70]">{ND}</span>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMonthlyPerformance,
+  buildMonthlyPerformanceTotal,
   monthlyAsofRequests,
   MonthlyPerformanceInput,
   MonthlySnapshotRow,
@@ -390,5 +391,243 @@ describe("KPI ricalcolati dalle somme", () => {
     const meanOfDailyRevPar = (10 + 30) / 2;
     expect(sep.revPar).toBeCloseTo(25);
     expect(sep.revPar).not.toBeCloseTo(meanOfDailyRevPar);
+  });
+});
+
+describe("valore di riferimento esposto sotto il delta", () => {
+  it("SDLY mese chiuso: revenue dello stesso mese LY", () => {
+    expect(monthOf(build(), 9).sdly.reference).toBe(30 * 80);
+  });
+
+  it("SDLY mese in corso: revenue LY dello stesso intervallo maturato, diverso dal Consuntivo LY", () => {
+    const oct = monthOf(build(), 10);
+    expect(oct.sdly.reference).toBe(6 * 80);
+    expect(oct.consuntivoLy.reference).toBe(31 * 80);
+    expect(oct.sdly.reference).not.toBe(oct.consuntivoLy.reference);
+  });
+
+  it("SDLY mese futuro: OTB LY as-of realmente usato, non il consuntivo", () => {
+    const nov = monthOf(build({ asofByMonth: new Map([[11, asof(1500)]]) }), 11);
+    expect(nov.sdly.reference).toBe(1500);
+    expect(nov.consuntivoLy.reference).toBe(30 * 80);
+  });
+
+  it("Consuntivo LY: revenue finale dell'intero mese LY", () => {
+    expect(monthOf(build(), 12).consuntivoLy.reference).toBe(31 * 80);
+  });
+
+  it("confronto ND: nessun riferimento falso", () => {
+    const partialLy = build({ previousRows: year2025.filter((r) => r.stay_date !== "2025-09-10") });
+    expect(monthOf(partialLy, 9).sdly.reference).toBeNull();
+    expect(monthOf(partialLy, 9).consuntivoLy.reference).toBeNull();
+    expect(monthOf(build(), 11).sdly.reference).toBeNull();
+    const noData = monthOf(build({ currentRows: [] }), 5);
+    expect(noData.sdly.reference).toBeNull();
+    expect(noData.consuntivoLy.reference).toBeNull();
+  });
+});
+
+describe("buildMonthlyPerformanceTotal — riga Totale anno", () => {
+  function total(overrides: Partial<MonthlyPerformanceInput> = {}) {
+    const input: MonthlyPerformanceInput = {
+      year: 2026,
+      today: TODAY,
+      currentRows: year2026,
+      previousRows: year2025,
+      budgets: [],
+      closures: [],
+      asofByMonth: new Map(),
+      ...overrides,
+    };
+    return buildMonthlyPerformanceTotal(input, buildMonthlyPerformance(input));
+  }
+
+  it("Revenue e RN: somme annuali", () => {
+    const t = total();
+    expect(t.revenue).toBe(365 * 100);
+    expect(t.roomsSold).toBe(365 * 2);
+    expect(t.monthsWithData).toBe(12);
+    expect(t.status).toBe("current");
+  });
+
+  // Bassa stagione piccola e vuota, alta stagione grande e piena: media dei
+  // KPI mensili e rapporto delle somme divergono nettamente.
+  const seasonal = [
+    ...daily("2026-01-01", "2026-06-30", 100, TODAY, 1, 10),
+    ...daily("2026-07-01", "2026-12-31", 2700, TODAY, 27, 30),
+  ];
+  const seasonalRevenue = 181 * 100 + 184 * 2700;
+  const seasonalSold = 181 * 1 + 184 * 27;
+  const seasonalAvailable = 181 * 10 + 184 * 30;
+
+  it("Occupazione annuale pesata: RN vendute / RN disponibili, mai media delle occupazioni mensili", () => {
+    const input = { currentRows: seasonal };
+    const t = total(input);
+    const rows = build(input);
+    const meanOfMonthly = rows.reduce((s, r) => s + (r.occupancy ?? 0), 0) / 12;
+    expect(t.occupancy).toBeCloseTo(seasonalSold / seasonalAvailable);
+    expect(meanOfMonthly).toBeCloseTo(0.5);
+    expect(t.occupancy).not.toBeCloseTo(meanOfMonthly);
+  });
+
+  it("ADR annuale: Revenue / RN vendute", () => {
+    expect(total({ currentRows: seasonal }).adr).toBeCloseTo(seasonalRevenue / seasonalSold);
+  });
+
+  it("RevPAR annuale: Revenue / RN disponibili, mai media dei RevPAR mensili", () => {
+    const t = total({ currentRows: seasonal });
+    const meanOfMonthly = build({ currentRows: seasonal }).reduce((s, r) => s + (r.revPar ?? 0), 0) / 12;
+    expect(t.revPar).toBeCloseTo(seasonalRevenue / seasonalAvailable);
+    expect(t.revPar).not.toBeCloseTo(meanOfMonthly);
+  });
+
+  it("Budget Realistico annuale completo: somma dei 12 mesi e scostamento sul Revenue annuale", () => {
+    const budgets = Array.from({ length: 12 }, (_, i) => budgetRows(2026, i + 1, 2000, 2500, 4000)).flat();
+    const t = total({ budgets });
+    expect(t.budget).toEqual({ minimo: 24000, realistico: 30000, sfidante: 48000 });
+    expect(t.budgetMonths).toBe(12);
+    expect(t.budgetComplete).toBe(true);
+    expect(t.budgetRevenue).toBe(36500);
+    expect(t.vsBudget).toBeCloseTo(36500 / 30000 - 1);
+    expect(t.pacing).toBe("green");
+  });
+
+  it("Budget annuale incompleto: copertura dichiarata, confronto solo sui mesi con budget", () => {
+    const budgets = [...budgetRows(2026, 9, 2000, 2500, 4000), ...budgetRows(2026, 11, 2000, 4000, 5000)];
+    const t = total({ budgets });
+    expect(t.budgetMonths).toBe(2);
+    expect(t.budgetComplete).toBe(false);
+    expect(t.budget.realistico).toBe(6500);
+    // Revenue di settembre + novembre, non dell'intero anno contro 2 mesi di budget.
+    expect(t.budgetRevenue).toBe(6000);
+    expect(t.vsBudget).toBeCloseTo(6000 / 6500 - 1);
+    expect(t.revenue).toBe(36500);
+  });
+
+  it("anno senza budget: ND", () => {
+    const t = total();
+    expect(t.budget.realistico).toBeNull();
+    expect(t.budgetMonths).toBe(0);
+    expect(t.vsBudget).toBeNull();
+    expect(t.pacing).toBeNull();
+  });
+
+  it("SDLY anno in corso: produzione YTD 01/01 -> data di osservazione vs stesso intervallo LY", () => {
+    const t = total();
+    const maturedDays = 279; // 01/01 -> 06/10
+    expect(t.sdly.mode).toBe("production");
+    expect(t.sdly.current).toBe(maturedDays * 100);
+    expect(t.sdly.reference).toBe(maturedDays * 80);
+    expect(t.sdly.actualDetail).toBe("01/01/2026 → 06/10/2026");
+    expect(t.sdly.referenceDetail).toBe("01/01/2025 → 06/10/2025");
+  });
+
+  it("SDLY annuale non e' la somma (ne' la media) dei delta mensili", () => {
+    // LY molto diverso tra i mesi: i delta mensili non si possono sommare.
+    const previousRows = [
+      ...daily("2025-01-01", "2025-06-30", 10, "2026-01-01"),
+      ...daily("2025-07-01", "2025-12-31", 400, "2026-01-01"),
+    ];
+    const input = { previousRows };
+    const t = total(input);
+    const monthlyDeltas = build(input).map((r) => r.sdly.delta ?? 0);
+    const sumOfDeltas = monthlyDeltas.reduce((s, d) => s + d, 0);
+    const expected = (279 * 100) / (181 * 10 + 98 * 400) - 1;
+    expect(t.sdly.delta).toBeCloseTo(expected);
+    expect(t.sdly.delta).not.toBeCloseTo(sumOfDeltas);
+    expect(t.sdly.delta).not.toBeCloseTo(sumOfDeltas / 12);
+  });
+
+  it("Consuntivo LY annuale: Revenue/OTB annuale vs anno LY finale", () => {
+    const t = total();
+    expect(t.consuntivoLy.current).toBe(36500);
+    expect(t.consuntivoLy.reference).toBe(365 * 80);
+    expect(t.consuntivoLy.delta).toBeCloseTo(0.25);
+    // Diverso dallo SDLY: anno intero, non la sola parte maturata.
+    expect(t.consuntivoLy.reference).not.toBe(t.sdly.reference);
+  });
+
+  it("storico LY incompleto: confronti annuali ND senza riferimento", () => {
+    const t = total({ previousRows: year2025.filter((r) => r.stay_date < "2025-03-01" || r.stay_date > "2025-03-10") });
+    expect(t.consuntivoLy.reference).toBeNull();
+    expect(t.consuntivoLy.unavailableReason).toBe("storico 2025 incompleto: 355/365 giorni");
+    expect(t.sdly.reference).toBeNull();
+  });
+
+  it("Montecallini: copertura parziale, chiusure LY dichiarate, budget stagionale", () => {
+    const t = total({
+      currentRows: [
+        ...daily("2026-05-01", "2026-09-30", 100, "2026-09-30"),
+        ...daily("2026-10-01", "2026-10-31", 100, TODAY),
+        ...daily("2026-11-01", "2026-11-30", 0, "2026-09-24", 0),
+      ],
+      previousRows: daily("2025-05-01", "2025-11-30", 80, "2025-12-31"),
+      closures: [
+        { start_date: "2025-01-01", end_date: "2025-04-30" },
+        { start_date: "2025-12-01", end_date: "2025-12-31" },
+      ],
+      budgets: [5, 6, 7, 8, 9, 10].flatMap((m) => budgetRows(2026, m, 2000, 2500, 4000)),
+    });
+    expect(t.monthsWithData).toBe(7);
+    expect(t.revenue).toBe(184 * 100);
+    // Produzione 01/01 -> 06/10: mag-set + 6 giorni di ottobre, gen-apr LY chiusi a 0.
+    expect(t.sdly.current).toBe((153 + 6) * 100);
+    expect(t.sdly.reference).toBe((153 + 6) * 80);
+    expect(t.sdly.zeroNote).toBe("Chiusura dichiarata 2025 valorizzata a 0: 120 giorni.");
+    // Consuntivo LY valido: gen-apr e dicembre coperti da chiusura dichiarata.
+    expect(t.consuntivoLy.reference).toBe(214 * 80);
+    expect(t.budgetMonths).toBe(6);
+    expect(t.budgetComplete).toBe(false);
+    expect(t.budgetRevenue).toBe(184 * 100);
+    expect(t.budget.realistico).toBe(15000);
+  });
+
+  it("anno storico: anno pieno vs anno LY pieno, nessun budget", () => {
+    const input: MonthlyPerformanceInput = {
+      year: 2025,
+      today: TODAY,
+      currentRows: year2025,
+      previousRows: daily("2024-01-01", "2024-12-31", 50, "2025-01-01"),
+      budgets: [],
+      closures: [],
+      asofByMonth: new Map(),
+    };
+    const t = buildMonthlyPerformanceTotal(input, buildMonthlyPerformance(input));
+    expect(t.status).toBe("closed");
+    expect(t.revenue).toBe(365 * 80);
+    expect(t.sdly.mode).toBe("production");
+    expect(t.sdly.current).toBe(365 * 80);
+    expect(t.sdly.reference).toBe(366 * 50);
+    expect(t.consuntivoLy.reference).toBe(366 * 50);
+    expect(t.budget.realistico).toBeNull();
+  });
+
+  it("anno futuro: OTB vs OTB LY as-of solo con tutti i mesi coperti", () => {
+    const input: MonthlyPerformanceInput = {
+      year: 2027,
+      today: TODAY,
+      currentRows: daily("2027-01-01", "2027-12-31", 10, TODAY),
+      previousRows: year2026,
+      budgets: [],
+      closures: [],
+      asofByMonth: new Map(Array.from({ length: 12 }, (_, i) => [i + 1, asof(200)] as const)),
+    };
+    const full = buildMonthlyPerformanceTotal(input, buildMonthlyPerformance(input));
+    expect(full.sdly.mode).toBe("otb_asof");
+    expect(full.sdly.current).toBe(3650);
+    expect(full.sdly.reference).toBe(2400);
+    const partialInput = { ...input, asofByMonth: new Map([[1, asof(200)]]) };
+    const partial = buildMonthlyPerformanceTotal(partialInput, buildMonthlyPerformance(partialInput));
+    expect(partial.sdly.reference).toBeNull();
+    expect(partial.sdly.unavailableReason).toContain("1/12 mesi");
+  });
+
+  it("anno senza dati: tutto ND", () => {
+    const t = total({ currentRows: [] });
+    expect(t.hasData).toBe(false);
+    expect(t.revenue).toBeNull();
+    expect(t.occupancy).toBeNull();
+    expect(t.sdly.reference).toBeNull();
+    expect(t.consuntivoLy.reference).toBeNull();
   });
 });

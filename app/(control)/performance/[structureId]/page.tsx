@@ -29,7 +29,12 @@ import { sdlyCutoffFromRows } from "@/lib/performance/sdlyCutoff";
 import { DailyRow, resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "@/lib/performance/sdlyComparison";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import { MonthlyPerformanceTable } from "@/components/performance/MonthlyPerformanceTable";
-import { buildMonthlyPerformance, monthlyAsofRequests, MonthlySnapshotRow } from "@/lib/performance/monthlyPerformance";
+import {
+  buildMonthlyPerformance,
+  buildMonthlyPerformanceTotal,
+  monthlyAsofRequests,
+  MonthlySnapshotRow,
+} from "@/lib/performance/monthlyPerformance";
 import {
   ND,
   SnapshotRow,
@@ -1331,21 +1336,20 @@ export default function PerformanceStructureDrilldownPage({
 
   // null finche' i dati dell'anno visualizzato non sono caricati: mai le
   // righe di un altro anno durante il reload.
-  const monthlyPerformanceRows = useMemo(
-    () =>
-      monthlyData && monthlyData.year === detailYear
-        ? buildMonthlyPerformance({
-            year: detailYear,
-            today: todayString(),
-            currentRows: monthlyData.currentRows,
-            previousRows: monthlyData.previousRows,
-            budgets: monthlyBudgetRows,
-            closures: structureClosures,
-            asofByMonth: monthlyData.asofByMonth,
-          })
-        : null,
-    [monthlyData, detailYear, monthlyBudgetRows, structureClosures]
-  );
+  const monthlyPerformance = useMemo(() => {
+    if (!monthlyData || monthlyData.year !== detailYear) return null;
+    const input = {
+      year: detailYear,
+      today: todayString(),
+      currentRows: monthlyData.currentRows,
+      previousRows: monthlyData.previousRows,
+      budgets: monthlyBudgetRows,
+      closures: structureClosures,
+      asofByMonth: monthlyData.asofByMonth,
+    };
+    const rows = buildMonthlyPerformance(input);
+    return { rows, total: buildMonthlyPerformanceTotal(input, rows) };
+  }, [monthlyData, detailYear, monthlyBudgetRows, structureClosures]);
 
   const displayedDetailRows = useMemo(
     () =>
@@ -1771,7 +1775,11 @@ export default function PerformanceStructureDrilldownPage({
         </div>
       </div>
 
-      <MonthlyPerformanceTable year={detailYear} rows={monthlyPerformanceRows} />
+      <MonthlyPerformanceTable
+        year={detailYear}
+        rows={monthlyPerformance?.rows ?? null}
+        total={monthlyPerformance?.total ?? null}
+      />
 
       {hasChannelData && (
         <>

@@ -9,10 +9,11 @@ import {
   pad,
   revPar,
   sdlyDate,
+  shiftDate,
 } from "../performanceMetrics";
 import { MonthlyBudgetRow } from "./periodBudget";
-import { ClosureRange, isMonthFullyClosed, MonthAsofRow } from "./sdlyAnnual";
-import { DailyRow, resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "./sdlyComparison";
+import { aggregateMonthlyAsofWithClosures, ClosureRange, isMonthFullyClosed, MonthAsofRow } from "./sdlyAnnual";
+import { DailyRow, ProductionSdly, resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "./sdlyComparison";
 import { sdlyCutoffFromRows } from "./sdlyCutoff";
 
 // ============ Performance mensile (Dettaglio struttura) ============
@@ -36,6 +37,15 @@ import { sdlyCutoffFromRows } from "./sdlyCutoff";
 //
 // Un mese senza righe e' ND, mai 0. Se e' interamente coperto da una
 // chiusura dichiarata e' "Chiuso": nessuna produzione inventata.
+//
+// Ogni confronto espone anche il valore di riferimento realmente usato dal
+// calcolo (MonthComparison.reference): e' quello mostrato sotto il delta,
+// mai ricalcolato nel componente.
+//
+// Riga "Totale anno" (buildMonthlyPerformanceTotal): somme annuali e KPI
+// ricalcolati dalle somme, mai medie o somme dei valori mensili. I
+// confronti annuali seguono la semantica delle KPI card in modalita' Anno
+// (produzione maturata 01/01 -> data di osservazione per un anno iniziato).
 
 export type MonthlySnapshotRow = DailyRow & { extraction_date: string | null };
 
@@ -141,28 +151,36 @@ export function monthlyAsofRequests(
   });
 }
 
-// Mese di calendario dell'anno precedente con controllo di completezza.
-function resolveCalendarMonthLy(previousRows: DailyRow[], closures: ClosureRange[], year: number, month: number) {
-  const { start, end, daysInMonth } = boundsOf(year, month);
-  const inMonth = rowsInMonth(previousRows, start, end);
-  const daysWithData = new Set(inMonth.map((r) => r.stay_date));
+// Intervallo di calendario dell'anno precedente con controllo di
+// completezza: un giorno senza dato vale 0 solo se coperto da una chiusura
+// dichiarata, altrimenti nessun totale.
+function resolveLyRange(previousRows: DailyRow[], closures: ClosureRange[], start: string, end: string) {
+  const inRange = rowsInMonth(previousRows, start, end);
+  const daysWithData = new Set(inRange.map((r) => r.stay_date));
+  let daysExpected = 0;
   let closedDays = 0;
-  for (let d = 1; d <= daysInMonth; d++) {
-    const date = `${year}-${pad(month)}-${pad(d)}`;
+  for (let date = start; date <= end; date = shiftDate(date, 1)) {
+    daysExpected += 1;
     if (!daysWithData.has(date) && closures.some((c) => c.start_date <= date && date <= c.end_date)) closedDays += 1;
   }
   const daysCovered = daysWithData.size + closedDays;
   const status: "ok" | "partial" | "none" =
-    daysCovered >= daysInMonth ? "ok" : daysCovered === 0 ? "none" : "partial";
+    daysCovered >= daysExpected ? "ok" : daysCovered === 0 ? "none" : "partial";
   return {
     status,
     start,
     end,
-    revenue: status === "ok" ? sumOf(inMonth, "revenue_total") : null,
+    revenue: status === "ok" ? sumOf(inRange, "revenue_total") : null,
     daysCovered,
-    daysExpected: daysInMonth,
+    daysExpected,
     closedDays,
   };
+}
+
+// Mese di calendario dell'anno precedente (Febbraio -> Febbraio).
+function resolveCalendarMonthLy(previousRows: DailyRow[], closures: ClosureRange[], year: number, month: number) {
+  const { start, end } = boundsOf(year, month);
+  return resolveLyRange(previousRows, closures, start, end);
 }
 
 function coverageReason(status: "ok" | "partial" | "none", year: number, daysCovered: number, daysExpected: number) {
@@ -191,6 +209,31 @@ function comparison(
       rest.unavailableReason ??
       (delta === null && current !== null && reference === 0 ? "riferimento pari a 0, variazione non calcolabile" : null),
   };
+}
+
+// Produzione maturata (resolveProductionSdly) -> confronto con riferimento
+// e motivo dell'eventuale ND.
+function productionComparison(
+  production: ProductionSdly,
+  observationDate: string | null,
+  previousYear: number,
+  scope: "mese" | "anno"
+): MonthComparison {
+  if (production.status === "no_matured") {
+    return NO_COMPARISON(
+      observationDate
+        ? `snapshot corrente del ${formatDateIt(observationDate)} precedente all’inizio ${
+            scope === "mese" ? "del mese" : "dell’anno"
+          }, nessuna produzione maturata`
+        : "data di osservazione non disponibile"
+    );
+  }
+  return comparison(production.current?.revenue ?? null, production.previous?.revenue ?? null, {
+    actualDetail: rangeLabel(production.currentStart, production.currentEnd),
+    referenceDetail: rangeLabel(production.previousStart, production.previousEnd),
+    unavailableReason: coverageReason(production.status, previousYear, production.daysCovered, production.daysExpected),
+    zeroNote: production.status === "ok" ? closedDaysNote(previousYear, production.closedDays) : null,
+  });
 }
 
 const NO_COMPARISON = (reason: string): MonthComparison => ({
@@ -267,33 +310,19 @@ export function buildMonthlyPerformance(input: MonthlyPerformanceInput): Monthly
       // Consuntivo LY (e nessuno scarto 29/02 -> 01/03 negli anni bisestili).
       sdly = { ...consuntivoLy };
     } else {
-      const production = resolveProductionSdly({
-        periodStart: monthStart,
-        periodEnd: monthEnd,
+      sdly = productionComparison(
+        resolveProductionSdly({
+          periodStart: monthStart,
+          periodEnd: monthEnd,
+          observationDate,
+          currentRows: monthRows,
+          previousRows,
+          closures,
+        }),
         observationDate,
-        currentRows: monthRows,
-        previousRows,
-        closures,
-      });
-      if (production.status === "no_matured") {
-        sdly = NO_COMPARISON(
-          observationDate
-            ? `snapshot corrente del ${formatDateIt(observationDate)} precedente all’inizio del mese, nessuna produzione maturata`
-            : "data di osservazione non disponibile"
-        );
-      } else {
-        sdly = comparison(production.current?.revenue ?? null, production.previous?.revenue ?? null, {
-          actualDetail: rangeLabel(production.currentStart, production.currentEnd),
-          referenceDetail: rangeLabel(production.previousStart, production.previousEnd),
-          unavailableReason: coverageReason(
-            production.status,
-            previousYear,
-            production.daysCovered,
-            production.daysExpected
-          ),
-          zeroNote: production.status === "ok" ? closedDaysNote(previousYear, production.closedDays) : null,
-        });
-      }
+        previousYear,
+        "mese"
+      );
     }
 
     return {
@@ -320,4 +349,153 @@ export function buildMonthlyPerformance(input: MonthlyPerformanceInput): Monthly
       pacing: computePacingStatus(revenue, monthBudgets),
     };
   });
+}
+
+// ============ Riga "Totale anno" ============
+
+export type MonthlyPerformanceTotal = {
+  status: MonthStatus;
+  hasData: boolean;
+  monthsWithData: number;
+  revenue: number | null;
+  roomsSold: number | null;
+  roomsAvailable: number | null;
+  occupancy: number | null;
+  adr: number | null;
+  revPar: number | null;
+  observationDate: string | null;
+  sdly: MonthComparison & { mode: SdlyMode };
+  consuntivoLy: MonthComparison;
+  // Somma dei soli mesi con Budget Realistico (budgetMonths su 12): un
+  // budget parziale non e' mai un budget annuale completo.
+  budget: { minimo: number | null; realistico: number | null; sfidante: number | null };
+  budgetMonths: number;
+  budgetComplete: boolean;
+  // Revenue dei soli mesi con budget: lato corrente del confronto vs Budget
+  // (coincide con il Revenue annuale quando il budget copre tutti i mesi
+  // con dato).
+  budgetRevenue: number | null;
+  vsBudget: number | null;
+  budgetAchievement: number | null;
+  pacing: PacingStatus;
+};
+
+// rows: le 12 righe di buildMonthlyPerformance per lo stesso input.
+export function buildMonthlyPerformanceTotal(
+  input: MonthlyPerformanceInput,
+  rows: MonthlyPerformanceRow[]
+): MonthlyPerformanceTotal {
+  const { year, today, currentRows, previousRows, closures, asofByMonth } = input;
+  const previousYear = year - 1;
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+  const status: MonthStatus = yearEnd < today ? "closed" : yearStart > today ? "future" : "current";
+
+  const yearRows = rowsInMonth(currentRows, yearStart, yearEnd);
+  const hasData = yearRows.length > 0;
+  const revenue = hasData ? sumOf(yearRows, "revenue_total") : null;
+  const roomsSold = hasData ? sumOf(yearRows, "rooms_sold") : null;
+  const roomsAvailable = hasData ? sumOf(yearRows, "rooms_available") : null;
+  const { observationDate, cutoff } = asofCutoff(yearRows, today);
+  const noDataReason = "nessun dato importato per questo anno";
+
+  // ---- Consuntivo LY: anno intero vs anno LY finale, se completo ----
+  const lyYear = resolveLyRange(previousRows, closures, `${previousYear}-01-01`, `${previousYear}-12-31`);
+  const consuntivoLy: MonthComparison = !hasData
+    ? NO_COMPARISON(noDataReason)
+    : comparison(revenue, lyYear.revenue, {
+        actualDetail: rangeLabel(yearStart, yearEnd),
+        referenceDetail: rangeLabel(lyYear.start, lyYear.end),
+        unavailableReason: coverageReason(lyYear.status, previousYear, lyYear.daysCovered, lyYear.daysExpected),
+        zeroNote: lyYear.status === "ok" ? closedDaysNote(previousYear, lyYear.closedDays) : null,
+      });
+
+  // ---- SDLY annuale: stessa semantica delle KPI card in modalita' Anno ----
+  const mode = sdlyModeForPeriod(yearStart, today);
+  let sdly: MonthComparison;
+  if (!hasData) {
+    sdly = NO_COMPARISON(noDataReason);
+  } else if (mode === "otb_asof") {
+    const { result, closedMonths } = aggregateMonthlyAsofWithClosures(
+      MONTHS.map((m) => asofByMonth.get(m) ?? null),
+      MONTHS,
+      previousYear,
+      closures
+    );
+    sdly = comparison(revenue, result.agg?.revenue ?? null, {
+      actualDetail: observationDate ? `snapshot del ${formatDateIt(observationDate)}` : null,
+      referenceDetail: `al ${formatDateIt(cutoff)}`,
+      unavailableReason: result.agg
+        ? null
+        : `OTB ${previousYear} a parità di anticipo disponibile per ${result.monthsCovered}/${result.monthsExpected} mesi`,
+      zeroNote:
+        result.agg && closedMonths.length > 0
+          ? `Chiusura dichiarata ${previousYear} valorizzata a 0: ${closedMonths.length} mesi.`
+          : null,
+    });
+  } else {
+    sdly = productionComparison(
+      resolveProductionSdly({
+        periodStart: yearStart,
+        periodEnd: yearEnd,
+        observationDate,
+        currentRows: yearRows,
+        previousRows,
+        closures,
+      }),
+      observationDate,
+      previousYear,
+      "anno"
+    );
+  }
+
+  // ---- Budget Realistico: somma dei mesi coperti ----
+  const budgeted = rows.filter((r) => r.budget.realistico !== null);
+  const sumLevel = (level: BudgetRow["level"]) =>
+    budgeted.length > 0 && budgeted.every((r) => r.budget[level] !== null)
+      ? budgeted.reduce((s, r) => s + (r.budget[level] as number), 0)
+      : null;
+  const budget = { minimo: sumLevel("minimo"), realistico: sumLevel("realistico"), sfidante: sumLevel("sfidante") };
+  const budgetedWithData = budgeted.filter((r) => r.revenue !== null);
+  const budgetRevenue =
+    budgetedWithData.length > 0 ? budgetedWithData.reduce((s, r) => s + (r.revenue as number), 0) : null;
+  const pacingBudgets = (["minimo", "realistico"] as const).flatMap((level) =>
+    budget[level] === null
+      ? []
+      : [
+          {
+            level,
+            revenue_target: budget[level] as number,
+            adr: 0,
+            room_nights_sold_target: 0,
+            room_nights_available: 0,
+            occupancy_pct_target: 0,
+          },
+        ]
+  );
+
+  return {
+    status,
+    hasData,
+    monthsWithData: rows.filter((r) => r.hasData).length,
+    revenue,
+    roomsSold,
+    roomsAvailable,
+    occupancy: occupancy(roomsSold, roomsAvailable),
+    adr: adr(revenue, roomsSold),
+    revPar: revPar(revenue, roomsAvailable),
+    observationDate,
+    sdly: { ...sdly, mode },
+    consuntivoLy,
+    budget,
+    budgetMonths: budgeted.length,
+    budgetComplete: budgeted.length === rows.length,
+    budgetRevenue,
+    vsBudget: deltaPercent(budgetRevenue, budget.realistico),
+    budgetAchievement:
+      budgetRevenue !== null && budget.realistico !== null && budget.realistico !== 0
+        ? budgetRevenue / budget.realistico
+        : null,
+    pacing: computePacingStatus(budgetRevenue, pacingBudgets),
+  };
 }

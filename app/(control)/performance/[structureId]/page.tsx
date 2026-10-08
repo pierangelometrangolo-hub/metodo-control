@@ -3,9 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { use as usePromise } from "react";
 import Link from "next/link";
+import { CalendarDays } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
+import { AppDialog } from "@/components/ui/AppDialog";
+import { AppTable, AppTableCell, AppTableRow } from "@/components/ui/AppTable";
+import { AppComparisonTone } from "@/components/ui/AppComparisonValue";
+import { AppMetricCard } from "@/components/ui/AppMetricCard";
+import { AppSegmentedControl } from "@/components/ui/AppSegmentedControl";
+import { AppSelect } from "@/components/ui/AppSelect";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import { CellTooltip } from "@/components/ui/CellTooltip";
 import { supabase } from "@/lib/supabaseClient";
@@ -21,7 +28,6 @@ import {
   computePeriodBudget,
   MonthlyBudgetRow,
   PeriodBudget,
-  periodBudgetTitles,
   periodKind,
 } from "@/lib/performance/periodBudget";
 import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
@@ -50,11 +56,36 @@ import {
   revPar,
   los,
   sumSnapshots,
-  computePacingStatus,
-  pacingDotClasses,
-  pacingDetail,
+  deltaPercent,
   formatDelta,
 } from "@/lib/performanceMetrics";
+
+const PERIOD_MODE_OPTIONS = [
+  { value: "intervallo", label: "Intervallo" },
+  { value: "mese", label: "Mese" },
+  { value: "anno", label: "Anno" },
+] as const;
+
+function formatLos(value: number | null): string {
+  return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
+}
+
+// Confronto di una card KPI del periodo: il tono lo decide la pagina (sopra
+// il riferimento = positivo), AppMetricCard si limita a mostrarlo.
+function kpiComparison(
+  currentRaw: number | null,
+  comparisonRaw: number | null,
+  comparisonText: string,
+  note?: string
+): { delta: string; tone: AppComparisonTone; reference: string; note?: string } {
+  const delta = deltaPercent(currentRaw, comparisonRaw);
+  return {
+    delta: formatDelta(currentRaw, comparisonRaw).text,
+    tone: delta === null || delta === 0 ? "neutral" : delta > 0 ? "positive" : "negative",
+    reference: `vs ${comparisonText}`,
+    note,
+  };
+}
 
 const budgetLevelLabels: Record<string, string> = {
   minimo: "Minimo",
@@ -302,8 +333,9 @@ function formatPeriodLabel(start: string, end: string): string {
     const [y, m] = start.split("-").map(Number);
     return `${MONTH_LABELS[m - 1]} ${y}`;
   }
-  if (start === end) return start;
-  return `${start} → ${end}`;
+  if (periodKind(start, end) === "year") return `Anno ${start.slice(0, 4)}`;
+  if (start === end) return formatDateIt(start);
+  return `${formatDateIt(start)} → ${formatDateIt(end)}`;
 }
 
 // Stesso rischio e stessa soluzione di fetchAllSnapshotRows in
@@ -449,9 +481,10 @@ export default function PerformanceStructureDrilldownPage({
   // Modalita' di navigazione del periodo: Intervallo (calendario libero,
   // comportamento di sempre), Mese, Anno. Scrivono tutte su rangeStart/
   // rangeEnd - "anno" e' la modalita' iniziale coerente quando si arriva
-  // da ?anno=YYYY (link da Budget), altrimenti si parte da Intervallo.
+  // da ?anno=YYYY (link da Budget), altrimenti si parte dal mese corrente
+  // in modalita' Mese.
   const [periodMode, setPeriodMode] = useState<"intervallo" | "mese" | "anno">(
-    annoParam && !Number.isNaN(Number(annoParam)) ? "anno" : "intervallo"
+    annoParam && !Number.isNaN(Number(annoParam)) ? "anno" : "mese"
   );
   const [initialSelectedYear, initialSelectedMonth] = initialRange.start.split("-").map(Number);
   const [selectedMonth, setSelectedMonth] = useState(initialSelectedMonth);
@@ -468,20 +501,41 @@ export default function PerformanceStructureDrilldownPage({
     setRangeEnd(`${year}-12-31`);
   }
 
+  // Selezione dell'intervallo in un dialog: il calendario lavora su una
+  // bozza (draftStart/draftEnd) e il periodo reale cambia solo con Applica.
+  // Annulla, ESC e click fuori chiudono e scartano la bozza: modalita',
+  // periodo e dati della pagina restano quelli di prima.
+  const [intervalDialogOpen, setIntervalDialogOpen] = useState(false);
+  const [draftStart, setDraftStart] = useState(initialRange.start);
+  const [draftEnd, setDraftEnd] = useState<string | null>(initialRange.end);
+
+  function openIntervalDialog() {
+    setDraftStart(confirmedStart);
+    setDraftEnd(confirmedEnd);
+    setIntervalDialogOpen(true);
+  }
+
+  function applyIntervalDraft() {
+    if (!draftEnd) return;
+    // Stessi stati scritti da Mese/Anno: conferma del periodo e
+    // ricaricamento dei dati seguono il flusso di sempre.
+    setPeriodMode("intervallo");
+    setRangeStart(draftStart);
+    setRangeEnd(draftEnd);
+    setIntervalDialogOpen(false);
+  }
+
   function switchPeriodMode(mode: "intervallo" | "mese" | "anno") {
+    if (mode === "intervallo") {
+      // Nessun cambio di modalita' finche' l'intervallo non viene applicato.
+      openIntervalDialog();
+      return;
+    }
     setPeriodMode(mode);
     if (mode === "mese") {
       applyMonthSelection(selectedYear, selectedMonth);
-    } else if (mode === "anno") {
+    } else {
       applyYearSelection(selectedYear);
-    } else if (!rangeEnd) {
-      // Si passa a Intervallo con una selezione lasciata a meta' (rangeEnd
-      // nullo, mai realmente accaduto perche' Mese/Anno impostano sempre
-      // coppie complete, ma copre anche il caso limite di partenza): torna
-      // all'ultimo periodo confermato invece di lasciare uno stato
-      // incompleto.
-      setRangeStart(confirmedStart);
-      setRangeEnd(confirmedEnd);
     }
   }
 
@@ -1308,10 +1362,15 @@ export default function PerformanceStructureDrilldownPage({
   // scambiate tra loro.
   const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
   const comparisonAgg: KpiAgg = comparisonTab === "sdly" ? sdlyAsofAgg : sdlyAgg;
-  const comparisonLabel = comparisonTab === "sdly" ? "SDLY" : "Consuntivo anno prec.";
   // Lato corrente delle card KPI: nel tab SDLY di un periodo gia' iniziato
   // e' la sola produzione maturata (stesso intervallo del riferimento);
   // negli altri casi resta l'intero periodo selezionato.
+  // Intervallo realmente confrontato, mostrato sulle card solo quando esiste
+  // (tab SDLY di un periodo gia' iniziato).
+  const kpiComparisonNote =
+    comparisonTab === "sdly" && sdlyInfo.mode === "production" && sdlyInfo.actualDetail
+      ? sdlyInfo.actualDetail
+      : undefined;
   const kpiCurrentAgg: KpiAgg =
     comparisonTab === "sdly" && sdlyInfo.mode === "production" && sdlyInfo.currentAgg ? sdlyInfo.currentAgg : periodAgg;
   const directShareCurrent = useMemo(() => directShareOf(channelRevenue), [channelRevenue]);
@@ -1325,14 +1384,9 @@ export default function PerformanceStructureDrilldownPage({
       ? periodBudgetView.budget
       : null;
   const periodBudgets = useMemo(() => periodBudget?.budgets ?? [], [periodBudget]);
-  const periodPacing = useMemo(
-    () => computePacingStatus(periodAgg.revenue, periodBudgets),
-    [periodAgg.revenue, periodBudgets]
-  );
-  const periodPacingDetail = useMemo(() => {
-    const minimoBudget = periodBudgets.find((b) => b.level === "minimo");
-    return pacingDetail(periodAgg.revenue, minimoBudget ? Number(minimoBudget.revenue_target) : null);
-  }, [periodAgg.revenue, periodBudgets]);
+  // Budget Realistico del periodo: lo stesso valore della riga "Realistico"
+  // negli Scenari budget, mostrato anche come sesta card KPI.
+  const budgetRealistico = periodBudgets.find((b) => b.level === "realistico");
 
   // null finche' i dati dell'anno visualizzato non sono caricati: mai le
   // righe di un altro anno durante il reload.
@@ -1388,194 +1442,199 @@ export default function PerformanceStructureDrilldownPage({
   const sdlyLabel = formatPeriodLabel(sdlyDate(periodStart), sdlyDate(periodEnd));
 
   return (
-    <div className="space-y-6">
-      <Link href="/performance" className="text-sm font-medium text-[#017A92] hover:underline">
-        ← Torna alla vista d'insieme
-      </Link>
-
-      <PageHeader
-        eyebrow="Performance"
-        title={structureName || "Struttura"}
-        description="Confronto vs stesso periodo anno precedente — SDLY (a parità di anticipo) o Consuntivo finale, a scelta — e periodo selezionato vs budget. 'ND' indica che non esiste ancora un dato importato — mai un valore pari a zero."
-      >
-        <p className="text-sm text-[#6a6d70]">
-          Ultimo aggiornamento dati (ADR/RevPAR):{" "}
-          <span className="font-medium text-[#2B2D2F]">
+    <div className="space-y-3">
+      <PageHeader variant="prominent" eyebrow="Performance" title={structureName || "Struttura"} description="Dettaglio performance">
+        <CellTooltip
+          className="inline-flex"
+          align="right"
+          widthClassName="w-80"
+          trigger={
+            <span
+              aria-label="Come leggere questa pagina"
+              className="flex h-5 w-5 items-center justify-center rounded-full border border-[#c7bfb6] text-[10px] font-bold text-[#6b625c] hover:border-[#017A92] hover:text-[#017A92]"
+            >
+              i
+            </span>
+          }
+        >
+          Confronto vs stesso periodo anno precedente — SDLY (a parità di anticipo) o Consuntivo finale, a scelta — e
+          periodo selezionato vs budget. &apos;ND&apos; indica che non esiste ancora un dato importato — mai un valore pari a
+          zero.
+        </CellTooltip>
+        <p className="text-[12px] text-mc-text-secondary">
+          Dati aggiornati al{" "}
+          <span className="font-semibold text-mc-text">
             {lastAdrRevparUpdate ? formatDateIt(lastAdrRevparUpdate) : ND}
           </span>
         </p>
+        <Link href="/performance" className="text-[13px] font-medium text-teal hover:underline">
+          ← Vista d&apos;insieme
+        </Link>
       </PageHeader>
 
-      <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        <AppCard
-          title="Periodo di riferimento"
-          subtitle={
-            periodMode === "intervallo"
-              ? "Clicca una data per l'inizio, un'altra per la fine. Clicca due volte la stessa data per un giorno singolo."
-              : periodMode === "mese"
-                ? "Il periodo copre automaticamente dal primo all'ultimo giorno del mese scelto."
-                : "Il periodo copre automaticamente dal 1 gennaio al 31 dicembre dell'anno scelto."
-          }
-        >
-          <div className="mb-3 flex gap-1 rounded-[10px] bg-[#f0ece6] p-1">
-            {(
-              [
-                { key: "intervallo", label: "Intervallo" },
-                { key: "mese", label: "Mese" },
-                { key: "anno", label: "Anno" },
-              ] as const
-            ).map((opt) => (
-              <button
-                key={opt.key}
-                type="button"
-                onClick={() => switchPeriodMode(opt.key)}
-                className={`flex-1 rounded-[8px] py-1.5 text-[12px] font-semibold transition ${
-                  periodMode === opt.key
-                    ? "bg-white text-[#017A92] shadow-sm"
-                    : "text-[#6a6d70] hover:text-[#2B2D2F]"
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-
-          {periodMode === "intervallo" && (
-            <Calendar
-              value={rangeStart}
-              onChange={() => {}}
-              highlightedDates={highlightedDates}
-              anomalyDates={anomalyDates}
-              rangeMode
-              rangeStart={rangeStart}
-              rangeEnd={rangeEnd}
-              onRangeChange={(start, end) => {
-                setRangeStart(start ?? DEFAULT_MONTH.start);
-                setRangeEnd(end);
-              }}
-            />
-          )}
+      <div className="space-y-3">
+        {/* Control bar del periodo: non e' una sezione di contenuto, quindi
+            niente card - una barra bassa con fondo leggero. */}
+        <div className="rounded-[8px] border border-mc-border bg-mc-surface-subtle px-2.5 py-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <AppSegmentedControl
+            ariaLabel="Tipo di periodo"
+            options={PERIOD_MODE_OPTIONS}
+            value={periodMode}
+            onChange={switchPeriodMode}
+          />
 
           {periodMode === "mese" && (
-            <div className="flex flex-wrap gap-3">
-              <div>
-                <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                  Mese
-                </label>
-                <select
-                  value={selectedMonth}
-                  onChange={(e) => {
-                    const m = Number(e.target.value);
-                    setSelectedMonth(m);
-                    applyMonthSelection(selectedYear, m);
-                  }}
-                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
-                >
-                  {MONTH_LABELS.map((label, i) => (
-                    <option key={label} value={i + 1}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <AppSelect
+                label="Mese"
+                value={selectedMonth}
+                onChange={(e) => {
+                  const m = Number(e.target.value);
+                  setSelectedMonth(m);
+                  applyMonthSelection(selectedYear, m);
+                }}
+              >
+                {MONTH_LABELS.map((label, i) => (
+                  <option key={label} value={i + 1}>
+                    {label}
+                  </option>
+                ))}
+              </AppSelect>
 
-              <div>
-                <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                  Anno
-                </label>
-                <select
-                  value={selectedYear}
-                  onChange={(e) => {
-                    const y = Number(e.target.value);
-                    setSelectedYear(y);
-                    applyMonthSelection(y, selectedMonth);
-                  }}
-                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
-                >
-                  {YEAR_OPTIONS.map((y) => (
-                    <option key={y} value={y}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <AppSelect
+                label="Anno"
+                value={selectedYear}
+                onChange={(e) => {
+                  const y = Number(e.target.value);
+                  setSelectedYear(y);
+                  applyMonthSelection(y, selectedMonth);
+                }}
+              >
+                {YEAR_OPTIONS.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </AppSelect>
 
               {(selectedYear !== TODAY_YEAR || selectedMonth !== TODAY_MONTH) && (
-                <div className="flex items-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedYear(TODAY_YEAR);
-                      setSelectedMonth(TODAY_MONTH);
-                      applyMonthSelection(TODAY_YEAR, TODAY_MONTH);
-                    }}
-                    className="h-11 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
-                  >
-                    Mese corrente
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  className="h-[34px] rounded-[7px] px-2.5 text-[13px] font-medium text-teal transition hover:bg-mc-surface-muted"
+                  onClick={() => {
+                    setSelectedYear(TODAY_YEAR);
+                    setSelectedMonth(TODAY_MONTH);
+                    applyMonthSelection(TODAY_YEAR, TODAY_MONTH);
+                  }}
+                >
+                  Mese corrente
+                </button>
               )}
             </div>
           )}
 
           {periodMode === "anno" && (
-            <div className="flex flex-wrap gap-3">
-              <div>
-                <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                  Anno
-                </label>
-                <select
-                  value={selectedYear}
-                  onChange={(e) => {
-                    const y = Number(e.target.value);
-                    setSelectedYear(y);
-                    applyYearSelection(y);
-                  }}
-                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
-                >
-                  {YEAR_OPTIONS.map((y) => (
-                    <option key={y} value={y}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <AppSelect
+                label="Anno"
+                value={selectedYear}
+                onChange={(e) => {
+                  const y = Number(e.target.value);
+                  setSelectedYear(y);
+                  applyYearSelection(y);
+                }}
+              >
+                {YEAR_OPTIONS.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
+              </AppSelect>
 
               {selectedYear !== TODAY_YEAR && (
-                <div className="flex items-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedYear(TODAY_YEAR);
-                      applyYearSelection(TODAY_YEAR);
-                    }}
-                    className="h-11 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
-                  >
-                    Anno corrente
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  className="h-[34px] rounded-[7px] px-2.5 text-[13px] font-medium text-teal transition hover:bg-mc-surface-muted"
+                  onClick={() => {
+                    setSelectedYear(TODAY_YEAR);
+                    applyYearSelection(TODAY_YEAR);
+                  }}
+                >
+                  Anno corrente
+                </button>
               )}
             </div>
           )}
 
-          <p className="mt-3 text-[11px] leading-4 text-[#017A92]">
-            Intervallo selezionato: {confirmedStart} → {confirmedEnd}
-          </p>
+          {periodMode === "intervallo" && (
+            <button
+              type="button"
+              onClick={openIntervalDialog}
+              aria-label="Modifica intervallo"
+              className="flex h-[34px] items-center gap-2 rounded-[7px] border border-mc-border bg-mc-surface px-2.5 text-[13px] text-mc-text-secondary transition hover:border-teal"
+            >
+              <CalendarDays className="h-4 w-4 shrink-0" strokeWidth={1.75} />
+              <span>
+                Periodo:{" "}
+                <span className="font-semibold text-mc-text">
+                  {formatDateIt(confirmedStart)} → {formatDateIt(confirmedEnd)}
+                </span>
+              </span>
+            </button>
+          )}
+          </div>
 
-          {loadError && <p className="mt-3 text-sm text-[#8a3a3a]">{loadError}</p>}
-        </AppCard>
-
-        <div className="space-y-6">
-          <AppCard
-            title={periodLabel}
-            subtitle={
-              isSingleDay
-                ? periodAgg.daysWithData > 0
-                  ? `Dato importato per questo giorno · confronto con ${sdlyLabel}`
-                  : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel}`
-                : `Somma di ${periodAgg.daysWithData} giorni con dati nel periodo · confronto con ${sdlyLabel}`
-            }
+          <AppDialog
+            open={intervalDialogOpen}
+            onOpenChange={setIntervalDialogOpen}
+            title="Seleziona intervallo"
+            description="Clicca una data per l’inizio, un’altra per la fine. Clicca due volte la stessa data per un giorno singolo."
+            widthClassName="sm:max-w-[340px]"
+            secondaryAction={{ label: "Annulla", onClick: () => setIntervalDialogOpen(false) }}
+            primaryAction={{ label: "Applica", onClick: applyIntervalDraft, disabled: !draftEnd }}
           >
+            <Calendar
+              embedded
+              value={draftStart}
+              onChange={() => {}}
+              highlightedDates={highlightedDates}
+              anomalyDates={anomalyDates}
+              rangeMode
+              rangeStart={draftStart}
+              rangeEnd={draftEnd}
+              onRangeChange={(start, end) => {
+                setDraftStart(start ?? draftStart);
+                setDraftEnd(end);
+              }}
+            />
+          </AppDialog>
+
+          {loadError && <p className="mt-2 text-[13px] text-mc-negative">{loadError}</p>}
+        </div>
+
+        <div className="space-y-3">
+          <section>
+            <div className="mb-2 flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
+              <div>
+                <h2 className="text-[16px] font-semibold leading-tight text-mc-text">{periodLabel}</h2>
+                <p className="mt-0.5 text-[12px] leading-4 text-mc-text-secondary">
+                  {isSingleDay
+                    ? periodAgg.daysWithData > 0
+                      ? `Dato importato per questo giorno · confronto con ${sdlyLabel}`
+                      : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel}`
+                    : `Somma di ${periodAgg.daysWithData} giorni con dati nel periodo · confronto con ${sdlyLabel}`}
+                </p>
+              </div>
+              <AppSegmentedControl
+                variant="pills"
+                ariaLabel="Confronto"
+                options={COMPARISON_TAB_OPTIONS}
+                value={comparisonTab}
+                onChange={setComparisonTab}
+              />
+            </div>
+
             {loadingMetrics ? (
               <p className="text-sm text-[#6a6d70]">Caricamento...</p>
             ) : (
@@ -1588,25 +1647,8 @@ export default function PerformanceStructureDrilldownPage({
                   </p>
                 )}
 
-                <div className="mb-4 flex flex-wrap gap-2">
-                  {COMPARISON_TAB_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => setComparisonTab(opt.value)}
-                      className={`rounded-[14px] px-4 py-2 text-sm font-semibold transition ${
-                        comparisonTab === opt.value
-                          ? "bg-teal text-white"
-                          : "border border-[#e7dfd8] bg-white text-[#2B2D2F] hover:bg-[#f8f6f2]"
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-
                 {comparisonTab === "sdly" && (
-                  <p className="mb-4 text-sm text-[#6a6d70]">
+                  <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
                     {sdlyInfo.mode === "production"
                       ? `Produzione vs SDLY: produzione maturata${
                           sdlyInfo.actualDetail ? ` ${sdlyInfo.actualDetail}` : ""
@@ -1626,7 +1668,7 @@ export default function PerformanceStructureDrilldownPage({
                   sdlyInfo.mode === "production" &&
                   comparisonAgg.revenue === null &&
                   comparisonAgg.roomsSold === null && (
-                    <p className="mb-4 text-sm text-[#6a6d70]">
+                    <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
                       {ND} — confronto non disponibile
                       {sdlyInfo.unavailableReason ? `: ${sdlyInfo.unavailableReason}` : ""}. Un giorno senza dati vale 0
                       solo se coperto da una chiusura registrata nel Budget.
@@ -1637,7 +1679,7 @@ export default function PerformanceStructureDrilldownPage({
                   sdlyInfo.mode === "otb_asof" &&
                   comparisonAgg.revenue === null &&
                   comparisonAgg.roomsSold === null && (
-                    <p className="mb-4 text-sm text-[#6a6d70]">
+                    <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
                       {sdlyAnnualCoverage && sdlyAnnualCoverage.covered > 0
                         ? `${ND} — copertura parziale per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
                             sdlyCutoffUsed
@@ -1652,125 +1694,113 @@ export default function PerformanceStructureDrilldownPage({
                   comparisonAgg.revenue !== null &&
                   sdlyAnnualCoverage &&
                   sdlyAnnualCoverage.closedMonths.length > 0 && (
-                    <p className="mb-4 text-sm text-[#6a6d70]">
+                    <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
                       SDLY al cutoff {formatDateIt(sdlyCutoffUsed)} · chiusura stagionale valorizzata a 0:{" "}
                       {sdlyAnnualCoverage.closedMonths.map((m) => MONTH_LABELS[m - 1]).join(", ")}.
                     </p>
                   )}
 
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-                  <KpiCard
+                <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-6">
+                  <AppMetricCard
                     label="Revenue"
-                    current={formatCurrency(kpiCurrentAgg.revenue)}
-                    currentRaw={kpiCurrentAgg.revenue}
-                    comparison={formatCurrency(comparisonAgg.revenue)}
-                    comparisonRaw={comparisonAgg.revenue}
-                    comparisonLabel={comparisonLabel}
+                    value={formatCurrency(kpiCurrentAgg.revenue)}
+                    comparison={kpiComparison(
+                      kpiCurrentAgg.revenue,
+                      comparisonAgg.revenue,
+                      formatCurrency(comparisonAgg.revenue),
+                      kpiComparisonNote
+                    )}
                   />
-                  <KpiCard
+                  <AppMetricCard
                     label="Occupazione"
-                    current={formatPercent(occupancy(kpiCurrentAgg.roomsSold, kpiCurrentAgg.roomsAvailable))}
-                    currentRaw={occupancy(kpiCurrentAgg.roomsSold, kpiCurrentAgg.roomsAvailable)}
-                    comparison={formatPercent(occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable))}
-                    comparisonRaw={occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable)}
-                    comparisonLabel={comparisonLabel}
+                    value={formatPercent(occupancy(kpiCurrentAgg.roomsSold, kpiCurrentAgg.roomsAvailable))}
+                    comparison={kpiComparison(
+                      occupancy(kpiCurrentAgg.roomsSold, kpiCurrentAgg.roomsAvailable),
+                      occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable),
+                      formatPercent(occupancy(comparisonAgg.roomsSold, comparisonAgg.roomsAvailable)),
+                      kpiComparisonNote
+                    )}
                   />
-                  <KpiCard
+                  <AppMetricCard
                     label="Arrivi"
-                    current={formatNumber(kpiCurrentAgg.arrivals)}
-                    currentRaw={kpiCurrentAgg.arrivals}
-                    comparison={formatNumber(comparisonAgg.arrivals)}
-                    comparisonRaw={comparisonAgg.arrivals}
-                    comparisonLabel={comparisonLabel}
+                    value={formatNumber(kpiCurrentAgg.arrivals)}
+                    comparison={kpiComparison(
+                      kpiCurrentAgg.arrivals,
+                      comparisonAgg.arrivals,
+                      formatNumber(comparisonAgg.arrivals),
+                      kpiComparisonNote
+                    )}
                   />
-                  <KpiCard
+                  <AppMetricCard
                     label="Presenze"
-                    current={formatNumber(kpiCurrentAgg.presences)}
-                    currentRaw={kpiCurrentAgg.presences}
-                    comparison={formatNumber(comparisonAgg.presences)}
-                    comparisonRaw={comparisonAgg.presences}
-                    comparisonLabel={comparisonLabel}
+                    value={formatNumber(kpiCurrentAgg.presences)}
+                    comparison={kpiComparison(
+                      kpiCurrentAgg.presences,
+                      comparisonAgg.presences,
+                      formatNumber(comparisonAgg.presences),
+                      kpiComparisonNote
+                    )}
                   />
-                  <KpiCard
+                  <AppMetricCard
                     label="LOS"
-                    current={(() => {
-                      const value = los(kpiCurrentAgg.roomsSold, kpiCurrentAgg.arrivals);
-                      return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
-                    })()}
-                    currentRaw={los(kpiCurrentAgg.roomsSold, kpiCurrentAgg.arrivals)}
-                    comparison={(() => {
-                      const value = los(comparisonAgg.roomsSold, comparisonAgg.arrivals);
-                      return value !== null ? value.toLocaleString("it-IT", { maximumFractionDigits: 1 }) : ND;
-                    })()}
-                    comparisonRaw={los(comparisonAgg.roomsSold, comparisonAgg.arrivals)}
-                    comparisonLabel={comparisonLabel}
+                    value={formatLos(los(kpiCurrentAgg.roomsSold, kpiCurrentAgg.arrivals))}
+                    comparison={kpiComparison(
+                      los(kpiCurrentAgg.roomsSold, kpiCurrentAgg.arrivals),
+                      los(comparisonAgg.roomsSold, comparisonAgg.arrivals),
+                      formatLos(los(comparisonAgg.roomsSold, comparisonAgg.arrivals)),
+                      kpiComparisonNote
+                    )}
+                  />
+                  <AppMetricCard
+                    label="Budget Realistico"
+                    value={budgetRealistico ? formatCurrency(Number(budgetRealistico.revenue_target)) : ND}
                   />
                 </div>
               </>
             )}
-          </AppCard>
+          </section>
 
-          <AppCard
-            title={periodBudgetTitles[periodKind(periodStart, periodEnd)]}
-            subtitle={periodBudget ? budgetSubtitleParts.join(" · ") : "Caricamento budget del periodo…"}
-            className="p-4"
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[380px] border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                    <th className="pb-2 pr-4">Scenario</th>
-                    <th className="pb-2 pr-4">Revenue</th>
-                    <th className="pb-2">Occupazione</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr className="border-b border-[#f0ece6]">
-                    <td className="py-1.5 pr-4 font-semibold text-[#2B2D2F]">Reale</td>
-                    <td className="py-1.5 pr-4 text-[#2B2D2F]">
-                      {periodAgg.daysWithData > 0 ? (
-                        <div className="flex items-start gap-2">
-                          {periodPacing && (
-                            <span
-                              className={`mt-1 h-2 w-2 shrink-0 rounded-full ${pacingDotClasses[periodPacing]}`}
-                            />
-                          )}
-                          <div>
-                            <div>{formatCurrency(periodAgg.revenue)}</div>
-                            {periodPacingDetail && (
-                              <div className="text-[12px] text-[#6a6d70]">{periodPacingDetail}</div>
-                            )}
-                          </div>
-                        </div>
-                      ) : (
-                        ND
-                      )}
-                    </td>
-                    <td className="py-1.5 text-[#2B2D2F]">
-                      {periodAgg.daysWithData > 0
-                        ? formatPercent(occupancy(periodAgg.roomsSold, periodAgg.roomsAvailable))
-                        : ND}
-                    </td>
-                  </tr>
-
-                  {["minimo", "realistico", "sfidante"].map((level) => {
-                    const budget = periodBudgets.find((b) => b.level === level);
-
-                    return (
-                      <tr key={level} className="border-b border-[#f0ece6] last:border-0">
-                        <td className="py-1.5 pr-4 text-[#2B2D2F]">{budgetLevelLabels[level]}</td>
-                        <td className="py-1.5 pr-4 text-[#2B2D2F]">
-                          {budget ? formatCurrency(Number(budget.revenue_target)) : ND}
-                        </td>
-                        <td className="py-1.5 text-[#2B2D2F]">
-                          {budget ? formatPercent(Number(budget.occupancy_pct_target)) : ND}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          {/* Pannello di supporto: i valori principali sono gia' nelle card KPI,
+              qui restano i tre scenari come riferimento. Piu' basso e fitto
+              delle sezioni primarie ("!" = eccezione locale al padding
+              standard della card e delle celle, senza toccare le primitive). */}
+          <AppCard density="compact" className="!py-2.5">
+            <div className="mb-1.5 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+              <h2 className="text-[13px] font-semibold leading-5 text-mc-text">Scenari budget</h2>
+              <p className="text-[11.5px] leading-4 text-mc-text-secondary">
+                {periodBudget ? budgetSubtitleParts.join(" · ") : "Caricamento budget del periodo…"}
+              </p>
             </div>
+            <AppTable minWidthClassName="min-w-[320px]">
+              <thead>
+                <AppTableRow state="header" className="text-[11.5px]">
+                  <AppTableCell className="!py-1">Scenario</AppTableCell>
+                  <AppTableCell numeric className="!py-1">
+                    Revenue
+                  </AppTableCell>
+                  <AppTableCell numeric className="!py-1">
+                    Occupazione
+                  </AppTableCell>
+                </AppTableRow>
+              </thead>
+              <tbody>
+                {["minimo", "realistico", "sfidante"].map((level) => {
+                  const budget = periodBudgets.find((b) => b.level === level);
+
+                  return (
+                    <AppTableRow key={level} className="text-[12px] text-mc-text-secondary last:border-0">
+                      <AppTableCell className="!py-0.5">{budgetLevelLabels[level]}</AppTableCell>
+                      <AppTableCell numeric className="!py-0.5">
+                        {budget ? formatCurrency(Number(budget.revenue_target)) : ND}
+                      </AppTableCell>
+                      <AppTableCell numeric className="!py-0.5">
+                        {budget ? formatPercent(Number(budget.occupancy_pct_target)) : ND}
+                      </AppTableCell>
+                    </AppTableRow>
+                  );
+                })}
+              </tbody>
+            </AppTable>
           </AppCard>
         </div>
       </div>
@@ -1784,6 +1814,7 @@ export default function PerformanceStructureDrilldownPage({
       {hasChannelData && (
         <>
           <AppCard
+            density="compact"
             title="Revenue per canale"
             subtitle={`Fatturato aggregato per canale sul periodo visualizzato (${periodLabel}) — la riga Totale deve coincidere con la somma delle barre`}
             action={
@@ -1822,6 +1853,7 @@ export default function PerformanceStructureDrilldownPage({
           </AppCard>
 
           <AppCard
+            density="compact"
             title="Direct Booking Share"
             subtitle={`Quota dei canali diretti (CRM + Booking Engine) sul totale, ${periodLabel}`}
           >
@@ -1868,6 +1900,7 @@ export default function PerformanceStructureDrilldownPage({
 
       {hasNationalityData && (
         <AppCard
+          density="compact"
           title="Presenze per nazionalità"
           subtitle={`Top 10 nazionalità per presenze sul periodo visualizzato (${periodLabel}), le restanti aggregate in "Altri" — la riga Totale deve coincidere con la somma delle barre`}
           action={
@@ -1892,6 +1925,7 @@ export default function PerformanceStructureDrilldownPage({
       )}
 
       <AppCard
+        density="compact"
         title="Dettaglio giornaliero"
         subtitle={
           detailGranularity === "month"
@@ -1905,33 +1939,27 @@ export default function PerformanceStructureDrilldownPage({
           <button
             type="button"
             onClick={() => setDailyDetailOpen((prev) => !prev)}
-            className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+            className="flex h-[34px] items-center gap-2 rounded-[7px] border border-mc-border bg-mc-surface px-3 text-[13px] font-medium text-teal transition hover:bg-mc-surface-subtle"
           >
             {dailyDetailOpen ? "Nascondi dettaglio giornaliero ▲" : "Mostra dettaglio giornaliero ▾"}
           </button>
 
           {dailyDetailOpen && (
-            <div className="flex flex-wrap gap-2">
-              {DETAIL_GRANULARITY_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setDetailGranularity(opt.value)}
-                  className={`rounded-[14px] px-4 py-2 text-sm font-semibold transition ${
-                    detailGranularity === opt.value
-                      ? "bg-teal text-white"
-                      : "border border-[#e7dfd8] bg-white text-[#2B2D2F] hover:bg-[#f8f6f2]"
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
+            <AppSegmentedControl
+              variant="pills"
+              ariaLabel="Granularità del dettaglio"
+              options={DETAIL_GRANULARITY_OPTIONS}
+              value={detailGranularity}
+              onChange={setDetailGranularity}
+            />
           )}
         </div>
 
+        {/* overflow-y-hidden: i tooltip nascosti dell'ultima riga allungavano l'area
+            scrollabile e l'intestazione poteva scorrere via sotto i controlli;
+            pb-12 lascia loro lo spazio per aprirsi senza essere tagliati. */}
         {dailyDetailOpen && (
-          <div className="mt-4 overflow-x-auto">
+          <div className="mt-3 overflow-x-auto overflow-y-hidden border-t border-mc-border-subtle pb-12 pt-3">
             {(detailGranularity === "month" ? yearlyDetailLoading : dailyDetailLoading) ? (
               <p className="text-sm text-[#6a6d70]">Caricamento...</p>
             ) : displayedDetailRows.length > 0 ? (
@@ -2032,39 +2060,6 @@ export default function PerformanceStructureDrilldownPage({
           </div>
         )}
       </AppCard>
-    </div>
-  );
-}
-
-function KpiCard({
-  label,
-  current,
-  currentRaw,
-  comparison,
-  comparisonRaw,
-  comparisonLabel,
-}: {
-  label: string;
-  current: string;
-  currentRaw: number | null;
-  comparison: string;
-  comparisonRaw: number | null;
-  comparisonLabel: string;
-}) {
-  const delta = formatDelta(currentRaw, comparisonRaw);
-
-  return (
-    <div className="rounded-[16px] border border-[#e7dfd8] bg-[#fcfbf9] p-4">
-      <p className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-        {label}
-      </p>
-      <p className="mt-2 text-[22px] font-semibold leading-none text-[#2B2D2F]">{current}</p>
-      <p className="mt-2 text-[14px] text-[#6a6d70]">
-        {comparisonLabel}: {comparison}
-      </p>
-      <p className={`mt-1 text-[14px] font-medium ${delta.colorClass}`}>
-        {delta.text} vs {comparisonLabel}
-      </p>
     </div>
   );
 }

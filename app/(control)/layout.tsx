@@ -11,7 +11,7 @@ export default function ControlLayout({
     <>
       <Header />
 
-      <main className="min-h-screen bg-[#f5f3ef] px-6 py-8 text-[#2B2D2F] md:px-10">
+      <main className="min-h-screen bg-mc-page px-6 py-8 text-[#2B2D2F] md:px-10">
         <div className="mx-auto max-w-7xl space-y-6">
           <PushNotificationBanner />
           <PushNotificationClickHandler />

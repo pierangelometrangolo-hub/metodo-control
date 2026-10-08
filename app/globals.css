@@ -22,6 +22,27 @@
   --color-terracotta: #993333;
   --color-chart-orange: #eb8c55;
   --color-beige: #e9ddd6;
+
+  /* UX Foundation v2 - token semantici usati dai componenti App*
+     (components/ui). Si aggiungono solo quando un componente li usa.
+     Due famiglie di stato distinte: "temporal" dice QUANDO (in corso,
+     futuro, chiuso) e resta neutra; positive/negative dicono COME sta
+     andando - mai l'una al posto dell'altra. */
+  --color-mc-page: #f6f7f9;
+  --color-mc-text: #23272e;
+  --color-mc-text-secondary: #667085;
+  --color-mc-text-label: #475467;
+  --color-mc-text-tertiary: #98a2b3;
+  --color-mc-border: #e4e7ec;
+  --color-mc-border-subtle: #eef0f3;
+  --color-mc-border-strong: #c9cfd8;
+  --color-mc-surface: #ffffff;
+  --color-mc-surface-subtle: #fafbfc;
+  --color-mc-surface-muted: #eceff3;
+  --color-mc-surface-summary: #f4f6f8;
+  --color-mc-temporal-current: #eef6f9;
+  --color-mc-positive: #15803d;
+  --color-mc-negative: #c0362c;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

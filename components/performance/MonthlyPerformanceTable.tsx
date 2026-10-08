@@ -3,6 +3,8 @@
 import { ReactNode } from "react";
 import { AppBadge } from "@/components/ui/AppBadge";
 import { AppCard } from "@/components/ui/AppCard";
+import { AppComparisonTone, AppComparisonValue } from "@/components/ui/AppComparisonValue";
+import { AppTable, AppTableCell, AppTableRow, AppTableRowState } from "@/components/ui/AppTable";
 import { CellTooltip } from "@/components/ui/CellTooltip";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import { MONTH_LABELS } from "@/components/performance/Calendar";
@@ -15,6 +17,7 @@ import {
 import {
   ND,
   PacingStatus,
+  deltaPercent,
   formatCurrency,
   formatDelta,
   formatNumber,
@@ -41,6 +44,22 @@ const NEUTRAL = "text-[#6a6d70]";
 const SUBLINE = "block whitespace-nowrap text-[11px] font-normal leading-4 text-[#6a6d70]";
 const CLOSURE_TOOLTIP =
   "Chiusura dichiarata nel Budget per l’intero mese: nessuna produzione attesa, il mese non è un dato mancante.";
+
+// Il tono del delta lo decide chi conosce il significato del numero (qui:
+// sopra il riferimento = positivo), non il componente di presentazione.
+function toneOfDelta(delta: number | null): AppComparisonTone {
+  if (delta === null || delta === 0) return "neutral";
+  return delta > 0 ? "positive" : "negative";
+}
+
+// Stato temporale della riga: un mese passato e' la riga standard, "closed"
+// e' il mese chiuso per chiusura dichiarata.
+function rowStateOf(row: MonthlyPerformanceRow): AppTableRowState {
+  if (row.status === "current") return "current";
+  if (row.closedByDeclaration) return "closed";
+  if (row.status === "future") return "future";
+  return "default";
+}
 
 function formatDateIt(date: string): string {
   return date.split("-").reverse().join("/");
@@ -102,10 +121,12 @@ function ComparisonCell({
     <RowTooltip
       ctx={ctx}
       trigger={
-        <span className="block">
-          <span className={`block font-medium leading-5 ${delta.colorClass}`}>{delta.text}</span>
-          <span className={SUBLINE}>vs {formatCurrency(comparison.reference)}</span>
-        </span>
+        <AppComparisonValue
+          emphasis="delta"
+          delta={delta.text}
+          tone={toneOfDelta(comparison.delta)}
+          reference={`vs ${formatCurrency(comparison.reference)}`}
+        />
       }
     >
       <span className="block font-semibold">{title}</span>
@@ -207,16 +228,21 @@ function VsBudgetCell({
     <RowTooltip
       ctx={ctx}
       trigger={
-        <span className="block">
-          <span className="inline-flex items-center justify-end gap-2 leading-5">
-            {/* Periodo futuro: l'OTB crescera' ancora, nessun semaforo da consuntivo. */}
-            {pacing && status !== "future" && (
-              <span className={`h-2 w-2 shrink-0 rounded-full ${pacingDotClasses[pacing]}`} />
-            )}
-            <span className={`font-medium ${isClosed ? delta.colorClass : NEUTRAL}`}>{delta.text}</span>
-          </span>
-          {partialMonths ? <span className={SUBLINE}>su {partialMonths} mesi</span> : null}
-        </span>
+        <AppComparisonValue
+          emphasis="delta"
+          // Periodo non concluso: avanzamento, non uno scostamento da colorare.
+          tone={isClosed ? toneOfDelta(deltaPercent(revenue, realistico)) : "neutral"}
+          delta={
+            <span className="inline-flex items-center justify-end gap-2">
+              {/* Periodo futuro: l'OTB crescera' ancora, nessun semaforo da consuntivo. */}
+              {pacing && status !== "future" && (
+                <span className={`h-2 w-2 shrink-0 rounded-full ${pacingDotClasses[pacing]}`} />
+              )}
+              <span>{delta.text}</span>
+            </span>
+          }
+          note={partialMonths ? `su ${partialMonths} mesi` : undefined}
+        />
       }
     >
       <span className="block font-semibold">{isClosed ? "Revenue" : "OTB"} vs Budget Realistico</span>
@@ -255,52 +281,54 @@ function KpiCell({
 
 export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanceTableProps) {
   return (
-    <AppCard title="Performance mensile" subtitle="Andamento mensile con confronti, budget e principali KPI">
+    <AppCard
+      density="compact"
+      title="Performance mensile"
+      subtitle="Andamento mensile con confronti, budget e principali KPI"
+    >
       {rows === null ? (
         <p className="text-sm text-[#6a6d70]">Caricamento...</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1080px] border-collapse text-sm">
+        <AppTable minWidthClassName="min-w-[1080px]">
             <thead>
-              <tr className="border-b border-[#e7dfd8] text-right text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                <th className="sticky left-0 z-[1] bg-white pb-3 pr-4 text-left">Mese {year}</th>
-                <th className="pb-3 pr-4">
+              <AppTableRow state="header">
+                <AppTableCell sticky>Mese {year}</AppTableCell>
+                <AppTableCell numeric>
                   Revenue / OTB
                   <InfoTooltip text="Mese chiuso: revenue finale del mese. Mese in corso o futuro: OTB dell’intero mese all’ultimo snapshot disponibile." />
-                </th>
-                <th className="pb-3 pr-4">
+                </AppTableCell>
+                <AppTableCell numeric>
                   vs SDLY
                   <InfoTooltip text="Mese già iniziato: produzione maturata fino alla data dell’ultimo snapshot contro gli stessi giorni dell’anno precedente. Mese futuro: OTB contro l’OTB dello stesso mese osservato alla stessa data dell’anno precedente. Sotto il delta, il valore dell’anno precedente usato nel confronto. Passa il mouse (o tocca) per l’intervallo confrontato." />
-                </th>
-                <th className="pb-3 pr-4">
+                </AppTableCell>
+                <AppTableCell numeric>
                   vs Consuntivo LY
                   <InfoTooltip text="Intero mese contro il risultato finale dello stesso mese di calendario dell’anno precedente, riportato sotto il delta. ND se lo storico non copre tutti i giorni del mese (un giorno senza dati vale 0 solo se coperto da una chiusura registrata nel Budget)." />
-                </th>
-                <th className="pb-3 pr-4">
+                </AppTableCell>
+                <AppTableCell numeric groupStart>
                   Budget
                   <InfoTooltip text="Revenue target dello scenario Realistico per il mese. Passa il mouse (o tocca) sul valore per Minimo, Realistico e Sfidante." />
-                </th>
-                <th className="pb-3 pr-4">
+                </AppTableCell>
+                <AppTableCell numeric>
                   vs Budget
                   <InfoTooltip text="Scostamento del Revenue / OTB dal Budget Realistico del mese pieno. Per i mesi non conclusi è un avanzamento, non uno scostamento definitivo." />
-                </th>
-                <th className="pb-3 pr-4">Occupazione</th>
-                <th className="pb-3 pr-4">ADR</th>
-                <th className="pb-3 pr-4">RevPAR</th>
-                <th className="pb-3">RN vendute</th>
-              </tr>
+                </AppTableCell>
+                <AppTableCell numeric groupStart>
+                  Occupazione
+                </AppTableCell>
+                <AppTableCell numeric>ADR</AppTableCell>
+                <AppTableCell numeric>RevPAR</AppTableCell>
+                <AppTableCell numeric>RN vendute</AppTableCell>
+              </AppTableRow>
             </thead>
             <tbody>
               {rows.map((row) => {
                 const ctx = contextOf(row);
                 const isCurrent = row.status === "current";
-                const muted = row.status === "future";
-                const rowBg = isCurrent ? "bg-[#f3f8fa]" : "bg-white";
 
                 return (
-                  <tr key={row.month} className={`border-b border-[#f0ece6] text-right align-middle ${rowBg}`}>
-                    {/* hover/has: porta in primo piano la cella sticky quando un suo tooltip e' aperto. */}
-                    <td className={`sticky left-0 z-[1] py-2 pr-4 text-left hover:z-20 has-[.opacity-100]:z-20 ${rowBg}`}>
+                  <AppTableRow key={row.month} state={rowStateOf(row)}>
+                    <AppTableCell sticky>
                       <div className="flex items-center gap-2 whitespace-nowrap">
                         <span className="font-semibold text-[#2B2D2F]">{MONTH_LABELS[row.month - 1]}</span>
                         {row.closedByDeclaration ? (
@@ -330,32 +358,32 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                           dato al {formatDateIt(row.staleAsOf).slice(0, 5)}
                         </p>
                       )}
-                    </td>
-                    <td className="py-2 pr-4 font-semibold">
+                    </AppTableCell>
+                    <AppTableCell numeric className="font-semibold">
                       <KpiCell ctx={ctx} hasData={row.hasData} muted={false}>
                         {formatCurrency(row.revenue)}
                       </KpiCell>
-                    </td>
-                    <td className="py-2 pr-4">
+                    </AppTableCell>
+                    <AppTableCell numeric>
                       <ComparisonCell
                         ctx={ctx}
                         comparison={row.sdly}
                         title={row.sdly.mode === "production" ? "Produzione vs SDLY" : "OTB vs SDLY"}
                         referenceLabel="SDLY"
                       />
-                    </td>
-                    <td className="py-2 pr-4">
+                    </AppTableCell>
+                    <AppTableCell numeric>
                       <ComparisonCell
                         ctx={ctx}
                         comparison={row.consuntivoLy}
                         title={row.status === "closed" ? "Revenue vs Consuntivo LY" : "OTB vs Consuntivo LY"}
                         referenceLabel="Consuntivo LY"
                       />
-                    </td>
-                    <td className="py-2 pr-4">
+                    </AppTableCell>
+                    <AppTableCell numeric groupStart>
                       <BudgetCell ctx={ctx} budget={row.budget} title={`Budget ${MONTH_LABELS[row.month - 1]}`} />
-                    </td>
-                    <td className="py-2 pr-4">
+                    </AppTableCell>
+                    <AppTableCell numeric>
                       <VsBudgetCell
                         ctx={ctx}
                         status={row.status}
@@ -369,49 +397,49 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                             : "Nessun dato importato per questo mese."
                         }
                       />
-                    </td>
-                    <td className="py-2 pr-4">
-                      <KpiCell ctx={ctx} hasData={row.hasData} muted={muted}>
+                    </AppTableCell>
+                    <AppTableCell numeric groupStart className="text-[13px]">
+                      <KpiCell ctx={ctx} hasData={row.hasData} muted>
                         {formatPercent(row.occupancy)}
                       </KpiCell>
-                    </td>
-                    <td className="py-2 pr-4">
-                      <KpiCell ctx={ctx} hasData={row.hasData} muted={muted}>
+                    </AppTableCell>
+                    <AppTableCell numeric className="text-[13px]">
+                      <KpiCell ctx={ctx} hasData={row.hasData} muted>
                         {formatCurrency(row.adr)}
                       </KpiCell>
-                    </td>
-                    <td className="py-2 pr-4">
-                      <KpiCell ctx={ctx} hasData={row.hasData} muted={muted}>
+                    </AppTableCell>
+                    <AppTableCell numeric className="text-[13px]">
+                      <KpiCell ctx={ctx} hasData={row.hasData} muted>
                         {formatCurrency(row.revPar)}
                       </KpiCell>
-                    </td>
-                    <td className="py-2">
-                      <KpiCell ctx={ctx} hasData={row.hasData} muted={muted}>
+                    </AppTableCell>
+                    <AppTableCell numeric className="text-[13px]">
+                      <KpiCell ctx={ctx} hasData={row.hasData} muted>
                         {formatNumber(row.roomsSold)}
                       </KpiCell>
-                    </td>
-                  </tr>
+                    </AppTableCell>
+                  </AppTableRow>
                 );
               })}
             </tbody>
             {total && (
               <tfoot>
                 {/* Somme annuali e KPI ricalcolati dalle somme; confronti con la semantica delle KPI card annuali. */}
-                <tr className="border-t-2 border-[#e7dfd8] bg-[#fcfbf9] text-right align-middle font-semibold">
-                  <td className="sticky left-0 z-[1] bg-[#fcfbf9] py-3 pr-4 text-left hover:z-20 has-[.opacity-100]:z-20">
+                <AppTableRow state="total">
+                  <AppTableCell sticky>
                     <span className="whitespace-nowrap text-[#2B2D2F]">Totale anno</span>
                     {total.hasData && total.monthsWithData < 12 && (
                       <p className="mt-0.5 whitespace-nowrap text-[11px] font-normal text-[#6a6d70]">
                         {total.monthsWithData}/12 mesi con dati
                       </p>
                     )}
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <KpiCell ctx={TOTAL_CONTEXT} hasData={total.hasData} muted={false}>
                       {formatCurrency(total.revenue)}
                     </KpiCell>
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <ComparisonCell
                       ctx={TOTAL_CONTEXT}
                       comparison={total.sdly}
@@ -424,24 +452,24 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                       }
                       referenceLabel="SDLY"
                     />
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <ComparisonCell
                       ctx={TOTAL_CONTEXT}
                       comparison={total.consuntivoLy}
                       title={total.status === "closed" ? "Revenue vs Consuntivo LY" : "Revenue / OTB vs Consuntivo LY"}
                       referenceLabel="Consuntivo LY"
                     />
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric groupStart>
                     <BudgetCell
                       ctx={TOTAL_CONTEXT}
                       budget={total.budget}
                       title={`Budget ${year}`}
                       coverage={total.budgetComplete ? null : { months: total.budgetMonths, of: 12 }}
                     />
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <VsBudgetCell
                       ctx={TOTAL_CONTEXT}
                       status={total.status}
@@ -456,32 +484,31 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                       }
                       partialMonths={total.budgetComplete ? null : total.budgetMonths}
                     />
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric groupStart>
                     <KpiCell ctx={TOTAL_CONTEXT} hasData={total.hasData} muted={false}>
                       {formatPercent(total.occupancy)}
                     </KpiCell>
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <KpiCell ctx={TOTAL_CONTEXT} hasData={total.hasData} muted={false}>
                       {formatCurrency(total.adr)}
                     </KpiCell>
-                  </td>
-                  <td className="py-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <KpiCell ctx={TOTAL_CONTEXT} hasData={total.hasData} muted={false}>
                       {formatCurrency(total.revPar)}
                     </KpiCell>
-                  </td>
-                  <td className="py-3">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     <KpiCell ctx={TOTAL_CONTEXT} hasData={total.hasData} muted={false}>
                       {formatNumber(total.roomsSold)}
                     </KpiCell>
-                  </td>
-                </tr>
+                  </AppTableCell>
+                </AppTableRow>
               </tfoot>
             )}
-          </table>
-        </div>
+        </AppTable>
       )}
     </AppCard>
   );

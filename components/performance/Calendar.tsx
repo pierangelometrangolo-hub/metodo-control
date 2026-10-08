@@ -16,6 +16,9 @@ type CalendarProps = {
   rangeStart?: string | null;
   rangeEnd?: string | null;
   onRangeChange?: (start: string | null, end: string | null) => void;
+  // Dentro un contenitore che fa gia' da superficie (es. un dialog): niente
+  // bordo, fondo e padding propri. Il default resta il riquadro autonomo.
+  embedded?: boolean;
 };
 
 const WEEKDAY_LABELS = ["L", "M", "M", "G", "V", "S", "D"];
@@ -28,6 +31,12 @@ function toDateString(y: number, m: number, d: number) {
   return `${y}-${pad(m + 1)}-${pad(d)}`;
 }
 
+// Solo per il testo mostrato all'utente: "YYYY-MM-DD" -> "DD/MM/YYYY". Le
+// date usate per selezione e confronti restano in formato ISO.
+function formatDateIt(date: string): string {
+  return date.split("-").reverse().join("/");
+}
+
 export function Calendar({
   value,
   onChange,
@@ -38,6 +47,7 @@ export function Calendar({
   rangeStart = null,
   rangeEnd = null,
   onRangeChange,
+  embedded = false,
 }: CalendarProps) {
   const [y, m] = value.split("-").map(Number);
   const [viewYear, setViewYear] = useState(y);
@@ -99,7 +109,13 @@ export function Calendar({
   }
 
   return (
-    <div className="w-full max-w-[280px] rounded-[14px] border border-[#e7dfd8] bg-white p-3">
+    <div
+      className={
+        embedded
+          ? "mx-auto w-full max-w-[256px]"
+          : "w-full max-w-[280px] rounded-[14px] border border-[#e7dfd8] bg-white p-3"
+      }
+    >
       <div className="mb-2 flex items-center justify-between">
         <button
           type="button"
@@ -183,7 +199,7 @@ export function Calendar({
             ? "Clicca il primo giorno dell'intervallo."
             : !rangeEnd
               ? "Ora clicca l'ultimo giorno dell'intervallo."
-              : `Intervallo selezionato: ${rangeStart} → ${rangeEnd}`}
+              : `Intervallo selezionato: ${formatDateIt(rangeStart)} → ${formatDateIt(rangeEnd)}`}
         </p>
       )}
 

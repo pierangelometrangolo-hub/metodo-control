@@ -15,7 +15,6 @@ import {
   SnapshotRow,
   BudgetRow,
   todayString,
-  sdlyDate,
   monthRange,
   pad,
   formatCurrency,
@@ -39,9 +38,9 @@ import {
 } from "@/lib/performanceMetrics";
 import { aggregatePortfolioPerformance, PortfolioComparison } from "@/lib/performance/portfolio";
 import { aggregateBudgetRows } from "@/lib/performance/periodBudget";
-import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
-import { groupStructuresBySdlyCutoff, observationDateByStructure } from "@/lib/performance/sdlyCutoff";
-import { resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "@/lib/performance/sdlyComparison";
+import { ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
+import { groupStructuresBySdlyCutoff } from "@/lib/performance/sdlyCutoff";
+import { resolveSdlyAsOfComparison } from "@/lib/performance/sdlyComparison";
 import {
   computeLikeForLike,
   LikeForLikeComparison,
@@ -105,19 +104,18 @@ async function fetchAllSnapshotRows(
   return { data: allRows, error: null };
 }
 
-// Confronto SDLY di una struttura: produzione maturata per i periodi gia'
-// iniziati, OTB as-of per i periodi interamente futuri.
+// Confronto SDLY di una struttura: intero periodo nella fotografia corrente
+// vs intero stesso periodo dell'anno precedente nella fotografia alla stessa
+// data (lib/performance/sdlyComparison, unica semantica per ogni periodo).
 type RowSdly = {
-  mode: SdlyMode;
-  // Valore corrente pertinente al confronto: produzione maturata fino alla
-  // data di osservazione, oppure OTB dell'intero periodo se futuro.
+  // Valore corrente del confronto: l'OTB dell'intero periodo.
   actual: number | null;
-  // Intervalli / date realmente confrontati, gia' formattati per il tooltip.
+  // Fotografie realmente confrontate, gia' formattate per il tooltip.
   actualDetail: string | null;
   referenceDetail: string | null;
   // Perche' manca il riferimento (ND), quando e' noto.
   unavailableReason: string | null;
-  // Giorni / mesi senza dato valorizzati a 0 per chiusura dichiarata.
+  // Mesi senza fotografia valorizzati a 0 per chiusura dichiarata.
   zeroNote: string | null;
 };
 
@@ -329,12 +327,8 @@ export default function PerformanceOverviewPage() {
     const lastYearStart = isWholeYear ? `${selectedYear - 1}-01-01` : lastYearMonthRange.start;
     const lastYearEnd = isWholeYear ? `${selectedYear - 1}-12-31` : lastYearMonthRange.end;
 
-    // Tipo di confronto SDLY, uguale per tutte le strutture: produzione
-    // maturata se il periodo e' gia' iniziato, OTB as-of se e' interamente
-    // futuro (vedi lib/performance/sdlyComparison).
-    const sdlyMode = sdlyModeForPeriod(start, todayString());
-    // Mesi per l'OTB as-of di un periodo futuro: 1 solo mese in modalita'
-    // mensile, tutti e 12 in "Tutto l'anno".
+    // Mesi della fotografia LY (fn_month_snapshot_asof): 1 solo mese in
+    // modalita' mensile, tutti e 12 in "Tutto l'anno".
     const sdlyMonthsInScope = isWholeYear ? Array.from({ length: 12 }, (_, i) => i + 1) : [selectedMonth];
 
     // Mesi per il target di budget: sempre l'intero anno (1-12) in "Tutto
@@ -346,12 +340,11 @@ export default function PerformanceOverviewPage() {
     // Revenue OTB, ma sul lato budget del confronto.
     const budgetMonthsInScope = isWholeYear ? Array.from({ length: 12 }, (_, i) => i + 1) : [selectedMonth];
 
-    // Confronto SDLY "a parità di anticipo": non l'OTB dell'ultima estrazione
-    // disponibile per il mese dell'anno scorso (sarebbe il consuntivo finale,
-    // già coperto dalla colonna "Consuntivo anno prec."), ma l'OTB di quel
-    // mese così come si presentava un anno esatto prima della data di
-    // osservazione dell'OTB corrente. La data di osservazione e' per
-    // struttura (extraction_date piu' recente tra le righe del periodo in
+    // Confronto SDLY: l'intero periodo nella fotografia corrente contro lo
+    // stesso periodo dell'anno precedente nella fotografia alla stessa data
+    // relativa - non il consuntivo finale (gia' coperto dalla colonna
+    // "Consuntivo LY"). La data della fotografia e' per struttura
+    // (extraction_date piu' recente tra le righe del periodo in
     // v_snapshot_latest), non "oggi": una struttura aggiornata il 30/09 si
     // confronta con cio' che era noto al 30/09 dell'anno prima.
     const snapshotColumns =
@@ -378,33 +371,35 @@ export default function PerformanceOverviewPage() {
       supabase.from("structure_closures").select("structure_id, start_date, end_date").in("structure_id", ids),
     ]);
 
-    // Data di osservazione per struttura: extraction_date piu' recente tra
-    // le righe del periodo. Struttura senza righe = nessun confronto SDLY.
-    const observationDates = observationDateByStructure(monthRes.data || []);
-    // OTB as-of (solo periodi futuri): una chiamata per (cutoff distinto,
-    // mese), le strutture con la stessa data di osservazione condividono il
-    // cutoff. La produzione maturata non richiede altre query: usa le righe
-    // giornaliere del periodo e dello stesso periodo dell'anno precedente.
-    const sdlyResults =
-      sdlyMode === "otb_asof"
-        ? await Promise.all(
-            Array.from(groupStructuresBySdlyCutoff(observationDates)).flatMap(([cutoff, structureIds]) =>
-              sdlyMonthsInScope.map(async (m) => {
-                const res = await supabase.rpc("fn_month_snapshot_asof", {
-                  p_structure_ids: structureIds,
-                  p_period_year: selectedYear - 1,
-                  p_period_month: m,
-                  p_cutoff_date: cutoff,
-                });
-                return {
-                  month: m,
-                  data: res.data as (MonthAsofRow & { structure_id: string })[] | null,
-                  error: res.error,
-                };
-              })
-            )
-          )
-        : [];
+    // Data di osservazione UNICA per struttura: la sua ultima estrazione
+    // (stessa funzione di "Ultimo upload"), la stessa per ogni periodo -
+    // non la data delle sole righe del periodo. Struttura senza estrazioni
+    // = nessun confronto SDLY (ND).
+    const observationDates = new Map<string, string>(
+      ((lastExtractionRes.data as { structure_id: string; extraction_date: string | null }[] | null) || [])
+        .filter((r): r is { structure_id: string; extraction_date: string } => Boolean(r.extraction_date))
+        .map((r) => [r.structure_id, r.extraction_date])
+    );
+    // Fotografia LY alla stessa data, per ogni periodo (passato, in corso
+    // o futuro): una chiamata per (cutoff distinto, mese), le strutture con
+    // la stessa data di osservazione condividono il cutoff.
+    const sdlyResults = await Promise.all(
+      Array.from(groupStructuresBySdlyCutoff(observationDates)).flatMap(([cutoff, structureIds]) =>
+        sdlyMonthsInScope.map(async (m) => {
+          const res = await supabase.rpc("fn_month_snapshot_asof", {
+            p_structure_ids: structureIds,
+            p_period_year: selectedYear - 1,
+            p_period_month: m,
+            p_cutoff_date: cutoff,
+          });
+          return {
+            month: m,
+            data: res.data as (MonthAsofRow & { structure_id: string })[] | null,
+            error: res.error,
+          };
+        })
+      )
+    );
 
     if (monthRes.error) setLoadError(monthRes.error.message);
     if (lastYearMonthRes.error) setLoadError(lastYearMonthRes.error.message);
@@ -480,78 +475,29 @@ export default function PerformanceOverviewPage() {
       const lastYearMonthToDate = sumSnapshots(lastYearMonthByStructure.get(structure.id) || []);
       const observationDate = observationDates.get(structure.id) ?? null;
       const structureClosures = closuresByStructure.get(structure.id) || [];
-      const range = (startDate: string, endDate: string) => `${formatDateIt(startDate)} → ${formatDateIt(endDate)}`;
 
-      let sdlyReference: number | null = null;
-      let sdly: RowSdly;
-      if (sdlyMode === "production") {
-        const production = resolveProductionSdly({
-          periodStart: start,
-          periodEnd: end,
-          observationDate,
-          currentRows: monthSnapshots,
-          previousRows: lastYearMonthByStructure.get(structure.id) || [],
-          closures: structureClosures,
-        });
-        if (production.status === "no_matured") {
-          sdly = {
-            mode: sdlyMode,
-            actual: null,
-            actualDetail: null,
-            referenceDetail: null,
-            unavailableReason: observationDate
-              ? `snapshot corrente del ${formatDateIt(observationDate)} precedente all’inizio del periodo, nessuna produzione maturata`
-              : null,
-            zeroNote: null,
-          };
-        } else {
-          sdlyReference = production.previous ? production.previous.revenue : null;
-          sdly = {
-            mode: sdlyMode,
-            actual: production.current ? production.current.revenue : null,
-            actualDetail: range(production.currentStart, production.currentEnd),
-            referenceDetail: range(production.previousStart, production.previousEnd),
-            unavailableReason:
-              production.status === "ok"
-                ? null
-                : production.status === "partial"
-                  ? `storico ${selectedYear - 1} incompleto: ${production.daysCovered}/${production.daysExpected} giorni dell’intervallo`
-                  : `storico ${selectedYear - 1} non disponibile per l’intervallo`,
-            zeroNote:
-              production.closedDays > 0
-                ? `Chiusura dichiarata ${selectedYear - 1} valorizzata a 0: ${production.closedDays} giorni.`
-                : null,
-          };
-        }
-      } else {
-        // Senza data di osservazione non c'e' confronto: nessun mese viene
-        // riempito. Altrimenti un mese senza snapshot vale 0 solo se chiuso
-        // per intero da una chiusura dichiarata, mai per sola assenza di dato.
-        const { result: sdlyAsof, closedMonths } = aggregateMonthlyAsofWithClosures(
-          sdlyMonthsInScope.map((m) => sdlyMonthsByStructure.get(structure.id)?.get(m) ?? null),
-          sdlyMonthsInScope,
-          selectedYear - 1,
-          observationDate ? structureClosures : []
-        );
-        sdlyReference = sdlyAsof.agg ? sdlyAsof.agg.revenue : null;
-        sdly = {
-          mode: sdlyMode,
-          actual: monthToDate.revenue,
-          actualDetail: observationDate ? `snapshot del ${formatDateIt(observationDate)}` : null,
-          referenceDetail: observationDate ? `al ${formatDateIt(sdlyDate(observationDate))}` : null,
-          unavailableReason: sdlyAsof.agg
-            ? null
-            : sdlyAsof.monthsCovered > 0
-              ? `storico SDLY incompleto: ${sdlyAsof.monthsCovered}/${sdlyAsof.monthsExpected} mesi`
-              : observationDate
-                ? `nessun OTB ${selectedYear - 1} disponibile al ${formatDateIt(sdlyDate(observationDate))}`
-                : null,
-          zeroNote:
-            closedMonths.length > 0
-              ? `Chiusura stagionale ${selectedYear - 1} valorizzata a 0: ${closedMonths.map((m) => MONTH_LABELS[m - 1]).join(", ")}.`
-              : null,
-        };
-      }
+      // Intero periodo nella fotografia corrente vs intero stesso periodo LY
+      // nella fotografia alla stessa data: un mese LY senza fotografia vale
+      // 0 solo se chiuso per intero da una chiusura dichiarata, altrimenti ND.
+      const sdlyComparison = resolveSdlyAsOfComparison({
+        periodStart: start,
+        periodEnd: end,
+        currentRows: monthSnapshots,
+        observationDate,
+        reference: {
+          kind: "months",
+          rows: sdlyMonthsInScope.map((m) => sdlyMonthsByStructure.get(structure.id)?.get(m) ?? null),
+        },
+        closures: structureClosures,
+      });
+      const sdlyReference = sdlyComparison.reference ? sdlyComparison.reference.revenue : null;
+      const sdly: RowSdly = {
+        actual: monthToDate.revenue,
+        actualDetail: sdlyComparison.actualDetail,
+        referenceDetail: sdlyComparison.referenceDetail,
+        unavailableReason: sdlyComparison.status === "no_current" ? null : sdlyComparison.unavailableReason,
+        zeroNote: sdlyComparison.zeroNote,
+      };
 
       const budgetsForMonth: BudgetRow[] = ["minimo", "realistico", "sfidante"]
         .map((level) => budgetRowsByStructureLevel.get(`${structure.id}::${level}`))
@@ -632,12 +578,9 @@ export default function PerformanceOverviewPage() {
     : null;
   const l4lSdly = portfolioMembership
     ? computeLikeForLike(
-        // SDLY: il valore corrente e' quello pertinente al confronto
-        // (produzione maturata o OTB as-of), non l'OTB dell'intero periodo.
-        l4lInputs(
-          (row) => row.sdlyMonthRevenue,
-          (row) => row.sdly.actual
-        ),
+        // SDLY: stesso valore corrente del confronto LY (OTB dell'intero
+        // periodo), riferimento = fotografia LY alla stessa data.
+        l4lInputs((row) => row.sdlyMonthRevenue),
         portfolioMembership.engagements,
         portfolioMembership.year,
         portfolioMembership.year - 1
@@ -660,34 +603,18 @@ export default function PerformanceOverviewPage() {
   // Testi dei due confronti con l'anno precedente, condivisi da
   // intestazioni, righe struttura e TOTALE METODO: stessa definizione
   // ovunque, declinata sul periodo selezionato (mese o intero anno).
-  const sdlyMode = sdlyModeForPeriod(
-    isWholeYear ? `${selectedYear}-01-01` : `${selectedYear}-${pad(selectedMonth)}-01`,
-    todayString()
-  );
-  const sdlyPeriodFirstDay = isWholeYear
-    ? `1° gennaio ${selectedYear}`
-    : `1° ${MONTH_LABELS[selectedMonth - 1].toLowerCase()} ${selectedYear}`;
-  const sdlyComparison =
-    sdlyMode === "production"
-      ? {
-          // "YTD" solo per l'anno in corso: un anno concluso e' produzione piena.
-          columnLabel: isWholeYear && selectedYear === TODAY_YEAR ? "Produzione YTD vs SDLY" : "Produzione vs SDLY",
-          title: "Produzione maturata vs stesso intervallo dello scorso anno",
-          intro: isWholeYear
-            ? `Confronta la produzione maturata dal ${sdlyPeriodFirstDay} alla data di osservazione con quella maturata nello stesso periodo dell’anno precedente. Per un periodo già concluso il confronto copre l’intero periodo.`
-            : `Confronta la produzione maturata dal ${sdlyPeriodFirstDay} alla data di osservazione con la produzione maturata nello stesso intervallo del ${selectedYear - 1}. Per un periodo già concluso il confronto copre l’intero periodo.`,
-          actualLabel: `Produzione maturata ${selectedYear}`,
-          referenceLabel: `Stesso intervallo ${selectedYear - 1}`,
-          cellReferenceLabel: `vs stesso intervallo ${selectedYear - 1}`,
-        }
-      : {
-          columnLabel: "OTB vs SDLY",
-          title: "OTB vs stesso momento dello scorso anno",
-          intro: `Confronta l’OTB di ${periodLabel} osservato alla data dello snapshot corrente con l’OTB di ${lastYearPeriodLabel} osservato alla stessa data dell’anno precedente.`,
-          actualLabel: `OTB ${periodLabel} alla data osservata`,
-          referenceLabel: `OTB ${lastYearPeriodLabel} alla stessa data`,
-          cellReferenceLabel: `vs OTB ${lastYearPeriodLabel} alla stessa data`,
-        };
+  const sdlyComparison = {
+    columnLabel: "OTB vs SDLY",
+    title: "OTB vs stessa fotografia dello scorso anno",
+    intro: `Confronta ${
+      isWholeYear ? `l’intero anno ${selectedYear}` : `l’intero ${periodLabel}`
+    } nella fotografia corrente di ciascuna struttura con ${
+      isWholeYear ? `l’intero anno ${selectedYear - 1}` : `l’intero ${lastYearPeriodLabel}`
+    } nella fotografia disponibile alla stessa data dell’anno precedente (ultima estrazione non successiva a quella data).`,
+    actualLabel: `OTB ${periodLabel}`,
+    referenceLabel: `OTB ${lastYearPeriodLabel} alla stessa data`,
+    cellReferenceLabel: `vs ${lastYearPeriodLabel} alla stessa data`,
+  };
   const consuntivoComparison = {
     title: `OTB ${periodLabel} completo vs consuntivo finale ${lastYearPeriodLabel}`,
     intro: isWholeYear
@@ -732,7 +659,7 @@ export default function PerformanceOverviewPage() {
           }, new Map<string, string[]>())
         ).map(([interval, names], _, all) => (
           <p key={interval} className="mt-1">
-            Intervallo confrontato{all.length > 1 ? ` (${names.join(", ")})` : ""}: {interval}
+            Fotografie confrontate{all.length > 1 ? ` (${names.join(", ")})` : ""}: {interval}
           </p>
         ))}
       {/* Escluse raggruppate per motivo: il tooltip cresce per motivo, non
@@ -787,7 +714,7 @@ export default function PerformanceOverviewPage() {
       <PageHeader
         eyebrow="Performance"
         title="Dashboard Performance"
-        description="Stato commerciale mensile di tutte le strutture, con ritmo verso il budget del mese e confronto SDLY a parità di anticipo. Seleziona un mese diverso per rivedere periodi passati o futuri."
+        description="Stato commerciale mensile di tutte le strutture, con ritmo verso il budget del mese e confronto SDLY: intero periodo nella fotografia corrente contro lo stesso periodo dell’anno precedente nella fotografia alla stessa data. Seleziona un mese diverso per rivedere periodi passati o futuri."
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
           <Link href="/performance/import" className="text-sm font-medium text-[#017A92] hover:underline">
@@ -912,7 +839,7 @@ export default function PerformanceOverviewPage() {
                   <th className="pb-3 pr-4">
                     {sdlyComparison.columnLabel}
                     <InfoTooltip
-                      text={`${sdlyComparison.intro} La data di osservazione è quella dell’ultimo snapshot di ciascuna struttura. 'ND' quando lo storico dell’anno precedente non copre l’intervallo confrontato (un giorno senza dati vale 0 solo se coperto da una chiusura registrata nel Budget). Passa il mouse (o tocca) sulla riga per i valori assoluti.`}
+                      text={`${sdlyComparison.intro} La data di osservazione è l’ultima estrazione di ciascuna struttura, unica per ogni periodo. 'ND' quando non esiste una fotografia dell’anno precedente a quella data, anche se il consuntivo finale esiste (un mese senza fotografia vale 0 solo se coperto per intero da una chiusura registrata nel Budget). Passa il mouse (o tocca) sulla riga per i valori assoluti e le date delle fotografie.`}
                     />
                   </th>
                   <th className="pb-3 pr-4">

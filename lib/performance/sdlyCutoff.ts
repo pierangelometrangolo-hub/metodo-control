@@ -1,5 +1,3 @@
-import { sdlyDate } from "../performanceMetrics";
-
 // ============ Cutoff SDLY per struttura ============
 //
 // "Stessa data di osservazione": l'OTB corrente di una struttura e' quello
@@ -7,6 +5,15 @@ import { sdlyDate } from "../performanceMetrics";
 // precedente a oggi. Il cutoff SDLY e' quindi la extraction_date piu'
 // recente tra le righe che compongono il valore mostrato, meno un anno -
 // non genericamente "oggi meno un anno".
+
+// Stessa data dell'anno precedente, usata come data target della
+// fotografia LY. Il 29/02 diventa 28/02 (mai 01/03): la fotografia LY non
+// deve poter includere estrazioni successive alla stessa data relativa.
+export function sdlyTargetDate(date: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(y - 1, m, 0)).getUTCDate();
+  return `${y - 1}-${String(m).padStart(2, "0")}-${String(Math.min(d, lastDay)).padStart(2, "0")}`;
+}
 
 export type ExtractionRow = {
   structure_id: string;
@@ -32,7 +39,7 @@ export function observationDateByStructure(rows: ExtractionRow[]): Map<string, s
 export function groupStructuresBySdlyCutoff(observationDates: Map<string, string>): Map<string, string[]> {
   const groups = new Map<string, string[]>();
   observationDates.forEach((observationDate, structureId) => {
-    const cutoff = sdlyDate(observationDate);
+    const cutoff = sdlyTargetDate(observationDate);
     groups.set(cutoff, [...(groups.get(cutoff) || []), structureId]);
   });
   return groups;
@@ -48,5 +55,5 @@ export function sdlyCutoffFromRows(rows: { extraction_date: string | null }[]): 
   const observationDate =
     observationDateByStructure(rows.map((r) => ({ structure_id: "", extraction_date: r.extraction_date }))).get("") ??
     null;
-  return { observationDate, cutoff: observationDate ? sdlyDate(observationDate) : null };
+  return { observationDate, cutoff: observationDate ? sdlyTargetDate(observationDate) : null };
 }

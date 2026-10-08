@@ -30,12 +30,21 @@ import {
   PeriodBudget,
   periodKind,
 } from "@/lib/performance/periodBudget";
-import { aggregateMonthlyAsofWithClosures, ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
-import { sdlyCutoffFromRows } from "@/lib/performance/sdlyCutoff";
-import { DailyRow, resolveProductionSdly, SdlyMode, sdlyModeForPeriod } from "@/lib/performance/sdlyComparison";
+import { ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
+import { sdlyTargetDate } from "@/lib/performance/sdlyCutoff";
+import {
+  AsofDailyRow,
+  DailyRow,
+  resolveSdlyAsOfComparison,
+  sdlyAsofPlan,
+  SdlyAsOfComparison,
+  sdlyPhotoSentence,
+  SdlyReferenceSnapshot,
+} from "@/lib/performance/sdlyComparison";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import { MonthlyPerformanceTable } from "@/components/performance/MonthlyPerformanceTable";
 import {
+  asofKey,
   buildMonthlyPerformance,
   buildMonthlyPerformanceTotal,
   monthlyAsofRequests,
@@ -312,7 +321,7 @@ const EMPTY_KPI_AGG: KpiAgg = {
 
 const COMPARISON_TAB_OPTIONS: { value: ComparisonTab; label: string }[] = [
   { value: "sdly", label: "vs SDLY" },
-  { value: "consuntivo", label: "vs Consuntivo anno prec." },
+  { value: "consuntivo", label: "vs Consuntivo LY" },
 ];
 
 const DEFAULT_MONTH = monthRange(todayString());
@@ -572,36 +581,12 @@ export default function PerformanceStructureDrilldownPage({
   const [channelCommissionRatesLy, setChannelCommissionRatesLy] = useState<Map<string, ChannelCommissionSummary>>(
     new Map()
   );
-  // SDLY anno pieno: mesi dell'anno precedente coperti al cutoff (null per
-  // periodi non annuali), per distinguere copertura parziale da nessun dato.
-  const [sdlyAnnualCoverage, setSdlyAnnualCoverage] = useState<{
-    covered: number;
-    expected: number;
-    // Mesi senza snapshot valorizzati a 0 per chiusura dichiarata.
-    closedMonths: number[];
-  } | null>(null);
-  // Tab "SDLY" del periodo caricato (stessa regola della Vista d'insieme,
-  // lib/performance/sdlyComparison): produzione maturata fino alla data di
-  // osservazione per i periodi gia' iniziati - in quel caso currentAgg e'
-  // il lato corrente del confronto, limitato ai giorni maturati - oppure
-  // OTB as-of dell'intero periodo per i periodi interamente futuri.
-  const [sdlyInfo, setSdlyInfo] = useState<{
-    mode: SdlyMode;
-    currentAgg: KpiAgg | null;
-    actualDetail: string | null;
-    referenceDetail: string | null;
-    unavailableReason: string | null;
-    zeroNote: string | null;
-  }>({
-    mode: "production",
-    currentAgg: null,
-    actualDetail: null,
-    referenceDetail: null,
-    unavailableReason: null,
-    zeroNote: null,
-  });
-  // Cutoff SDLY effettivamente usato per il periodo caricato.
-  const [sdlyCutoffUsed, setSdlyCutoffUsed] = useState(sdlyDate(todayString()));
+  // Tab "SDLY" del periodo caricato: intero periodo nella fotografia
+  // corrente vs intero stesso periodo dell'anno precedente nella fotografia
+  // alla stessa data (lib/performance/sdlyComparison, unica semantica
+  // condivisa con Vista d'insieme e Performance mensile). null = non ancora
+  // caricato.
+  const [sdlyInfo, setSdlyInfo] = useState<SdlyAsOfComparison | null>(null);
   const [showNetChannelRevenue, setShowNetChannelRevenue] = useState(false);
   // Indipendente da "Mostra netto" - entrambi attivabili insieme, mai
   // gated da canManage (channel_revenue non ha la stessa RLS rank>=2 di
@@ -641,7 +626,8 @@ export default function PerformanceStructureDrilldownPage({
     year: number;
     currentRows: MonthlySnapshotRow[];
     previousRows: MonthlySnapshotRow[];
-    asofByMonth: Map<number, MonthAsofRow | null>;
+    observationDate: string | null;
+    asof: Map<string, MonthAsofRow | null>;
   } | null>(null);
   const [monthlyBudgetRows, setMonthlyBudgetRows] = useState<MonthlyBudgetRow[]>([]);
   const [structureClosures, setStructureClosures] = useState<ClosureRange[]>([]);
@@ -771,77 +757,76 @@ export default function PerformanceStructureDrilldownPage({
     const snapshotColumns =
       "stay_date, extraction_date, revenue_total, rooms_sold, rooms_available, arrivals, presences, status";
 
-    // Le righe del periodo corrente si leggono per prime: la loro
-    // extraction_date piu' recente e' la data di osservazione dell'OTB
-    // mostrato, da cui dipende il cutoff SDLY.
-    const periodRes = await supabase
-      .from("v_snapshot_latest")
-      .select(snapshotColumns)
-      .eq("structure_id", structureId)
-      .gte("stay_date", periodStart)
-      .lte("stay_date", periodEnd);
+    // Data di osservazione UNICA dell'analisi: l'ultima estrazione della
+    // struttura (stessa funzione di "Dati aggiornati al"), non la data
+    // delle sole righe del periodo - ogni periodo e ogni mese della stessa
+    // struttura si confrontano con la stessa data target dell'anno prima.
+    const [periodRes, observationRes] = await Promise.all([
+      supabase
+        .from("v_snapshot_latest")
+        .select(snapshotColumns)
+        .eq("structure_id", structureId)
+        .gte("stay_date", periodStart)
+        .lte("stay_date", periodEnd),
+      supabase.rpc("fn_latest_extraction_per_structure", { p_structure_ids: [structureId] }),
+    ]);
+    if (observationRes.error) setLoadError(observationRes.error.message);
+    // Senza data di osservazione nessun confronto SDLY (ND), mai "oggi".
+    const sdlyObservationDate: string | null =
+      (observationRes.data as { extraction_date: string | null }[] | null)?.[0]?.extraction_date ?? null;
 
-    // Tab "SDLY": OTB del periodo di un anno fa cosi' come si presentava
-    // alla stessa data di osservazione dell'OTB corrente (snapshot corrente
-    // della struttura meno un anno, non genericamente oggi meno un anno),
-    // non il consuntivo finale - stessa regola della Vista d'insieme
-    // (sdlyCutoffFromRows). Senza righe nel periodo corrente non esiste una
-    // data di osservazione: si ricade su oggi meno un anno. Per
-    // un mese pieno usa la funzione mensile (unica fonte per lo storico
-    // 2025, caricato a granularita' mensile); per un periodo custom usa la
-    // funzione giornaliera - che per periodi 2025 non ancora coperti da
-    // performance_daily_snapshot torna ND, onestamente, invece di un dato
-    // approssimato.
-    // Anno pieno: stessa fonte del mese pieno (fn_month_snapshot_asof),
-    // ripetuta sui 12 mesi dell'anno precedente allo stesso cutoff e
-    // aggregata in aggregateMonthlyAsof - lo storico 2025 e' caricato a
-    // granularita' mensile, fn_snapshot_asof (giornaliera) tornerebbe ND.
-    // Intervallo custom: invariato, fn_snapshot_asof.
-    //
-    // Le RPC as-of servono solo per un periodo interamente futuro (OTB
-    // as-of). Per un periodo gia' iniziato lo SDLY e' produzione maturata:
-    // righe giornaliere del periodo e dello stesso periodo dell'anno
-    // precedente, gia' caricate qui sotto, nessuna RPC.
-    const sdlyObservation = sdlyCutoffFromRows(
-      (periodRes.data as unknown as { extraction_date: string | null }[] | null) || []
-    );
-    const sdlyCutoff = sdlyObservation.cutoff ?? sdlyDate(todayString());
-    const sdlyMode = sdlyModeForPeriod(periodStart, todayString());
-    const sdlyIsFullMonth = isFullMonth(periodStart, periodEnd);
+    // Tab "SDLY": intero periodo nella fotografia corrente contro l'intero
+    // stesso periodo dell'anno precedente nella fotografia disponibile alla
+    // stessa data relativa (data di osservazione - 1 anno, ultima estrazione
+    // non successiva) - per QUALSIASI periodo: passato, in corso o futuro.
+    // Periodo fatto
+    // di mesi interi (mese, anno, piu' mesi): fn_month_snapshot_asof per
+    // ciascun mese, unica fonte per lo storico caricato a granularita'
+    // mensile; ogni altro intervallo: fn_snapshot_asof, che dove lo storico
+    // giornaliero non ha fotografie a quella data torna ND, onestamente.
+    const sdlyTarget = sdlyObservationDate ? sdlyTargetDate(sdlyObservationDate) : null;
+    const sdlyPlan = sdlyAsofPlan(periodStart, periodEnd);
     const sdlyIsFullYear = periodKind(periodStart, periodEnd) === "year";
-    const sdlyAsofPromise = sdlyMode === "production" || sdlyIsFullYear
-      ? Promise.resolve({ data: null, error: null })
-      : sdlyIsFullMonth
-        ? supabase.rpc("fn_month_snapshot_asof", {
-            p_structure_ids: [structureId],
-            p_period_year: Number(sdlyStart.slice(0, 4)),
-            p_period_month: Number(sdlyStart.slice(5, 7)),
-            p_cutoff_date: sdlyCutoff,
-          })
-        : supabase.rpc("fn_snapshot_asof", {
-            p_structure_ids: [structureId],
-            p_stay_date_start: sdlyStart,
-            p_stay_date_end: sdlyEnd,
-            p_cutoff_date: sdlyCutoff,
-          });
-    const sdlyAnnualPromise = sdlyMode === "otb_asof" && sdlyIsFullYear
-      ? Promise.all(
-          Array.from({ length: 12 }, (_, i) =>
+    const sdlyReferencePromise = (async (): Promise<{
+      reference: SdlyReferenceSnapshot | null;
+      error: string | null;
+    }> => {
+      if (!sdlyTarget) return { reference: null, error: null };
+      if (sdlyPlan.kind === "months") {
+        const results = await Promise.all(
+          sdlyPlan.months.map((m) =>
             supabase.rpc("fn_month_snapshot_asof", {
               p_structure_ids: [structureId],
-              p_period_year: Number(sdlyStart.slice(0, 4)),
-              p_period_month: i + 1,
-              p_cutoff_date: sdlyCutoff,
+              p_period_year: m.year,
+              p_period_month: m.month,
+              p_cutoff_date: sdlyTarget,
             })
           )
-        )
-      : Promise.resolve(null);
+        );
+        return {
+          reference: {
+            kind: "months",
+            rows: results.map((res) => ((res.data as MonthAsofRow[] | null) || [])[0] ?? null),
+          },
+          error: results.find((res) => res.error)?.error?.message ?? null,
+        };
+      }
+      const res = await supabase.rpc("fn_snapshot_asof", {
+        p_structure_ids: [structureId],
+        p_stay_date_start: sdlyPlan.lyStart,
+        p_stay_date_end: sdlyPlan.lyEnd,
+        p_cutoff_date: sdlyTarget,
+      });
+      return {
+        reference: { kind: "days", rows: (res.data as AsofDailyRow[] | null) || [] },
+        error: res.error?.message ?? null,
+      };
+    })();
 
     const [
       closuresRes,
       sdlyRes,
-      sdlyAsofRes,
-      sdlyAnnualRes,
+      sdlyReferenceRes,
       budgetsRes,
       channelRes,
       channelSdlyRes,
@@ -860,8 +845,7 @@ export default function PerformanceStructureDrilldownPage({
         .eq("structure_id", structureId)
         .gte("stay_date", sdlyStart)
         .lte("stay_date", sdlyEnd),
-      sdlyAsofPromise,
-      sdlyAnnualPromise,
+      sdlyReferencePromise,
       supabase
         .from("v_budgets_current")
         .select(
@@ -934,10 +918,7 @@ export default function PerformanceStructureDrilldownPage({
     if (periodRes.error) setLoadError(periodRes.error.message);
     if (closuresRes.error) setLoadError(closuresRes.error.message);
     if (sdlyRes.error) setLoadError(sdlyRes.error.message);
-    if (sdlyAsofRes.error) setLoadError(sdlyAsofRes.error.message);
-    sdlyAnnualRes?.forEach((res) => {
-      if (res.error) setLoadError(res.error.message);
-    });
+    if (sdlyReferenceRes.error) setLoadError(sdlyReferenceRes.error);
     if (budgetsRes.error) setLoadError(budgetsRes.error.message);
     if (channelRes.error) setLoadError(channelRes.error.message);
     if (channelSdlyRes.error) setLoadError(channelSdlyRes.error.message);
@@ -954,9 +935,17 @@ export default function PerformanceStructureDrilldownPage({
     // Anno pieno: le righe appena lette sono gia' quelle della Performance
     // mensile, nessuna seconda lettura di v_snapshot_latest.
     if (sdlyIsFullYear && !periodRes.error && !sdlyRes.error) {
+      // Stesso cutoff annuale: le 12 fotografie LY appena lette servono
+      // anche alla riga Totale anno (e alle righe mese con la stessa data).
+      const annualAsof = new Map<string, MonthAsofRow | null>();
+      if (sdlyTarget && sdlyReferenceRes.reference?.kind === "months" && !sdlyReferenceRes.error) {
+        sdlyReferenceRes.reference.rows.forEach((row, i) => annualAsof.set(asofKey(i + 1, sdlyTarget), row ?? null));
+      }
       void loadMonthlyPerformance(Number(periodStart.slice(0, 4)), {
         currentRows: (periodRes.data as unknown as MonthlySnapshotRow[] | null) || [],
         previousRows: (sdlyRes.data as unknown as MonthlySnapshotRow[] | null) || [],
+        observationDate: sdlyObservationDate,
+        asof: annualAsof,
       });
     }
     setPeriodBudgetView({
@@ -1000,106 +989,16 @@ export default function PerformanceStructureDrilldownPage({
       )
     );
 
-    setSdlyCutoffUsed(sdlyCutoff);
-    setSdlyAnnualCoverage(null);
-    const rangeLabel = (startDate: string, endDate: string) => `${formatDateIt(startDate)} → ${formatDateIt(endDate)}`;
-    if (sdlyMode === "production") {
-      const production = resolveProductionSdly({
-        periodStart,
-        periodEnd,
-        observationDate: sdlyObservation.observationDate,
-        currentRows: (periodRes.data as unknown as DailyRow[] | null) || [],
-        previousRows: (sdlyRes.data as unknown as DailyRow[] | null) || [],
-        closures: (closuresRes.data as ClosureRange[] | null) || [],
-      });
-      const previousYear = sdlyStart.slice(0, 4);
-      if (production.status === "no_matured") {
-        setSdlyAsofAgg(EMPTY_KPI_AGG);
-        setSdlyInfo({
-          mode: sdlyMode,
-          currentAgg: EMPTY_KPI_AGG,
-          actualDetail: null,
-          referenceDetail: null,
-          unavailableReason: sdlyObservation.observationDate
-            ? `snapshot corrente del ${formatDateIt(sdlyObservation.observationDate)} precedente all’inizio del periodo, nessuna produzione maturata`
-            : "nessun dato nel periodo selezionato",
-          zeroNote: null,
-        });
-      } else {
-        setSdlyAsofAgg(production.previous ?? EMPTY_KPI_AGG);
-        setSdlyInfo({
-          mode: sdlyMode,
-          currentAgg: production.current ?? EMPTY_KPI_AGG,
-          actualDetail: rangeLabel(production.currentStart, production.currentEnd),
-          referenceDetail: rangeLabel(production.previousStart, production.previousEnd),
-          unavailableReason:
-            production.status === "ok"
-              ? null
-              : production.status === "partial"
-                ? `storico ${previousYear} incompleto: ${production.daysCovered}/${production.daysExpected} giorni dell’intervallo`
-                : `storico ${previousYear} non disponibile per l’intervallo`,
-          zeroNote:
-            production.closedDays > 0
-              ? `Chiusura dichiarata ${previousYear} valorizzata a 0: ${production.closedDays} giorni.`
-              : null,
-        });
-      }
-    } else if (sdlyIsFullYear) {
-      // Stessa regola della Vista d'insieme: mese con dato reale -> dato
-      // reale; mese senza dato ma chiuso per intero da una chiusura
-      // dichiarata -> 0; altrimenti mancante e nessun totale annuale.
-      const { result: annual, closedMonths } = aggregateMonthlyAsofWithClosures(
-        (sdlyAnnualRes ?? []).map((res) => ((res.data as MonthAsofRow[] | null) || [])[0] ?? null),
-        Array.from({ length: 12 }, (_, i) => i + 1),
-        Number(sdlyStart.slice(0, 4)),
-        (closuresRes.data as ClosureRange[] | null) || []
-      );
-      setSdlyAnnualCoverage({ covered: annual.monthsCovered, expected: annual.monthsExpected, closedMonths });
-      setSdlyAsofAgg(annual.agg ?? EMPTY_KPI_AGG);
-    }
-    if (sdlyMode === "otb_asof") {
-      setSdlyInfo({
-        mode: sdlyMode,
-        currentAgg: null,
-        actualDetail: sdlyObservation.observationDate
-          ? `snapshot del ${formatDateIt(sdlyObservation.observationDate)}`
-          : null,
-        referenceDetail: `al ${formatDateIt(sdlyCutoff)}`,
-        unavailableReason: null,
-        zeroNote: null,
-      });
-    }
-    if (sdlyMode === "production" || sdlyIsFullYear) {
-      // Produzione maturata e OTB as-of annuale: gia' risolti sopra.
-    } else if (sdlyIsFullMonth) {
-      const row = ((sdlyAsofRes.data as
-        | { revenue_total: number; rooms_sold: number; rooms_available: number; arrivals: number; presences: number }[]
-        | null) || [])[0];
-      setSdlyAsofAgg(
-        row
-          ? {
-              revenue: Number(row.revenue_total),
-              roomsSold: Number(row.rooms_sold),
-              roomsAvailable: Number(row.rooms_available),
-              arrivals: Number(row.arrivals),
-              presences: Number(row.presences),
-            }
-          : EMPTY_KPI_AGG
-      );
-    } else {
-      const rowsWithStatus = ((sdlyAsofRes.data as SnapshotRow[] | null) || []).map((r) => ({
-        ...r,
-        status: "otb" as const,
-      }));
-      const agg = sumSnapshots(rowsWithStatus);
-      setSdlyAsofAgg({
-        revenue: agg.revenue,
-        roomsSold: agg.roomsSold,
-        roomsAvailable: agg.roomsAvailable,
-        arrivals: agg.arrivals,
-        presences: agg.presences,
-      });
-    }
+    const sdly = resolveSdlyAsOfComparison({
+      periodStart,
+      periodEnd,
+      currentRows: (periodRes.data as unknown as DailyRow[] | null) || [],
+      observationDate: sdlyObservationDate,
+      reference: sdlyReferenceRes.reference,
+      closures: (closuresRes.data as ClosureRange[] | null) || [],
+    });
+    setSdlyAsofAgg(sdly.reference ?? EMPTY_KPI_AGG);
+    setSdlyInfo(sdly);
 
     const channelTotals = new Map<string, number>();
     (channelRes.data || []).forEach((r) => {
@@ -1145,16 +1044,24 @@ export default function PerformanceStructureDrilldownPage({
 
   // Massimo 2 letture annuali di v_snapshot_latest (<= 366 righe ciascuna
   // per una sola struttura: sotto il limite PostgREST di 1.000, nessuna
-  // paginazione necessaria) + una fn_month_snapshot_asof per ciascun mese
-  // interamente futuro con dato. Mai il pattern 12+12 di loadYearlyDetail.
+  // paginazione necessaria) + le 12 fotografie LY dei mesi, tutte alla
+  // stessa data target (fn_month_snapshot_asof, vedi monthlyAsofRequests),
+  // escluse quelle gia' lette da loadMetrics in modalita' Anno.
   async function loadMonthlyPerformance(
     year: number,
-    preloaded?: { currentRows: MonthlySnapshotRow[]; previousRows: MonthlySnapshotRow[] }
+    preloaded?: {
+      currentRows: MonthlySnapshotRow[];
+      previousRows: MonthlySnapshotRow[];
+      observationDate: string | null;
+      asof: Map<string, MonthAsofRow | null>;
+    }
   ) {
     monthlyYearRef.current = year;
 
     let currentRows = preloaded?.currentRows;
     let previousRows = preloaded?.previousRows;
+    // Data di osservazione unica della struttura, la stessa di loadMetrics.
+    let observationDate = preloaded?.observationDate ?? null;
 
     if (!currentRows || !previousRows) {
       const columns = "stay_date, extraction_date, revenue_total, rooms_sold, rooms_available, arrivals, presences";
@@ -1165,26 +1072,35 @@ export default function PerformanceStructureDrilldownPage({
           .eq("structure_id", structureId)
           .gte("stay_date", `${y}-01-01`)
           .lte("stay_date", `${y}-12-31`);
-      const [currentRes, previousRes] = await Promise.all([yearRows(year), yearRows(year - 1)]);
+      const [currentRes, previousRes, observationRes] = await Promise.all([
+        yearRows(year),
+        yearRows(year - 1),
+        supabase.rpc("fn_latest_extraction_per_structure", { p_structure_ids: [structureId] }),
+      ]);
 
-      if (currentRes.error || previousRes.error) {
-        setLoadError((currentRes.error || previousRes.error)!.message);
+      if (currentRes.error || previousRes.error || observationRes.error) {
+        setLoadError((currentRes.error || previousRes.error || observationRes.error)!.message);
         return;
       }
+      observationDate =
+        (observationRes.data as { extraction_date: string | null }[] | null)?.[0]?.extraction_date ?? null;
       currentRows = (currentRes.data as unknown as MonthlySnapshotRow[] | null) || [];
       previousRows = (previousRes.data as unknown as MonthlySnapshotRow[] | null) || [];
     }
 
+    const asof = new Map(preloaded?.asof ?? []);
     const asofResults = await Promise.all(
-      monthlyAsofRequests(year, todayString(), currentRows).map(async ({ month, cutoff }) => {
-        const res = await supabase.rpc("fn_month_snapshot_asof", {
-          p_structure_ids: [structureId],
-          p_period_year: year - 1,
-          p_period_month: month,
-          p_cutoff_date: cutoff,
-        });
-        return { month, row: ((res.data as MonthAsofRow[] | null) || [])[0] ?? null, error: res.error };
-      })
+      monthlyAsofRequests(observationDate)
+        .filter(({ month, cutoff }) => !asof.has(asofKey(month, cutoff)))
+        .map(async ({ month, cutoff }) => {
+          const res = await supabase.rpc("fn_month_snapshot_asof", {
+            p_structure_ids: [structureId],
+            p_period_year: year - 1,
+            p_period_month: month,
+            p_cutoff_date: cutoff,
+          });
+          return { month, cutoff, row: ((res.data as MonthAsofRow[] | null) || [])[0] ?? null, error: res.error };
+        })
     );
 
     const asofError = asofResults.find((r) => r.error)?.error;
@@ -1194,12 +1110,8 @@ export default function PerformanceStructureDrilldownPage({
     }
     if (monthlyYearRef.current !== year) return;
 
-    setMonthlyData({
-      year,
-      currentRows,
-      previousRows,
-      asofByMonth: new Map(asofResults.map((r) => [r.month, r.row])),
-    });
+    asofResults.forEach((r) => asof.set(asofKey(r.month, r.cutoff), r.row));
+    setMonthlyData({ year, currentRows, previousRows, observationDate, asof });
   }
 
   useEffect(() => {
@@ -1362,17 +1274,31 @@ export default function PerformanceStructureDrilldownPage({
   // scambiate tra loro.
   const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
   const comparisonAgg: KpiAgg = comparisonTab === "sdly" ? sdlyAsofAgg : sdlyAgg;
-  // Lato corrente delle card KPI: nel tab SDLY di un periodo gia' iniziato
-  // e' la sola produzione maturata (stesso intervallo del riferimento);
-  // negli altri casi resta l'intero periodo selezionato.
-  // Intervallo realmente confrontato, mostrato sulle card solo quando esiste
-  // (tab SDLY di un periodo gia' iniziato).
+  // Tab SDLY: sulle card la data target della fotografia LY (il lato
+  // corrente e' sempre l'intero periodo nella fotografia corrente).
   const kpiComparisonNote =
-    comparisonTab === "sdly" && sdlyInfo.mode === "production" && sdlyInfo.actualDetail
-      ? sdlyInfo.actualDetail
+    comparisonTab === "sdly" && sdlyInfo?.status === "ok" && sdlyInfo.targetDate
+      ? `as-of ${formatDateIt(sdlyInfo.targetDate)}`
       : undefined;
-  const kpiCurrentAgg: KpiAgg =
-    comparisonTab === "sdly" && sdlyInfo.mode === "production" && sdlyInfo.currentAgg ? sdlyInfo.currentAgg : periodAgg;
+  // Testo di contesto sopra le card: dice quale base temporale e quale lato
+  // LY sta leggendo l'utente nel confronto attivo. Solo copy, nessun calcolo.
+  const previousYearLabel = sdlyDate(periodStart).slice(0, 4);
+  const sdlyScope =
+    periodKind(periodStart, periodEnd) === "year" ? "year" : isFullMonth(periodStart, periodEnd) ? "month" : "period";
+  const kpiContext =
+    comparisonTab === "consuntivo"
+      ? periodKind(periodStart, periodEnd) === "year"
+        ? `Intero anno · confronto con il consuntivo finale ${previousYearLabel}`
+        : `Intero periodo · confronto con il consuntivo finale di ${formatPeriodLabel(
+            sdlyDate(periodStart),
+            sdlyDate(periodEnd)
+          )}`
+      : sdlyInfo?.observationDate
+        ? `OTB vs SDLY · ${sdlyPhotoSentence(sdlyInfo, sdlyScope)}`
+        : "OTB vs SDLY · intero periodo nella fotografia corrente vs stesso periodo dell’anno precedente nella fotografia alla stessa data.";
+  // Lato corrente delle card KPI: sempre l'intero periodo selezionato nella
+  // fotografia corrente, per entrambi i confronti.
+  const kpiCurrentAgg: KpiAgg = periodAgg;
   const directShareCurrent = useMemo(() => directShareOf(channelRevenue), [channelRevenue]);
   const directShareSdly = useMemo(() => directShareOf(channelRevenueSdly), [channelRevenueSdly]);
 
@@ -1399,7 +1325,8 @@ export default function PerformanceStructureDrilldownPage({
       previousRows: monthlyData.previousRows,
       budgets: monthlyBudgetRows,
       closures: structureClosures,
-      asofByMonth: monthlyData.asofByMonth,
+      observationDate: monthlyData.observationDate,
+      asof: monthlyData.asof,
     };
     const rows = buildMonthlyPerformance(input);
     return { rows, total: buildMonthlyPerformanceTotal(input, rows) };
@@ -1457,9 +1384,17 @@ export default function PerformanceStructureDrilldownPage({
             </span>
           }
         >
-          Confronto vs stesso periodo anno precedente — SDLY (a parità di anticipo) o Consuntivo finale, a scelta — e
-          periodo selezionato vs budget. &apos;ND&apos; indica che non esiste ancora un dato importato — mai un valore pari a
-          zero.
+          <span className="block">
+            <span className="font-semibold">SDLY.</span> Confronta l’intero periodo nella fotografia corrente con lo
+            stesso periodo dell’anno precedente nella fotografia disponibile alla stessa data dell’anno precedente
+            (ultima estrazione non successiva a quella data). Vale per ogni periodo: passato, in corso o futuro. ND se
+            quella fotografia non esiste.
+          </span>
+          <span className="mt-1 block">
+            <span className="font-semibold">Consuntivo LY.</span> Confronta l’intero periodo corrente con il risultato
+            finale dello stesso periodo dell’anno precedente.
+          </span>
+          <span className="mt-1 block">ND indica dato non disponibile, mai zero.</span>
         </CellTooltip>
         <p className="text-[12px] text-mc-text-secondary">
           Dati aggiornati al{" "}
@@ -1619,11 +1554,7 @@ export default function PerformanceStructureDrilldownPage({
               <div>
                 <h2 className="text-[16px] font-semibold leading-tight text-mc-text">{periodLabel}</h2>
                 <p className="mt-0.5 text-[12px] leading-4 text-mc-text-secondary">
-                  {isSingleDay
-                    ? periodAgg.daysWithData > 0
-                      ? `Dato importato per questo giorno · confronto con ${sdlyLabel}`
-                      : `Nessun dato importato per questo giorno · confronto con ${sdlyLabel}`
-                    : `Somma di ${periodAgg.daysWithData} giorni con dati nel periodo · confronto con ${sdlyLabel}`}
+                  {kpiContext}
                 </p>
               </div>
               <AppSegmentedControl
@@ -1647,58 +1578,31 @@ export default function PerformanceStructureDrilldownPage({
                   </p>
                 )}
 
-                {comparisonTab === "sdly" && (
+                {comparisonTab === "sdly" && sdlyInfo?.zeroNote && (
+                  <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">{sdlyInfo.zeroNote}</p>
+                )}
+
+                {comparisonTab === "sdly" && sdlyInfo?.status === "ok" && sdlyInfo.referenceExtraction && (
                   <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
-                    {sdlyInfo.mode === "production"
-                      ? `Produzione vs SDLY: produzione maturata${
-                          sdlyInfo.actualDetail ? ` ${sdlyInfo.actualDetail}` : ""
-                        } confrontata con lo stesso intervallo dell’anno precedente${
-                          sdlyInfo.referenceDetail ? ` (${sdlyInfo.referenceDetail})` : ""
-                        }. La parte futura del periodo non entra nel confronto.`
-                      : `OTB vs SDLY: OTB del periodo osservato alla data corrente${
-                          sdlyInfo.actualDetail ? ` (${sdlyInfo.actualDetail})` : ""
-                        } confrontato con l’OTB dello stesso periodo osservato alla stessa data dell’anno precedente${
-                          sdlyInfo.referenceDetail ? ` (${sdlyInfo.referenceDetail})` : ""
-                        }.`}
-                    {sdlyInfo.zeroNote ? ` ${sdlyInfo.zeroNote}` : ""}
+                    Fotografia {previousYearLabel} usata:{" "}
+                    {sdlyInfo.referenceExtraction.from === sdlyInfo.referenceExtraction.to
+                      ? `estrazione del ${formatDateIt(sdlyInfo.referenceExtraction.to)}`
+                      : `estrazioni dal ${formatDateIt(sdlyInfo.referenceExtraction.from)} al ${formatDateIt(
+                          sdlyInfo.referenceExtraction.to
+                        )}`}
+                    .
                   </p>
                 )}
 
-                {comparisonTab === "sdly" &&
-                  sdlyInfo.mode === "production" &&
-                  comparisonAgg.revenue === null &&
-                  comparisonAgg.roomsSold === null && (
-                    <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
-                      {ND} — confronto non disponibile
-                      {sdlyInfo.unavailableReason ? `: ${sdlyInfo.unavailableReason}` : ""}. Un giorno senza dati vale 0
-                      solo se coperto da una chiusura registrata nel Budget.
-                    </p>
-                  )}
-
-                {comparisonTab === "sdly" &&
-                  sdlyInfo.mode === "otb_asof" &&
-                  comparisonAgg.revenue === null &&
-                  comparisonAgg.roomsSold === null && (
-                    <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
-                      {sdlyAnnualCoverage && sdlyAnnualCoverage.covered > 0
-                        ? `${ND} — copertura parziale per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
-                            sdlyCutoffUsed
-                          )}): ${sdlyAnnualCoverage.covered}/${sdlyAnnualCoverage.expected} mesi disponibili, nessun totale annuale mostrato. Un mese senza dati vale 0 solo se coperto per intero da una chiusura registrata nel Budget.`
-                        : `${ND} — nessun dato disponibile per ${sdlyLabel} al cutoff a parità di anticipo (${formatDateIt(
-                            sdlyCutoffUsed
-                          )}).`}
-                    </p>
-                  )}
-
-                {comparisonTab === "sdly" &&
-                  comparisonAgg.revenue !== null &&
-                  sdlyAnnualCoverage &&
-                  sdlyAnnualCoverage.closedMonths.length > 0 && (
-                    <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
-                      SDLY al cutoff {formatDateIt(sdlyCutoffUsed)} · chiusura stagionale valorizzata a 0:{" "}
-                      {sdlyAnnualCoverage.closedMonths.map((m) => MONTH_LABELS[m - 1]).join(", ")}.
-                    </p>
-                  )}
+                {comparisonTab === "sdly" && sdlyInfo && sdlyInfo.status !== "ok" && (
+                  <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
+                    {ND} — confronto SDLY non disponibile
+                    {sdlyInfo.unavailableReason ? `: ${sdlyInfo.unavailableReason}` : ""}. Serve una fotografia dello
+                    stesso periodo non successiva alla stessa data dell’anno precedente; un mese o un giorno senza
+                    fotografia vale 0 solo se coperto per intero da una chiusura registrata nel Budget. Il confronto con
+                    il consuntivo finale resta disponibile nell’altro tab.
+                  </p>
+                )}
 
                 <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-6">
                   <AppMetricCard

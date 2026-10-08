@@ -98,11 +98,14 @@ function ComparisonCell({
   comparison,
   title,
   referenceLabel,
+  note,
 }: {
   ctx: CellContext;
   comparison: MonthComparison;
   title: string;
   referenceLabel: string;
+  // Base temporale del confronto, quando e' diversa da quella della riga.
+  note?: string;
 }) {
   if (comparison.delta === null) {
     return (
@@ -126,6 +129,7 @@ function ComparisonCell({
           delta={delta.text}
           tone={toneOfDelta(comparison.delta)}
           reference={`vs ${formatCurrency(comparison.reference)}`}
+          note={note}
         />
       }
     >
@@ -299,11 +303,11 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                 </AppTableCell>
                 <AppTableCell numeric>
                   vs SDLY
-                  <InfoTooltip text="Mese già iniziato: produzione maturata fino alla data dell’ultimo snapshot contro gli stessi giorni dell’anno precedente. Mese futuro: OTB contro l’OTB dello stesso mese osservato alla stessa data dell’anno precedente. Sotto il delta, il valore dell’anno precedente usato nel confronto. Passa il mouse (o tocca) per l’intervallo confrontato." />
+                  <InfoTooltip text="Intero mese nella fotografia disponibile alla data di osservazione contro l’intero stesso mese dell’anno precedente nella fotografia disponibile alla stessa data dell’anno precedente. Le due date sono le stesse per tutti i mesi e per il Totale: la tabella è un’unica fotografia. Per ogni mese vale l’ultima estrazione non successiva a quella data. Sotto il delta, il valore dell’anno precedente in quella fotografia. ND se non esiste, anche quando il consuntivo finale esiste. Passa il mouse (o tocca) per le date." />
                 </AppTableCell>
                 <AppTableCell numeric>
                   vs Consuntivo LY
-                  <InfoTooltip text="Intero mese contro il risultato finale dello stesso mese di calendario dell’anno precedente, riportato sotto il delta. ND se lo storico non copre tutti i giorni del mese (un giorno senza dati vale 0 solo se coperto da una chiusura registrata nel Budget)." />
+                  <InfoTooltip text="Intero mese (Revenue / OTB della riga) contro il risultato finale dello stesso mese di calendario dell’anno precedente, riportato sotto il delta. ND se lo storico non copre tutti i giorni del mese (un giorno senza dati vale 0 solo se coperto da una chiusura registrata nel Budget)." />
                 </AppTableCell>
                 <AppTableCell numeric groupStart>
                   Budget
@@ -368,8 +372,8 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                       <ComparisonCell
                         ctx={ctx}
                         comparison={row.sdly}
-                        title={row.sdly.mode === "production" ? "Produzione vs SDLY" : "OTB vs SDLY"}
-                        referenceLabel="SDLY"
+                        title="OTB vs SDLY"
+                        referenceLabel="Stesso mese LY alla stessa data"
                       />
                     </AppTableCell>
                     <AppTableCell numeric>
@@ -443,14 +447,8 @@ export function MonthlyPerformanceTable({ year, rows, total }: MonthlyPerformanc
                     <ComparisonCell
                       ctx={TOTAL_CONTEXT}
                       comparison={total.sdly}
-                      title={
-                        total.sdly.mode === "otb_asof"
-                          ? "OTB vs SDLY"
-                          : total.status === "current"
-                            ? "Produzione YTD vs SDLY"
-                            : "Produzione vs SDLY"
-                      }
-                      referenceLabel="SDLY"
+                      title="OTB vs SDLY · intero anno"
+                      referenceLabel="Anno precedente alla stessa data"
                     />
                   </AppTableCell>
                   <AppTableCell numeric>

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { CalendarDays } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { AppBreadcrumb } from "@/components/ui/AppBreadcrumb";
 import { AppCard } from "@/components/ui/AppCard";
 import { AppDialog } from "@/components/ui/AppDialog";
 import { AppTable, AppTableCell, AppTableRow } from "@/components/ui/AppTable";
@@ -1370,6 +1371,13 @@ export default function PerformanceStructureDrilldownPage({
 
   return (
     <div className="space-y-3">
+      <AppBreadcrumb
+        items={[
+          { label: "Performance", href: "/performance" },
+          { label: structureName || "Struttura" },
+          { label: "Dettaglio" },
+        ]}
+      />
       <PageHeader variant="prominent" eyebrow="Performance" title={structureName || "Struttura"} description="Dettaglio performance">
         <CellTooltip
           className="inline-flex"

@@ -1497,7 +1497,7 @@ function OperationsContent() {
   ];
 
   return (
-    <main className={openSans.className} style={mainStyle}>
+    <main className={`${openSans.className} bg-mc-page`} style={mainStyle}>
       <div style={{ maxWidth: "1280px", margin: "0 auto" }}>
         {targetUnavailable && (
           <section style={targetUnavailableBannerStyle}>
@@ -2270,7 +2270,6 @@ function SubtaskList({
 
 const mainStyle: CSSProperties = {
   minHeight: "100vh",
-  backgroundColor: "#f5f3ef",
   color: "#2B2D2F",
   padding: "32px 20px 40px",
 };

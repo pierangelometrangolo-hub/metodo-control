@@ -369,7 +369,10 @@ export function AppShell({ brand, groups, actions, children }: AppShellProps) {
           <SheetContent
             side="left"
             showCloseButton={false}
-            className="w-[272px] gap-0 border-r border-mc-border bg-mc-surface p-0 sm:max-w-[272px]"
+            // 320px, ma su schermi stretti resta sempre visibile una striscia
+            // di 48px della pagina. Stessa variante data-[side=left] delle
+            // larghezze di default dello Sheet, che cosi' vengono sostituite.
+            className="gap-0 border-r border-mc-border bg-mc-surface p-0 data-[side=left]:w-[min(320px,calc(100vw-48px))] data-[side=left]:sm:max-w-none"
           >
             <SheetTitle className="sr-only">Navigazione</SheetTitle>
             <ShellNavigation

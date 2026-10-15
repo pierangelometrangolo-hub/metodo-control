@@ -31,6 +31,7 @@ import {
   PeriodBudget,
   periodKind,
 } from "@/lib/performance/periodBudget";
+import { resolveConsuntivoLy } from "@/lib/performance/consuntivoLy";
 import { ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
 import { sdlyTargetDate } from "@/lib/performance/sdlyCutoff";
 import {
@@ -1308,11 +1309,22 @@ export default function PerformanceStructureDrilldownPage({
   }
 
   const periodAgg = useMemo(() => sumSnapshots(periodSnapshots), [periodSnapshots]);
-  // "Consuntivo anno prec.": v_snapshot_latest sullo stesso periodo di un
-  // anno fa, invariato. "SDLY": sdlyAsofAgg, calcolato con cutoff (vedi
-  // loadMetrics) - due fonti diverse per due confronti diversi, mai
-  // scambiate tra loro.
-  const sdlyAgg = useMemo(() => sumSnapshots(sdlySnapshots), [sdlySnapshots]);
+  // "Consuntivo LY": valore finale dello stesso periodo di calendario di un
+  // anno fa (v_snapshot_latest), solo se quel periodo e' completo e chiuso
+  // nei dati - altrimenti ND (lib/performance/consuntivoLy, regola condivisa
+  // con Vista d'insieme e Performance mensile). "SDLY": sdlyAsofAgg,
+  // fotografia alla stessa data (vedi loadMetrics) - due fonti diverse per
+  // due confronti diversi, mai scambiate tra loro.
+  const consuntivoLy = useMemo(() => {
+    const { lyStart, lyEnd } = sdlyAsofPlan(periodStart, periodEnd);
+    return resolveConsuntivoLy({
+      lyStart,
+      lyEnd,
+      rows: sdlySnapshots as unknown as Parameters<typeof resolveConsuntivoLy>[0]["rows"],
+      closures: structureClosures,
+    });
+  }, [sdlySnapshots, structureClosures, periodStart, periodEnd]);
+  const sdlyAgg: KpiAgg = consuntivoLy.agg ?? EMPTY_KPI_AGG;
   const comparisonAgg: KpiAgg = comparisonTab === "sdly" ? sdlyAsofAgg : sdlyAgg;
   // Tab SDLY: sulle card la data target della fotografia LY (il lato
   // corrente e' sempre l'intero periodo nella fotografia corrente).
@@ -1663,8 +1675,21 @@ export default function PerformanceStructureDrilldownPage({
                     {sdlyInfo.unavailableReason ? `: ${sdlyInfo.unavailableReason}` : ""}. Serve una fotografia dello
                     stesso periodo non successiva alla stessa data dell’anno precedente; un mese o un giorno senza
                     fotografia vale 0 solo se coperto per intero da una chiusura registrata nel Budget. Il confronto con
-                    il consuntivo finale resta disponibile nell’altro tab.
+                    il consuntivo finale è nell’altro tab, quando il periodo dell’anno precedente è consuntivato.
                   </p>
+                )}
+
+                {comparisonTab === "consuntivo" && !loadingMetrics && consuntivoLy.status !== "ok" && (
+                  <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">
+                    {ND} — consuntivo dell’anno precedente non disponibile
+                    {consuntivoLy.unavailableReason ? `: ${consuntivoLy.unavailableReason}` : ""}. Serve lo stesso
+                    periodo dell’anno precedente completo e chiuso (estratto dopo la sua fine); un giorno senza dati
+                    vale 0 solo se coperto da una chiusura registrata nel Budget.
+                  </p>
+                )}
+
+                {comparisonTab === "consuntivo" && consuntivoLy.status === "ok" && consuntivoLy.zeroNote && (
+                  <p className="mb-2 text-[12px] leading-4 text-mc-text-tertiary">{consuntivoLy.zeroNote}</p>
                 )}
 
                 <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-6">

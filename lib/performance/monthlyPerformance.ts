@@ -8,9 +8,9 @@ import {
   PacingStatus,
   pad,
   revPar,
-  shiftDate,
 } from "../performanceMetrics";
 import { MonthlyBudgetRow } from "./periodBudget";
+import { ConsuntivoLyRow, resolveConsuntivoLy } from "./consuntivoLy";
 import { ClosureRange, isMonthFullyClosed, MonthAsofRow } from "./sdlyAnnual";
 import { DailyRow, formatDateIt, resolveSdlyAsOfComparison, SdlyAsOfComparison } from "./sdlyComparison";
 import { sdlyCutoffFromRows, sdlyTargetDate } from "./sdlyCutoff";
@@ -33,9 +33,10 @@ import { sdlyCutoffFromRows, sdlyTargetDate } from "./sdlyCutoff";
 //   osservazione della struttura. L'estrazione realmente usata per ciascun
 //   mese (l'ultima non successiva al target) puo' invece differire.
 // - vs Consuntivo LY: intero mese contro il valore FINALE del mese di
-//   calendario dell'anno precedente (Febbraio 2024 -> Febbraio 2023), con
-//   controllo di completezza: un giorno LY senza dato vale 0 solo se
-//   coperto da una chiusura dichiarata, altrimenti il confronto e' ND.
+//   calendario dell'anno precedente (Febbraio 2024 -> Febbraio 2023), solo
+//   se quel mese e' completo (un giorno senza dato vale 0 solo se coperto da
+//   una chiusura dichiarata) e chiuso nei dati (estratto dopo la sua fine):
+//   altrimenti ND (consuntivoLy.ts).
 //   Distinto dallo SDLY: il consuntivo puo' esistere anche senza alcuna
 //   fotografia storica alla stessa data.
 // - Budget: livello Realistico del mese (riferimento di questa sola
@@ -110,9 +111,10 @@ export type MonthlyPerformanceRow = {
 export type MonthlyPerformanceInput = {
   year: number;
   today: string;
-  // v_snapshot_latest dell'anno e dell'anno precedente (una riga per giorno).
+  // v_snapshot_latest dell'anno e dell'anno precedente (una riga per giorno,
+  // con extraction_date: serve a stabilire se il periodo LY e' consuntivato).
   currentRows: MonthlySnapshotRow[];
-  previousRows: DailyRow[];
+  previousRows: ConsuntivoLyRow[];
   budgets: MonthlyBudgetRow[];
   closures: ClosureRange[];
   // Data di osservazione unica dell'analisi: ultima estrazione della
@@ -154,39 +156,6 @@ export function monthlyAsofRequests(observationDate: string | null): { month: nu
   return MONTHS.map((month) => ({ month, cutoff }));
 }
 
-// Intervallo di calendario dell'anno precedente con controllo di
-// completezza: un giorno senza dato vale 0 solo se coperto da una chiusura
-// dichiarata, altrimenti nessun totale.
-function resolveLyRange(previousRows: DailyRow[], closures: ClosureRange[], start: string, end: string) {
-  const inRange = rowsInRange(previousRows, start, end);
-  const daysWithData = new Set(inRange.map((r) => r.stay_date));
-  let daysExpected = 0;
-  let closedDays = 0;
-  for (let date = start; date <= end; date = shiftDate(date, 1)) {
-    daysExpected += 1;
-    if (!daysWithData.has(date) && closures.some((c) => c.start_date <= date && date <= c.end_date)) closedDays += 1;
-  }
-  const daysCovered = daysWithData.size + closedDays;
-  const status: "ok" | "partial" | "none" =
-    daysCovered >= daysExpected ? "ok" : daysCovered === 0 ? "none" : "partial";
-  return {
-    status,
-    start,
-    end,
-    revenue: status === "ok" ? sumOf(inRange, "revenue_total") : null,
-    daysCovered,
-    daysExpected,
-    closedDays,
-  };
-}
-
-function coverageReason(status: "ok" | "partial" | "none", year: number, daysCovered: number, daysExpected: number) {
-  if (status === "ok") return null;
-  return status === "partial"
-    ? `storico ${year} incompleto: ${daysCovered}/${daysExpected} giorni`
-    : `storico ${year} non disponibile`;
-}
-
 function comparison(
   current: number | null,
   reference: number | null,
@@ -215,26 +184,23 @@ const NO_COMPARISON = (reason: string): MonthComparison => ({
 });
 
 // Consuntivo LY: intero periodo corrente vs valore finale dello stesso
-// periodo di calendario dell'anno precedente, se completo.
+// periodo di calendario dell'anno precedente - solo se quel periodo e'
+// completo e chiuso nei dati (consuntivoLy.ts, regola condivisa).
 function consuntivoComparison(
   revenue: number | null,
-  previousRows: DailyRow[],
+  previousRows: ConsuntivoLyRow[],
   closures: ClosureRange[],
   period: { start: string; end: string },
   ly: { start: string; end: string },
   noDataReason: string
 ): MonthComparison {
   if (revenue === null) return NO_COMPARISON(noDataReason);
-  const previousYear = Number(ly.start.slice(0, 4));
-  const range = resolveLyRange(previousRows, closures, ly.start, ly.end);
-  return comparison(revenue, range.revenue, {
+  const consuntivo = resolveConsuntivoLy({ lyStart: ly.start, lyEnd: ly.end, rows: previousRows, closures });
+  return comparison(revenue, consuntivo.agg?.revenue ?? null, {
     actualDetail: rangeLabel(period.start, period.end),
-    referenceDetail: rangeLabel(range.start, range.end),
-    unavailableReason: coverageReason(range.status, previousYear, range.daysCovered, range.daysExpected),
-    zeroNote:
-      range.status === "ok" && range.closedDays > 0
-        ? `Chiusura dichiarata ${previousYear} valorizzata a 0: ${range.closedDays} giorni.`
-        : null,
+    referenceDetail: rangeLabel(consuntivo.start, consuntivo.end),
+    unavailableReason: consuntivo.unavailableReason,
+    zeroNote: consuntivo.zeroNote,
   });
 }
 

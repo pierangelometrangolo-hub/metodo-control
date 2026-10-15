@@ -48,6 +48,7 @@ import { aggregateBudgetRows } from "@/lib/performance/periodBudget";
 import { ClosureRange, MonthAsofRow } from "@/lib/performance/sdlyAnnual";
 import { groupStructuresBySdlyCutoff } from "@/lib/performance/sdlyCutoff";
 import { resolveSdlyAsOfComparison } from "@/lib/performance/sdlyComparison";
+import { resolveConsuntivoLy } from "@/lib/performance/consuntivoLy";
 import {
   computeLikeForLike,
   LikeForLikeComparison,
@@ -135,7 +136,11 @@ type StructureRowData = {
   // Dettaglio del confronto SDLY della riga (sdlyMonthRevenue e' il valore
   // di riferimento dell'anno precedente). Vedi lib/performance/sdlyComparison.
   sdly: RowSdly;
+  // Consuntivo LY: valore finale dello stesso periodo LY, null se il periodo
+  // non e' completo e chiuso nei dati (lib/performance/consuntivoLy) - in
+  // quel caso lastYearUnavailableReason spiega perche'.
   lastYearMonthRevenue: number | null;
+  lastYearUnavailableReason: string | null;
   budgetsForMonth: BudgetRow[];
   pacing: ReturnType<typeof computePacingStatus>;
   // Righe giornaliere del periodo + suoi estremi, per la capacita' residua
@@ -482,9 +487,16 @@ export default function PerformanceOverviewPage() {
     const nextRows: StructureRowData[] = structures.map((structure) => {
       const monthSnapshots = monthByStructure.get(structure.id) || [];
       const monthToDate = sumSnapshots(monthSnapshots);
-      const lastYearMonthToDate = sumSnapshots(lastYearMonthByStructure.get(structure.id) || []);
       const observationDate = observationDates.get(structure.id) ?? null;
       const structureClosures = closuresByStructure.get(structure.id) || [];
+      // Consuntivo LY solo se lo stesso periodo LY e' completo e chiuso
+      // (estratto dopo la sua fine): mai l'OTB LY spacciato per consuntivo.
+      const consuntivoLy = resolveConsuntivoLy({
+        lyStart: lastYearStart,
+        lyEnd: lastYearEnd,
+        rows: lastYearMonthByStructure.get(structure.id) || [],
+        closures: structureClosures,
+      });
 
       // Intero periodo nella fotografia corrente vs intero stesso periodo LY
       // nella fotografia alla stessa data: un mese LY senza fotografia vale
@@ -521,7 +533,9 @@ export default function PerformanceOverviewPage() {
         monthRoomsAvailable: monthToDate.roomsAvailable,
         sdlyMonthRevenue: sdlyReference,
         sdly,
-        lastYearMonthRevenue: lastYearMonthToDate.revenue,
+        lastYearMonthRevenue: consuntivoLy.agg ? consuntivoLy.agg.revenue : null,
+        // Struttura senza nessun dato nel periodo: ND generico, come prima.
+        lastYearUnavailableReason: monthSnapshots.length > 0 ? consuntivoLy.unavailableReason : null,
         budgetsForMonth,
         pacing: computePacingStatus(monthToDate.revenue, budgetsForMonth),
         dailyCapacity: monthSnapshots.map((s) => ({
@@ -648,6 +662,8 @@ export default function PerformanceOverviewPage() {
   };
   const sdlyUnavailableReason = (structureId: string) =>
     rows.find((r) => r.structure.id === structureId)?.sdly.unavailableReason ?? null;
+  const lastYearUnavailableReason = (structureId: string) =>
+    rows.find((r) => r.structure.id === structureId)?.lastYearUnavailableReason ?? null;
   const likeForLikeDetail = (
     l4l: LikeForLikeComparison,
     comparison: { title: string; intro: string; actualLabel: string; referenceLabel: string },
@@ -876,7 +892,7 @@ export default function PerformanceOverviewPage() {
                   <AppTableCell numeric>
                     OTB vs Consuntivo LY
                     <InfoTooltip
-                      text={`${consuntivoComparison.intro} 'ND' quando manca lo storico per quel periodo. Passa il mouse (o tocca) sulla riga per i valori assoluti.`}
+                      text={`${consuntivoComparison.intro} 'ND' quando lo stesso periodo dell’anno precedente non è completo o non è ancora consuntivato (fotografia presa prima della sua fine). Passa il mouse (o tocca) sulla riga per i valori assoluti o per il motivo.`}
                     />
                   </AppTableCell>
                   <AppTableCell numeric groupStart>
@@ -1032,6 +1048,10 @@ export default function PerformanceOverviewPage() {
                             </p>
                             <p>Variazione: {lastYearDelta.text}</p>
                           </CellTooltip>
+                        ) : row.lastYearUnavailableReason ? (
+                          <CellTooltip trigger={<span className="text-mc-text-secondary">{ND}</span>}>
+                            Consuntivo non disponibile: {row.lastYearUnavailableReason}.
+                          </CellTooltip>
                         ) : (
                           <span className="text-mc-text-secondary">{ND}</span>
                         )}
@@ -1136,7 +1156,7 @@ export default function PerformanceOverviewPage() {
                         l4l: l4lLastYear,
                         comparison: consuntivoComparison,
                         referenceLabel: `vs Consuntivo ${lastYearPeriodLabel}`,
-                        reasonOverride: undefined,
+                        reasonOverride: lastYearUnavailableReason,
                         intervals: undefined,
                       },
                     ].map(({ l4l, comparison, referenceLabel, reasonOverride, intervals }) => (

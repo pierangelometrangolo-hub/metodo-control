@@ -44,6 +44,7 @@ import {
 } from "@/lib/performance/sdlyComparison";
 import { NationalityBars, NationalityDatum } from "@/components/performance/NationalityBars";
 import { MonthlyPerformanceTable } from "@/components/performance/MonthlyPerformanceTable";
+import { StructureSwitcher } from "@/components/performance/StructureSwitcher";
 import {
   asofKey,
   buildMonthlyPerformance,
@@ -327,6 +328,42 @@ const COMPARISON_TAB_OPTIONS: { value: ComparisonTab; label: string }[] = [
 
 const DEFAULT_MONTH = monthRange(todayString());
 
+type PeriodMode = "intervallo" | "mese" | "anno";
+
+function isIsoDate(value: string | null): value is string {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+}
+
+// Periodo con cui la pagina si apre, dai parametri dell'URL: servono a
+// portare il periodo da una struttura all'altra (StructureSwitcher) e dal
+// link di Budget (?anno). Letti solo all'arrivo. Precedenza: dal+al, mese,
+// anno; qualunque valore mancante, malformato o incoerente ricade sul
+// comportamento standard (mese corrente), senza errori.
+function initialPeriodFromParams(params: { get: (key: string) => string | null }): {
+  mode: PeriodMode;
+  start: string;
+  end: string;
+} {
+  const dal = params.get("dal");
+  const al = params.get("al");
+  if (isIsoDate(dal) && isIsoDate(al) && dal <= al) return { mode: "intervallo", start: dal, end: al };
+
+  const mese = params.get("mese");
+  if (mese && /^\d{4}-(0[1-9]|1[0-2])$/.test(mese)) {
+    const { start, end } = monthRange(`${mese}-01`);
+    return { mode: "mese", start, end };
+  }
+
+  const anno = params.get("anno");
+  const year = anno ? Number(anno) : null;
+  if (year && !Number.isNaN(year)) return { mode: "anno", start: `${year}-01-01`, end: `${year}-12-31` };
+
+  return { mode: "mese", start: DEFAULT_MONTH.start, end: DEFAULT_MONTH.end };
+}
+
 // Stesso pattern gia' in uso in performance/page.tsx (Vista d'insieme) per
 // le scorciatoie Mese/Anno - stesso range di 5 anni, stessa provenienza
 // (todayString, calcolato una sola volta al caricamento del modulo).
@@ -442,25 +479,22 @@ export default function PerformanceStructureDrilldownPage({
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Link rapido da Budget: ?anno=YYYY preseleziona l'intero anno invece
-  // del mese corrente di default - solo all'arrivo sulla pagina, non
-  // riletto ad ogni render (l'utente puo' poi cambiare periodo a mano dal
-  // calendario come sempre).
-  const annoParam = searchParams.get("anno");
-  const initialRange = useMemo(() => {
-    const year = annoParam ? Number(annoParam) : null;
-    if (year && !Number.isNaN(year)) {
-      return { start: `${year}-01-01`, end: `${year}-12-31` };
-    }
-    return DEFAULT_MONTH;
+  // Periodo iniziale dai parametri dell'URL (?dal&al, ?mese, ?anno) - solo
+  // all'arrivo sulla pagina, non riletto ad ogni render: l'utente puo' poi
+  // cambiare periodo a mano come sempre.
+  const initialPeriod = useMemo(
+    () => initialPeriodFromParams(searchParams),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    []
+  );
+  const initialRange = initialPeriod;
 
   const [accessState, setAccessState] = useState<"checking" | "granted" | "denied">(
     "checking"
   );
   const [canManage, setCanManage] = useState(false);
   const [structureName, setStructureName] = useState("");
+  const [structureOptions, setStructureOptions] = useState<{ id: string; name: string }[]>([]);
   const [highlightedDates, setHighlightedDates] = useState<Set<string>>(new Set());
   const [anomalyDates, setAnomalyDates] = useState<Set<string>>(new Set());
   const [lastAdrRevparUpdate, setLastAdrRevparUpdate] = useState<string | null>(null);
@@ -490,12 +524,9 @@ export default function PerformanceStructureDrilldownPage({
 
   // Modalita' di navigazione del periodo: Intervallo (calendario libero,
   // comportamento di sempre), Mese, Anno. Scrivono tutte su rangeStart/
-  // rangeEnd - "anno" e' la modalita' iniziale coerente quando si arriva
-  // da ?anno=YYYY (link da Budget), altrimenti si parte dal mese corrente
-  // in modalita' Mese.
-  const [periodMode, setPeriodMode] = useState<"intervallo" | "mese" | "anno">(
-    annoParam && !Number.isNaN(Number(annoParam)) ? "anno" : "mese"
-  );
+  // rangeEnd. La modalita' iniziale e' quella del periodo con cui si arriva
+  // (initialPeriodFromParams): senza parametri, mese corrente in Mese.
+  const [periodMode, setPeriodMode] = useState<PeriodMode>(initialPeriod.mode);
   const [initialSelectedYear, initialSelectedMonth] = initialRange.start.split("-").map(Number);
   const [selectedMonth, setSelectedMonth] = useState(initialSelectedMonth);
   const [selectedYear, setSelectedYear] = useState(initialSelectedYear);
@@ -673,6 +704,14 @@ export default function PerformanceStructureDrilldownPage({
     }
 
     setStructureName(data.name);
+
+    // Elenco per il cambio rapido di struttura: stessa lettura (e stessa
+    // visibilita') della Vista d'insieme. Se fallisce lo switcher mostra
+    // solo la struttura corrente.
+    const structuresRes = await supabase.from("structures").select("id, name").order("name", { ascending: true });
+    if (!structuresRes.error) {
+      setStructureOptions((structuresRes.data as { id: string; name: string }[]) || []);
+    }
 
     const importsRes = await supabase
       .from("bd_imports")
@@ -1378,7 +1417,23 @@ export default function PerformanceStructureDrilldownPage({
           { label: "Dettaglio" },
         ]}
       />
-      <PageHeader variant="prominent" eyebrow="Performance" title={structureName || "Struttura"} description="Dettaglio performance">
+      <PageHeader
+        variant="prominent"
+        eyebrow="Performance"
+        title={structureName || "Struttura"}
+        titleSlot={
+          structureName ? (
+            <StructureSwitcher
+              structures={structureOptions.length > 0 ? structureOptions : [{ id: structureId, name: structureName }]}
+              currentId={structureId}
+              currentName={structureName}
+              // Stato reale del Detail, non i parametri con cui si e' arrivati.
+              period={{ mode: periodMode, start: confirmedStart, end: confirmedEnd }}
+            />
+          ) : undefined
+        }
+        description="Dettaglio performance"
+      >
         <CellTooltip
           className="inline-flex"
           align="right"

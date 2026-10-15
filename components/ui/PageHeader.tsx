@@ -1,6 +1,10 @@
 type PageHeaderProps = {
   eyebrow?: string;
   title: string;
+  // Elemento da mostrare al posto del testo del titolo (es. un titolo
+  // cliccabile). Resta dentro l'<h1> e ne eredita tipografia e peso; "title"
+  // continua a servire come nome testuale della pagina.
+  titleSlot?: React.ReactNode;
   description?: string;
   children?: React.ReactNode;
   // "prominent": per le pagine di dettaglio (una struttura, un cliente...).
@@ -18,6 +22,7 @@ type PageHeaderProps = {
 export function PageHeader({
   eyebrow,
   title,
+  titleSlot,
   description,
   children,
   variant = "default",
@@ -26,9 +31,15 @@ export function PageHeader({
     return (
       <section className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
         <div className="min-w-0">
-          <h1 className="truncate text-[24px] font-semibold leading-tight tracking-[-0.015em] text-mc-text">
+          {/* Con titleSlot il troncamento e' a carico dell'elemento passato:
+              "truncate" sull'h1 ne taglierebbe hover e focus. */}
+          <h1
+            className={`text-[24px] font-semibold leading-tight tracking-[-0.015em] text-mc-text ${
+              titleSlot ? "flex min-w-0" : "truncate"
+            }`}
+          >
             {eyebrow && <span className="sr-only">{eyebrow} — </span>}
-            {title}
+            {titleSlot ?? title}
           </h1>
 
           {description && <p className="mt-0.5 truncate text-[12.5px] leading-4 text-mc-text-secondary">{description}</p>}
@@ -54,7 +65,7 @@ export function PageHeader({
         <div className="min-w-0">
           <h1 className="truncate text-[16px] font-semibold leading-tight text-[#2B2D2F]">
             {eyebrow && <span className="sr-only">{eyebrow} — </span>}
-            {title}
+            {titleSlot ?? title}
           </h1>
 
           {description && (

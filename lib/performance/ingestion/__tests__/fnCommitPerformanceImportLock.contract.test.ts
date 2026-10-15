@@ -16,12 +16,14 @@ import * as path from "path";
 // accettabile, non un fallimento. La correttezza a runtime (che il lock
 // davvero serializzi due sessioni concorrenti) resta verificabile solo
 // eseguendo la migration su un Postgres reale.
-// Tutte le migration che (ri)definiscono la funzione: la prima versione e
-// quella con lo scope soggiorno (20260930130000, definizione attiva) -
-// entrambe devono rispettare lo stesso contratto sul lock.
+// Tutte le migration che (ri)definiscono la funzione: la prima versione,
+// quella con lo scope soggiorno Montecallini (20260930130000) e quella che
+// estende lo scope ad adr_revpar (20261015120000, definizione attiva) -
+// tutte devono rispettare lo stesso contratto sul lock.
 const MIGRATION_FILES = [
   "20260908113200_fn_commit_performance_import.sql",
   "20260930130000_performance_import_events_stay_scope.sql",
+  "20261015120000_performance_import_events_adr_revpar_stay_scope.sql",
 ];
 
 function analyze(file: string) {

@@ -5,7 +5,7 @@ import { Dataset, IngestionOutcome, NormalizedNationalityRow, NormalizedSnapshot
 import { sha256Hex } from "./hashing";
 import { computeBatchHash, computeNationalityContentHash, computeSnapshotContentHash } from "./normalization";
 import { resolveMontecalliniStructure, resolveStructureForDataset, structureResolutionErrorMessage } from "./routing";
-import { decideImportAction, decideLegacyAction, StayScope, stayScopeOf } from "./conflictPolicy";
+import { decideImportAction, decideLegacyAction, isStayScopedDataset, StayScope, stayScopeOf } from "./conflictPolicy";
 import {
   CommitImportResult,
   checkLegacySnapshotExists,
@@ -118,8 +118,8 @@ async function resolveLegacySnapshot(
     sourceChecksum: string;
     normalizedContentHash: string;
     batchHash: string | null;
-    // Solo montecallini_pms: il confronto legacy e' limitato alle righe
-    // dentro l'intervallo di soggiorno del file.
+    // Solo dataset con scope (STAY_SCOPED_DATASETS): il confronto legacy e'
+    // limitato alle righe dentro l'intervallo di soggiorno del file.
     stayScope?: StayScope | null;
   }
 ): Promise<IngestionOutcome | null> {
@@ -243,6 +243,11 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
     // (vedi il controllo subito sotto, dopo la normalizzazione) - vedi
     // GUARDRAILS_SHADOW_MODE in lib/performance/guardrails/runner.ts.
     let guardrailFindings: GuardrailFinding[] = [];
+    // Scope soggiorno del file (min/max stay_date): parte della chiave
+    // duplicato/conflitto per adr_revpar - due export annuali disgiunti con
+    // la stessa extraction_date (es. 2026 e 2027) sono import distinti.
+    // null per nationality (chiave storica, vedi STAY_SCOPED_DATASETS).
+    let stayScope: StayScope | null = null;
 
     if (dataset === "nationality") {
       const rows: NormalizedNationalityRow[] = (params.nationalityRows ?? []).map((r) => ({
@@ -276,6 +281,7 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
         sourceKpi: r.sourceKpi,
       }));
       normalizedContentHash = await computeSnapshotContentHash(rows);
+      if (isStayScopedDataset(dataset)) stayScope = stayScopeOf(rows);
       snapshotRowsJson = rows.map((r) => ({
         stay_date: r.stayDate,
         revenue_total: r.revenueTotal,
@@ -316,7 +322,12 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
       return { status: "validation_error", message, guardrailFindings };
     }
 
-    const priorEvent = await findLatestImportedEvent(supabase, { structureId: selectedStructureId, extractionDate, dataset });
+    const priorEvent = await findLatestImportedEvent(supabase, {
+      structureId: selectedStructureId,
+      extractionDate,
+      dataset,
+      stayScope,
+    });
 
     if (!priorEvent) {
       // Nessun evento 'imported' per questa chiave - ma potrebbe comunque
@@ -332,13 +343,14 @@ export async function ingestSingleFile(params: SingleFileIngestParams): Promise<
         sourceChecksum,
         normalizedContentHash,
         batchHash: null,
+        stayScope,
       });
       // Zero scritture ai dataset: si esce qui, MAI si arriva
       // all'upload/RPC di commit per questa chiave.
       if (legacyOutcome) return { ...legacyOutcome, guardrailFindings };
     }
 
-    const decision = decideImportAction(priorEvent, { sourceChecksum, normalizedContentHash });
+    const decision = decideImportAction(priorEvent, { sourceChecksum, normalizedContentHash }, stayScope);
 
     // Upload su storage SOLO se il pre-check locale suggerisce una scrittura
     // reale - evita un upload sprecato per un duplicato/conflitto gia'

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { decideImportAction, PriorImportedEvent, selectPriorImportedEvent, StayScope, stayScopeOf } from "../conflictPolicy";
+import {
+  decideImportAction,
+  isStayScopedDataset,
+  PriorImportedEvent,
+  selectPriorImportedEvent,
+  STAY_SCOPED_DATASETS,
+  StayScope,
+  stayScopeOf,
+} from "../conflictPolicy";
 
 describe("decideImportAction - regola di decisione duplicato/conflitto (mai 'vince l'ultimo file')", () => {
   it("nessun import precedente per questa chiave -> commit", () => {
@@ -129,5 +137,81 @@ describe("scope soggiorno Montecallini: selectPriorImportedEvent + decideImportA
     const older: PriorImportedEvent = { id: "evt-vecchio", sourceChecksum: "a", normalizedContentHash: "a" };
     expect(selectPriorImportedEvent([septEvent, older], null)?.id).toBe("evt-sett");
     expect(decideImportAction(septEvent, { sourceChecksum: "z", normalizedContentHash: "z" }).action).toBe("conflict");
+  });
+});
+
+// Booking Designer non esporta piu' di un anno per file: la stessa
+// extraction_date puo' avere piu' export ADR/RevPAR annuali disgiunti (caso
+// reale Palazzo Rollo, 15/10/2026: 2026 e 2027). Stessa regola stay-scope di
+// Montecallini, nessuna seconda implementazione.
+describe("scope soggiorno ADR/RevPAR Booking Designer: export annuali con la stessa extraction_date", () => {
+  const Y2026: StayScope = { start: "2026-01-01", end: "2026-12-31" };
+  const Y2027: StayScope = { start: "2027-01-01", end: "2027-12-31" };
+  const event2026: PriorImportedEvent = {
+    id: "evt-2026",
+    sourceChecksum: "chk-2026",
+    normalizedContentHash: "hash-2026",
+    stayDateStart: Y2026.start,
+    stayDateEnd: Y2026.end,
+  };
+  const decide = (events: PriorImportedEvent[], scope: StayScope, chk: string, hash: string) =>
+    decideImportAction(selectPriorImportedEvent(events, scope), { sourceChecksum: chk, normalizedContentHash: hash }, scope);
+
+  it("adr_revpar e montecallini_pms usano lo scope; nationality no", () => {
+    expect(STAY_SCOPED_DATASETS).toEqual(["montecallini_pms", "adr_revpar"]);
+    expect(isStayScopedDataset("adr_revpar")).toBe(true);
+    expect(isStayScopedDataset("montecallini_pms")).toBe(true);
+    expect(isStayScopedDataset("nationality")).toBe(false);
+  });
+
+  it("1/5. 2027 con il 2026 gia' importato (scope adiacenti, stessa struttura/data/dataset) -> commit", () => {
+    expect(selectPriorImportedEvent([event2026], Y2027)).toBeNull();
+    expect(decide([event2026], Y2027, "chk-2027", "hash-2027")).toEqual({ action: "commit" });
+  });
+
+  it("1. ordine inverso: 2026 con il 2027 gia' importato -> commit", () => {
+    const event2027 = { ...event2026, id: "evt-2027", stayDateStart: Y2027.start, stayDateEnd: Y2027.end };
+    expect(decide([event2027], Y2026, "chk-2026", "hash-2026")).toEqual({ action: "commit" });
+  });
+
+  it("2. stesso scope + stesso hash -> duplicato", () => {
+    expect(decide([event2026], Y2026, "chk-2026", "hash-2026")).toEqual({ action: "skip_duplicate", reason: "exact_duplicate" });
+    expect(decide([event2026], Y2026, "chk-altro", "hash-2026")).toEqual({ action: "skip_duplicate", reason: "semantic_duplicate" });
+  });
+
+  it("3. stesso scope + hash diverso -> content_conflict, mai last-write-wins", () => {
+    expect(decide([event2026], Y2026, "chk-altro", "hash-altro")).toEqual({
+      action: "conflict",
+      conflictingEventId: "evt-2026",
+      reason: "content_conflict",
+    });
+  });
+
+  it("3b. con 2026 e 2027 gia' importati, un 2027 diverso confligge con il 2027, non con il 2026", () => {
+    const event2027 = { ...event2026, id: "evt-2027", sourceChecksum: "chk-2027", normalizedContentHash: "hash-2027", stayDateStart: Y2027.start, stayDateEnd: Y2027.end };
+    expect(decide([event2027, event2026], Y2027, "chk-x", "hash-x")).toMatchObject({ action: "conflict", conflictingEventId: "evt-2027", reason: "content_conflict" });
+    expect(decide([event2027, event2026], Y2027, "chk-2027", "hash-2027")).toEqual({ action: "skip_duplicate", reason: "exact_duplicate" });
+  });
+
+  it("4. sovrapposizione parziale (01/07/2026 -> 30/06/2027) -> scope_overlap, anche con hash uguale", () => {
+    const mid: StayScope = { start: "2026-07-01", end: "2027-06-30" };
+    expect(decide([event2026], mid, "chk-2026", "hash-2026")).toEqual({
+      action: "conflict",
+      conflictingEventId: "evt-2026",
+      reason: "scope_overlap",
+    });
+  });
+
+  it("4b. export di un solo mese dentro l'anno gia' importato -> scope_overlap", () => {
+    expect(decide([event2026], { start: "2026-06-01", end: "2026-06-30" }, "chk-giu", "hash-giu")).toMatchObject({
+      action: "conflict",
+      reason: "scope_overlap",
+    });
+  });
+
+  it("8. evento storico senza scope: si sovrappone a tutto, regola storica (mai un bypass)", () => {
+    const legacyEvent = { ...event2026, stayDateStart: null, stayDateEnd: null };
+    expect(decide([legacyEvent], Y2027, "chk-2027", "hash-2027")).toMatchObject({ action: "conflict", reason: "content_conflict" });
+    expect(decide([legacyEvent], Y2027, "chk-2026", "hash-x")).toEqual({ action: "skip_duplicate", reason: "exact_duplicate" });
   });
 });

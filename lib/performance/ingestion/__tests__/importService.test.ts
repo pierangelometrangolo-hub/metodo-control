@@ -1118,3 +1118,147 @@ describe("Montecallini: scope soggiorno nella chiave duplicato/conflitto", () =>
     expect(fake.__calls().rpcParams).toMatchObject({ p_source_checksum: BATCH });
   });
 });
+
+// Caso reale Palazzo Rollo 15/10/2026: Booking Designer esporta al massimo un
+// anno per file, quindi 2026 e 2027 arrivano come due file con la stessa
+// extraction_date. Il pre-check client usa lo scope soggiorno come la RPC
+// (migration 20261015120000).
+describe("ADR/RevPAR: export annuali disgiunti con la stessa extraction_date", () => {
+  const ROLLO_ID = "44444444-4444-4444-4444-444444444444";
+  const rolloStructures: StructureOption[] = [{ id: ROLLO_ID, name: "Palazzo Rollo" }];
+  const rolloAliases: StructureAlias[] = [{ structureId: ROLLO_ID, source: "booking_designer", alias: "Palazzo Rollo" }];
+  const fileFor = (year: number) => `ADR - RevPAR (01 Gen ${year} - 31 Dic ${year}) - Palazzo Rollo - 2026-10-15.csv`;
+  const yearRows = (year: number, seed = 0) => {
+    const rows = [];
+    for (let d = new Date(Date.UTC(year, 0, 1)); d.getUTCFullYear() === year; d.setUTCDate(d.getUTCDate() + 1)) {
+      rows.push({ stayDate: d.toISOString().slice(0, 10), revenueTotal: 100 + seed, roomsSold: 5, roomsAvailable: 10, arrivals: 1, presences: 8 });
+    }
+    return rows;
+  };
+  const event2026 = {
+    id: "evt-2026",
+    source_checksum: "chk-2026",
+    normalized_content_hash: "hash-2026",
+    stay_date_start: "2026-01-01",
+    stay_date_end: "2026-12-31",
+    extraction_date: "2026-10-15",
+  };
+  const imported = { data: { status: "imported", event_id: "evt-rpc", imported_count: 365, bd_import_ids: ["bd-2027"] }, error: null };
+
+  async function ingest(fake: ReturnType<typeof makeFakeSupabase>, year: number, rows = yearRows(year)) {
+    const name = fileFor(year);
+    return ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fake as any,
+      dataset: "adr_revpar",
+      selectedStructureId: ROLLO_ID,
+      structures: rolloStructures,
+      uploadedBy: "user-1",
+      file: makeFile(name, name),
+      fileContent: new TextEncoder().encode(name).buffer,
+      extractionDate: "2026-10-15",
+      snapshotRows: rows,
+    });
+  }
+
+  it("1/5/10. 2027 con il 2026 gia' importato -> commit, solo righe 2027 nella RPC, nessun conflitto lato client", async () => {
+    const fake = makeFakeSupabase({
+      aliases: rolloAliases,
+      priorEvent: null,
+      priorEvents: [event2026],
+      // Le righe 2026 gia' scritte sulla stessa extraction_date non sono legacy del 2027.
+      legacyRowsByDate: { "2026-10-15": yearRows(2026).map(toLegacySnapshotRow) },
+      rpcResult: imported,
+    });
+    const outcome = await ingest(fake, 2027);
+    expect(outcome.status).toBe("imported");
+    expect(fake.__calls().uploadCallCount).toBe(1); // pre-check = commit
+    expect(fake.__calls().importEventInserts).toHaveLength(0);
+    const params = fake.__calls().rpcParams!;
+    expect(params).toMatchObject({ p_structure_id: ROLLO_ID, p_extraction_date: "2026-10-15", p_dataset: "adr_revpar" });
+    const rows = params.p_snapshot_rows as { stay_date: string }[];
+    expect(rows).toHaveLength(365);
+    expect(rows.every((r) => r.stay_date.startsWith("2027-"))).toBe(true);
+  });
+
+  it("2. stesso file 2026 ricaricato -> il pre-check non decide commit (nessun upload), duplicato dalla RPC", async () => {
+    const fake = makeFakeSupabase({
+      aliases: rolloAliases,
+      priorEvent: null,
+      priorEvents: [event2026],
+      rpcResult: { data: { status: "skipped_duplicate", reason: "semantic_duplicate", event_id: "evt-d" }, error: null },
+    });
+    const outcome = await ingest(fake, 2026);
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    expect(outcome).toMatchObject({ status: "skipped_duplicate", reason: "semantic_duplicate" });
+  });
+
+  it("3. 2026 diverso con il 2026 gia' importato -> nessun upload, content_conflict", async () => {
+    const fake = makeFakeSupabase({
+      aliases: rolloAliases,
+      priorEvent: null,
+      priorEvents: [event2026],
+      rpcResult: { data: { status: "conflict", reason: "content_conflict", event_id: "evt-c", conflicting_event_id: "evt-2026" }, error: null },
+    });
+    const outcome = await ingest(fake, 2026, yearRows(2026, 9));
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    expect(outcome).toMatchObject({ status: "conflict", conflictKind: "content", conflictingEventId: "evt-2026" });
+  });
+
+  it("4. file 01/07/2026 -> 30/06/2027 con il 2026 gia' importato -> nessun upload, scope_overlap", async () => {
+    const fake = makeFakeSupabase({
+      aliases: rolloAliases,
+      priorEvent: null,
+      priorEvents: [event2026],
+      rpcResult: { data: { status: "conflict", reason: "scope_overlap", event_id: "evt-o", conflicting_event_id: "evt-2026" }, error: null },
+    });
+    const rows = [...yearRows(2026), ...yearRows(2027)].filter((r) => r.stayDate >= "2026-07-01" && r.stayDate <= "2027-06-30");
+    const outcome = await ingest(fake, 2026, rows);
+    expect(fake.__calls().uploadCallCount).toBe(0);
+    expect(outcome).toMatchObject({ status: "conflict", conflictKind: "scope_overlap" });
+  });
+
+  it("8. legacy pre-Foundation: confronto limitato allo scope del file", async () => {
+    // Righe legacy 2026 sulla stessa extraction_date: non bloccano il 2027.
+    const free = makeFakeSupabase({
+      aliases: rolloAliases,
+      priorEvent: null,
+      legacyRowsByDate: { "2026-10-15": yearRows(2026).map(toLegacySnapshotRow) },
+      rpcResult: imported,
+    });
+    expect((await ingest(free, 2027)).status).toBe("imported");
+    // Righe legacy 2027 diverse nello stesso scope: conflitto legacy, nessuna RPC.
+    const blocked = makeFakeSupabase({
+      aliases: rolloAliases,
+      priorEvent: null,
+      legacyRowsByDate: { "2026-10-15": yearRows(2027, 5).map(toLegacySnapshotRow) },
+    });
+    const outcome = await ingest(blocked, 2027);
+    expect(outcome).toMatchObject({ status: "conflict", conflictKind: "legacy" });
+    expect(blocked.__calls().rpcCallCount).toBe(0);
+    expect(blocked.__calls().importEventInserts[0]).toMatchObject({ stay_date_start: "2027-01-01", stay_date_end: "2027-12-31" });
+  });
+
+  it("nationality resta senza scope: chiave storica, evento piu' recente", async () => {
+    const fake = makeFakeSupabase({
+      aliases,
+      priorEvent: null,
+      priorEvents: [{ id: "evt-naz", source_checksum: "chk-naz", normalized_content_hash: "hash-naz", stay_date_start: "2026-01-01", stay_date_end: "2026-12-31" }],
+      rpcResult: { data: { status: "conflict", reason: "content_conflict", event_id: "evt-c", conflicting_event_id: "evt-naz" }, error: null },
+    });
+    await ingestSingleFile({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      supabase: fake as any,
+      dataset: "nationality",
+      selectedStructureId: STRUCTURE_ID,
+      structures,
+      uploadedBy: "user-1",
+      file: makeFile("x", NATIONALITY_FILE_NAME),
+      fileContent: new TextEncoder().encode("x").buffer,
+      extractionDate: "2026-10-15",
+      nationalityRows: [{ stayDate: "2027-01-01", nationality: "IT", presences: 3 }],
+    });
+    // Nessun upload: il pre-check vede l'evento 2026 come prior (nessuno scope).
+    expect(fake.__calls().uploadCallCount).toBe(0);
+  });
+});

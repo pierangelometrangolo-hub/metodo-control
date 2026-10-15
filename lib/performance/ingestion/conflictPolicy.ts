@@ -14,6 +14,22 @@
 // vengono consegnate per l'esecuzione manuale). Se la regola qui cambia,
 // la funzione SQL va aggiornata di conseguenza a mano, e viceversa: non
 // sono la stessa funzione, sono due specifiche della stessa policy.
+import type { Dataset } from "./types";
+
+// Dataset la cui chiave duplicato/conflitto include lo scope soggiorno
+// [stay_date_start, stay_date_end] - stessa lista della RPC
+// (v_scoped in fn_commit_performance_import, migration 20261015120000):
+// - montecallini_pms: piu' file mensili sulla stessa extraction_date;
+// - adr_revpar: Booking Designer esporta al massimo un anno per file, quindi
+//   la stessa extraction_date puo' avere piu' file annuali disgiunti
+//   (es. 2026 e 2027 estratti lo stesso giorno).
+// nationality resta senza scope (chiave storica).
+export const STAY_SCOPED_DATASETS: readonly Dataset[] = ["montecallini_pms", "adr_revpar"];
+
+export function isStayScopedDataset(dataset: Dataset): boolean {
+  return STAY_SCOPED_DATASETS.includes(dataset);
+}
+
 export type PriorImportedEvent = {
   id: string;
   sourceChecksum: string | null;
@@ -57,7 +73,7 @@ function sameScope(a: StayScope, b: StayScope): boolean {
 // ordine created_at desc), quelli che si SOVRAPPONGONO allo scope del
 // candidato - un evento senza scope si sovrappone a tutto - con priorita'
 // a quello con lo STESSO scope. candidateScope null = dataset non scoped
-// (adr_revpar, nationality): l'evento piu' recente, come prima.
+// (nationality): l'evento piu' recente, come prima.
 export function selectPriorImportedEvent(
   eventsNewestFirst: PriorImportedEvent[],
   candidateScope: StayScope | null
@@ -93,7 +109,7 @@ export function decideLegacyAction(legacyContentHash: string, candidateContentHa
 // non fa alcuna distinzione, il chiamante è responsabile di recuperare
 // l'evento corretto).
 //
-// candidateScope (solo montecallini_pms): se l'evento trovato ha uno scope
+// candidateScope (solo dataset in STAY_SCOPED_DATASETS): se l'evento trovato ha uno scope
 // noto diverso da quello del candidato (sovrapposizione parziale) il
 // confronto hash non ha senso -> conflitto scope_overlap. Evento senza
 // scope o dataset non scoped: regola storica.

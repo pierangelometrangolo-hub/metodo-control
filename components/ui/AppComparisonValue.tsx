@@ -17,6 +17,9 @@ type AppComparisonValueProps = {
   reference?: ReactNode;
   // Periodo, data o copertura del confronto: il livello piu' discreto.
   note?: ReactNode;
+  // Solo con emphasis="value": "card" (default) per le card metriche,
+  // "compact" per le celle di tabella - stessa gerarchia su tre righe.
+  size?: "card" | "compact";
   className?: string;
 };
 
@@ -34,8 +37,26 @@ export function AppComparisonValue({
   tone = "neutral",
   reference,
   note,
+  size = "card",
   className = "",
 }: AppComparisonValueProps) {
+  if (emphasis === "value" && size === "compact") {
+    return (
+      <span className={`block ${className}`}>
+        <span className="block text-[13px] font-semibold leading-5 tabular-nums text-mc-text">{value}</span>
+        <span className={`block text-[12.5px] font-semibold leading-4 tabular-nums ${toneClasses[tone]}`}>{delta}</span>
+        {reference !== undefined && (
+          <span className="mt-0.5 block whitespace-nowrap text-[11px] font-normal leading-4 text-mc-text-secondary">
+            {reference}
+          </span>
+        )}
+        {note !== undefined && (
+          <span className="block whitespace-nowrap text-[10px] font-normal leading-3 text-mc-text-tertiary">{note}</span>
+        )}
+      </span>
+    );
+  }
+
   if (emphasis === "value") {
     return (
       <span className={`block ${className}`}>

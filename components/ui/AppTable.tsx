@@ -8,7 +8,10 @@ import { createContext, ReactNode, useContext } from "react";
 // sintesi. "header" e' la riga di intestazione.
 export type AppTableRowState = "default" | "current" | "future" | "closed" | "total" | "header";
 
-const RowStateContext = createContext<AppTableRowState>("default");
+const RowStateContext = createContext<{ state: AppTableRowState; interactive: boolean }>({
+  state: "default",
+  interactive: false,
+});
 
 const rowClasses: Record<AppTableRowState, string> = {
   default: "border-b border-mc-border-subtle bg-mc-surface",
@@ -63,13 +66,34 @@ export function AppTable({ children, minWidthClassName = "", className = "" }: A
 type AppTableRowProps = {
   children: ReactNode;
   state?: AppTableRowState;
+  // Riga che apre un dettaglio: puntatore e fondo tenue al passaggio (anche
+  // sulla cella fissa). Per l'accesso da tastiera la riga deve contenere
+  // anche un link vero (es. sul nome): una <tr> non e' focalizzabile.
+  onClick?: () => void;
+  // "top" per righe con note sotto i valori (es. una riga di totale).
+  verticalAlign?: "middle" | "top";
   className?: string;
 };
 
-export function AppTableRow({ children, state = "default", className = "" }: AppTableRowProps) {
+export function AppTableRow({
+  children,
+  state = "default",
+  onClick,
+  verticalAlign = "middle",
+  className = "",
+}: AppTableRowProps) {
+  const interactive = Boolean(onClick);
+
   return (
-    <RowStateContext.Provider value={state}>
-      <tr className={`align-middle ${rowClasses[state]} ${className}`}>{children}</tr>
+    <RowStateContext.Provider value={{ state, interactive }}>
+      <tr
+        onClick={onClick}
+        className={`${verticalAlign === "top" ? "align-top" : "align-middle"} ${rowClasses[state]} ${
+          interactive ? "group/row cursor-pointer transition-colors hover:bg-mc-surface-summary" : ""
+        } ${className}`}
+      >
+        {children}
+      </tr>
     </RowStateContext.Provider>
   );
 }
@@ -93,7 +117,7 @@ export function AppTableCell({
   groupStart = false,
   className = "",
 }: AppTableCellProps) {
-  const state = useContext(RowStateContext);
+  const { state, interactive } = useContext(RowStateContext);
   const Tag = state === "header" ? "th" : "td";
   const classes = [
     cellPadding[state],
@@ -103,6 +127,8 @@ export function AppTableCell({
     numeric ? "text-right tabular-nums" : "text-left",
     // hover/has: porta in primo piano la cella fissa quando un suo tooltip e' aperto.
     sticky ? `sticky left-0 z-[1] hover:z-20 has-[.opacity-100]:z-20 ${stickyBackground[state]}` : "",
+    // La cella fissa ha uno sfondo proprio: deve seguire l'hover della riga.
+    sticky && interactive ? "transition-colors group-hover/row:bg-mc-surface-summary" : "",
     className,
   ];
 

@@ -3,8 +3,14 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { CalendarDays, Target, Upload } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { AppCard } from "@/components/ui/AppCard";
+import { AppComparisonTone, AppComparisonValue } from "@/components/ui/AppComparisonValue";
+import { AppPopover } from "@/components/ui/AppPopover";
+import { AppSegmentedControl } from "@/components/ui/AppSegmentedControl";
+import { AppSelect } from "@/components/ui/AppSelect";
+import { AppTable, AppTableCell, AppTableRow } from "@/components/ui/AppTable";
 import { InfoTooltip } from "@/components/ui/InfoTooltip";
 import { CellTooltip } from "@/components/ui/CellTooltip";
 import { Calendar, MONTH_LABELS } from "@/components/performance/Calendar";
@@ -23,6 +29,7 @@ import {
   formatPercent,
   formatNumber,
   formatDelta,
+  deltaPercent,
   occupancy,
   adr,
   revPar,
@@ -178,7 +185,7 @@ function GoalTooltipBody({ goal }: { goal: Exclude<GoalProgress, { status: "achi
 
 function GoalCell({ goal, metric }: { goal: GoalProgress | null; metric: "rooms" | "adr" }) {
   if (goal === null) return <>{ND}</>;
-  if (goal.status === "achieved") return <span className="text-[#2f7d43]">✓ Raggiunto</span>;
+  if (goal.status === "achieved") return <span className="text-mc-positive">✓ Raggiunto</span>;
 
   let trigger: React.ReactNode;
   if (goal.status === "pending") {
@@ -186,7 +193,7 @@ function GoalCell({ goal, metric }: { goal: GoalProgress | null; metric: "rooms"
       metric === "rooms" ? (
         <span>
           {formatRoomNights(goal.theoreticalRoomsNeeded)} necessarie
-          <span className="block text-[12px] text-[#6a6d70]">
+          <span className="block text-[11px] text-mc-text-secondary">
             {formatRoomNights(goal.remainingRoomNights)} disponibili
           </span>
         </span>
@@ -194,9 +201,9 @@ function GoalCell({ goal, metric }: { goal: GoalProgress | null; metric: "rooms"
         formatCurrency(goal.adrNeeded)
       );
   } else if (goal.status === "capacity_exhausted") {
-    trigger = <span className="text-[#6a6d70]">{metric === "rooms" ? "Non raggiungibile" : "N/A"}</span>;
+    trigger = <span className="text-mc-text-secondary">{metric === "rooms" ? "Non raggiungibile" : "N/A"}</span>;
   } else {
-    trigger = <span className="text-[#6a6d70]">N/A</span>;
+    trigger = <span className="text-mc-text-secondary">N/A</span>;
   }
 
   return (
@@ -209,27 +216,27 @@ function GoalCell({ goal, metric }: { goal: GoalProgress | null; metric: "rooms"
 // Gerarchia comune alle colonne di confronto (OTB vs SDLY, OTB vs
 // Consuntivo LY), sia sulle righe struttura sia sul TOTALE METODO: valore
 // dell'anno corrente in primo piano, variazione subito sotto, riferimento
-// dell'anno precedente piu' piccolo e secondario - mai il contrario.
-function ComparisonValue({
-  actual,
-  reference,
-  referenceLabel,
-}: {
-  actual: number | null;
-  reference: number | null;
-  referenceLabel: string;
-}) {
-  const delta = formatDelta(actual, reference);
+// dell'anno precedente piu' piccolo e secondario - mai il contrario. Il tono
+// del delta lo decide la pagina (sopra il riferimento = positivo).
+function comparisonCell(actual: number | null, reference: number | null, referenceLabel: string) {
+  const delta = deltaPercent(actual, reference);
+  const tone: AppComparisonTone = delta === null || delta === 0 ? "neutral" : delta > 0 ? "positive" : "negative";
   return (
-    <span className="block">
-      <span className="block font-semibold text-[#2B2D2F]">{formatCurrency(actual)}</span>
-      <span className={`block ${delta.colorClass}`}>{delta.text}</span>
-      <span className="block whitespace-nowrap text-[12px] font-normal text-[#6a6d70]">
-        {referenceLabel}: {formatCurrency(reference)}
-      </span>
-    </span>
+    <AppComparisonValue
+      emphasis="value"
+      size="compact"
+      value={formatCurrency(actual)}
+      delta={formatDelta(actual, reference).text}
+      tone={tone}
+      reference={`${referenceLabel}: ${formatCurrency(reference)}`}
+    />
   );
 }
+
+const PERIOD_MODE_OPTIONS = [
+  { value: "mese", label: "Mese" },
+  { value: "anno", label: "Anno" },
+] as const;
 
 const [TODAY_YEAR, TODAY_MONTH] = todayString().split("-").map(Number);
 const YEAR_OPTIONS = Array.from({ length: 5 }, (_, i) => TODAY_YEAR - 3 + i);
@@ -244,6 +251,9 @@ export default function PerformanceOverviewPage() {
   const [selectedMonth, setSelectedMonth] = useState(TODAY_MONTH);
   const [allExtractionDates, setAllExtractionDates] = useState<Set<string>>(new Set());
   const [calendarOpen, setCalendarOpen] = useState(false);
+  // Ultimo mese scelto in questa visita della pagina: passando da Anno a
+  // Mese si torna li'. Solo stato della pagina, nessuna persistenza.
+  const [lastSelectedMonth, setLastSelectedMonth] = useState(TODAY_MONTH);
 
   const [rows, setRows] = useState<StructureRowData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -538,7 +548,13 @@ export default function PerformanceOverviewPage() {
   function handleCalendarPick(dateStr: string) {
     const [y, m] = dateStr.split("-").map(Number);
     setSelectedYear(y);
-    setSelectedMonth(m);
+    selectMonth(m);
+    setCalendarOpen(false);
+  }
+
+  function selectMonth(month: number) {
+    setSelectedMonth(month);
+    setLastSelectedMonth(month);
   }
 
   if (accessState !== "granted") {
@@ -595,7 +611,7 @@ export default function PerformanceOverviewPage() {
   // totale: a colpo d'occhio si vede che il riferimento non e' 6/6.
   const portfolioCoverageNote = (coverage: number, prefix = "") =>
     coverage < portfolio.totalStructures ? (
-      <p className="mt-0.5 text-[11px] font-normal text-[#6a6d70]">
+      <p className="mt-0.5 whitespace-nowrap text-[10px] font-normal leading-3 text-mc-text-tertiary">
         {prefix}su {coverage}/{portfolioOf}
       </p>
     ) : null;
@@ -710,119 +726,134 @@ export default function PerformanceOverviewPage() {
     );
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        eyebrow="Performance"
-        title="Dashboard Performance"
-        description="Stato commerciale mensile di tutte le strutture, con ritmo verso il budget del mese e confronto SDLY: intero periodo nella fotografia corrente contro lo stesso periodo dell’anno precedente nella fotografia alla stessa data. Seleziona un mese diverso per rivedere periodi passati o futuri."
-      >
-        <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
-          <Link href="/performance/import" className="text-sm font-medium text-[#017A92] hover:underline">
-            Vai ad Aggiornamenti Performance (import) →
+    <div className="space-y-3">
+      <PageHeader variant="prominent" eyebrow="Performance" title="Performance" description="Vista d’insieme">
+        <CellTooltip
+          className="inline-flex"
+          align="right"
+          widthClassName="w-80"
+          trigger={
+            <span
+              aria-label="Come leggere questa pagina"
+              className="flex h-5 w-5 items-center justify-center rounded-full border border-[#c7bfb6] text-[10px] font-bold text-[#6b625c] hover:border-teal hover:text-teal"
+            >
+              i
+            </span>
+          }
+        >
+          {"Stato commerciale mensile di tutte le strutture, con ritmo verso il budget del mese e confronto SDLY: intero periodo nella fotografia corrente contro lo stesso periodo dell’anno precedente nella fotografia alla stessa data. Seleziona un mese diverso per rivedere periodi passati o futuri."}
+        </CellTooltip>
+        <p className="text-[12px] text-mc-text-secondary">
+          Ultimo upload{" "}
+          <span className="font-semibold text-mc-text">{latestUploadDate ? formatDateIt(latestUploadDate) : ND}</span>
+        </p>
+        <div className="flex items-center gap-1.5">
+          <Link
+            href="/performance/import"
+            title="Aggiornamenti Performance (import)"
+            className="flex h-[34px] items-center gap-1.5 rounded-[7px] border border-mc-border bg-mc-surface px-2.5 text-[13px] font-medium text-mc-text transition hover:bg-mc-surface-subtle"
+          >
+            <Upload className="h-4 w-4 text-mc-text-secondary" aria-hidden="true" />
+            Import
           </Link>
-          <Link href="/performance/budget" className="text-sm font-medium text-[#017A92] hover:underline">
-            Vai a Budget →
+          <Link
+            href="/performance/budget"
+            title="Budget"
+            className="flex h-[34px] items-center gap-1.5 rounded-[7px] border border-mc-border bg-mc-surface px-2.5 text-[13px] font-medium text-mc-text transition hover:bg-mc-surface-subtle"
+          >
+            <Target className="h-4 w-4 text-mc-text-secondary" aria-hidden="true" />
+            Budget
           </Link>
         </div>
       </PageHeader>
 
-      <AppCard
-        title="Periodo di riferimento"
-        subtitle="Di default mostra il mese corrente. Scegli un mese/anno dai menu, oppure clicca un giorno nel calendario per saltare al mese corrispondente."
-      >
-        <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
-          <div className="flex flex-wrap gap-4">
-            <div>
-              <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                Mese
-              </label>
-              <select
-                value={selectedMonth}
-                onChange={(e) => setSelectedMonth(Number(e.target.value))}
-                className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
-              >
-                <option value={0}>Tutto l'anno</option>
-                {MONTH_LABELS.map((label, i) => (
-                  <option key={label} value={i + 1}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
+      {/* Control bar del periodo, stesso pattern del Detail. Il calendario
+          mantiene la sua funzione: un clic su un giorno porta al suo mese. */}
+      <div className="rounded-[8px] border border-mc-border bg-mc-surface-subtle px-2.5 py-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <AppSegmentedControl
+            ariaLabel="Tipo di periodo"
+            options={PERIOD_MODE_OPTIONS}
+            value={isWholeYear ? "anno" : "mese"}
+            onChange={(mode) => setSelectedMonth(mode === "anno" ? 0 : lastSelectedMonth)}
+          />
 
-            <div>
-              <label className="mb-2 block text-[12px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                Anno
-              </label>
-              <select
-                value={selectedYear}
-                onChange={(e) => setSelectedYear(Number(e.target.value))}
-                className="h-11 rounded-[14px] border border-[#e7dfd8] bg-[#fcfbf9] px-4 text-sm text-[#2B2D2F] outline-none transition focus:border-[#017A92] focus:bg-white"
-              >
-                {YEAR_OPTIONS.map((y) => (
-                  <option key={y} value={y}>
-                    {y}
-                  </option>
-                ))}
-              </select>
-            </div>
+          {!isWholeYear && (
+            <AppSelect label="Mese" value={selectedMonth} onChange={(e) => selectMonth(Number(e.target.value))}>
+              {MONTH_LABELS.map((label, i) => (
+                <option key={label} value={i + 1}>
+                  {label}
+                </option>
+              ))}
+            </AppSelect>
+          )}
 
-            {!isCurrentMonth && (
-              <div className="flex items-end">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedYear(TODAY_YEAR);
-                    setSelectedMonth(TODAY_MONTH);
-                  }}
-                  className="h-11 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
-                >
-                  Torna al mese corrente
-                </button>
-              </div>
-            )}
-          </div>
+          <AppSelect label="Anno" value={selectedYear} onChange={(e) => setSelectedYear(Number(e.target.value))}>
+            {YEAR_OPTIONS.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </AppSelect>
 
-          <div>
+          {!isCurrentMonth && (
             <button
               type="button"
-              onClick={() => setCalendarOpen((prev) => !prev)}
-              className="flex h-11 items-center gap-2 rounded-[14px] border border-[#e7dfd8] bg-white px-4 text-sm font-medium text-[#017A92] hover:bg-[#f3f8fa]"
+              onClick={() => {
+                setSelectedYear(TODAY_YEAR);
+                selectMonth(TODAY_MONTH);
+              }}
+              className="h-[34px] rounded-[7px] px-2.5 text-[13px] font-medium text-teal transition hover:bg-mc-surface-muted"
             >
-              {calendarOpen ? "Nascondi calendario ▲" : "Mostra calendario ▾"}
+              Torna al mese corrente
             </button>
+          )}
 
-            {calendarOpen && (
-              <div className="mt-3">
+          <div className="sm:ml-auto">
+            <AppPopover
+              open={calendarOpen}
+              onOpenChange={setCalendarOpen}
+              align="end"
+              widthClassName="w-[300px]"
+              trigger={
+                <button
+                  type="button"
+                  className="flex h-[34px] items-center gap-2 rounded-[7px] border border-mc-border bg-mc-surface px-2.5 text-[13px] font-medium text-mc-text-secondary transition hover:border-teal"
+                >
+                  <CalendarDays className="h-4 w-4 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+                  Calendario
+                </button>
+              }
+            >
+              <div className="p-3">
                 <Calendar
+                  embedded
                   value={`${selectedYear}-${pad(isWholeYear ? 1 : selectedMonth)}-01`}
                   onChange={handleCalendarPick}
                   highlightedDates={allExtractionDates}
                   legendLabel="giorni con almeno un import reale registrato (qualunque struttura)"
                 />
               </div>
-            )}
+            </AppPopover>
           </div>
         </div>
-      </AppCard>
+      </div>
 
       <AppCard
+        density="compact"
         title="Strutture"
-        subtitle={`Dati riferiti a ${periodLabel}${isCurrentMonth ? " (mese corrente)" : ""} — clicca una riga per il dettaglio giornaliero e il pickup. Ultimo upload: ${
-          latestUploadDate ? formatDateIt(latestUploadDate) : ND
-        }`}
+        subtitle={`Dati riferiti a ${periodLabel}${isCurrentMonth ? " (mese corrente)" : ""} · confronto SDLY: intero periodo nella fotografia corrente contro lo stesso periodo dell’anno precedente nella fotografia alla stessa data — clicca una riga per il dettaglio giornaliero e il pickup.`}
       >
-        {loadError && <p className="mb-3 text-sm text-[#8a3a3a]">{loadError}</p>}
+        {loadError && <p className="mb-3 text-[13px] text-mc-negative">{loadError}</p>}
 
         {loading ? (
-          <p className="text-sm text-[#6a6d70]">Caricamento...</p>
+          <p className="text-[13px] text-mc-text-secondary">Caricamento...</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1700px] border-collapse text-sm">
+          <AppTable minWidthClassName="min-w-[1500px]">
               <thead>
-                <tr className="border-b border-[#e7dfd8] text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-[#6b625c]">
-                  <th className="pb-3 pr-4">Struttura</th>
-                  <th className="pb-3 pr-4">
+                <AppTableRow state="header">
+                  <AppTableCell sticky>Struttura</AppTableCell>
+                  <AppTableCell numeric>
                     Revenue OTB ({isWholeYear ? "anno" : "mese"})
                     <InfoTooltip
                       text={
@@ -831,56 +862,56 @@ export default function PerformanceOverviewPage() {
                           : "Somma del revenue on-the-books di tutti i giorni del mese selezionato per cui esiste un dato importato. Valore parziale se il mese non è concluso o mancano import."
                       }
                     />
-                  </th>
-                  <th className="pb-3 pr-4">
-                    OTB vs BUDGET
+                  </AppTableCell>
+                  <AppTableCell>
+                    OTB vs Budget
                     <InfoTooltip text="Confronta il Revenue OTB del mese selezionato con i tre livelli di budget dello stesso mese: rosso sotto Minimo, giallo tra Minimo e Realistico, verde sopra Realistico. Passa il mouse (o tocca) sulla riga per il dettaglio in euro dal Budget Minimo." />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric groupStart>
                     {sdlyComparison.columnLabel}
                     <InfoTooltip
                       text={`${sdlyComparison.intro} La data di osservazione è l’ultima estrazione di ciascuna struttura, unica per ogni periodo. 'ND' quando non esiste una fotografia dell’anno precedente a quella data, anche se il consuntivo finale esiste (un mese senza fotografia vale 0 solo se coperto per intero da una chiusura registrata nel Budget). Passa il mouse (o tocca) sulla riga per i valori assoluti e le date delle fotografie.`}
                     />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     OTB vs Consuntivo LY
                     <InfoTooltip
                       text={`${consuntivoComparison.intro} 'ND' quando manca lo storico per quel periodo. Passa il mouse (o tocca) sulla riga per i valori assoluti.`}
                     />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric groupStart>
                     ADR
                     <InfoTooltip text="Tariffa media mensile: somma revenue del mese selezionato diviso somma camere vendute nello stesso mese." />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     RevPAR
                     <InfoTooltip text="Revenue per camera disponibile nel mese: somma revenue del mese selezionato diviso somma camere disponibili nello stesso mese." />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     Occupazione
                     <InfoTooltip text="Somma camere vendute diviso somma camere disponibili sull'intero mese selezionato — numeratore e denominatore coprono sempre lo stesso periodo." />
-                  </th>
-                  <th className="pb-3 pr-4">
-                    RN TO GOAL
+                  </AppTableCell>
+                  <AppTableCell numeric groupStart>
+                    RN to goal
                     <InfoTooltip text="Target progressivo: Minimo, poi Realistico, poi Sfidante (il primo non ancora raggiunto in revenue). RN necessarie = (% Occupazione target × Room night disponibili del livello) − Room night già vendute; RN disponibili = camere ancora vendibili (disponibili − vendute) da oggi incluso a fine periodo. 'Non raggiungibile' solo se non resta nessuna camera vendibile; 'N/A' se mancano dati giornalieri; '✓ Raggiunto' se anche lo Sfidante è superato." />
-                  </th>
-                  <th className="pb-3 pr-4">
-                    ADR TO GOAL
+                  </AppTableCell>
+                  <AppTableCell numeric>
+                    ADR to goal
                     <InfoTooltip text="ADR medio necessario sulle room night ancora disponibili per raggiungere il target progressivo: (Target − Revenue OTB) / RN disponibili da oggi a fine periodo. 'N/A' se non resta nessuna camera vendibile o se mancano dati giornalieri." />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     Min.
                     <InfoTooltip text="Budget Minimo — revenue target dello scenario Minimo per il mese selezionato, da v_budgets_current." />
-                  </th>
-                  <th className="pb-3 pr-4">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     Real.
                     <InfoTooltip text="Budget Realistico — revenue target dello scenario Realistico per il mese selezionato, da v_budgets_current." />
-                  </th>
-                  <th className="pb-3">
+                  </AppTableCell>
+                  <AppTableCell numeric>
                     Sfid.
                     <InfoTooltip text="Budget Sfidante — revenue target dello scenario Sfidante per il mese selezionato, da v_budgets_current." />
-                  </th>
-                </tr>
+                  </AppTableCell>
+                </AppTableRow>
               </thead>
               <tbody>
                 {rows.map((row) => {
@@ -905,44 +936,46 @@ export default function PerformanceOverviewPage() {
                   });
 
                   return (
-                    <tr
-                      key={row.structure.id}
-                      onClick={() => router.push(`/performance/${row.structure.id}`)}
-                      className="cursor-pointer border-b border-[#f0ece6] transition last:border-0 hover:bg-[#f8f6f2]"
-                    >
-                      <td className="py-3 pr-4 font-semibold text-[#2B2D2F]">{row.structure.name}</td>
+                    <AppTableRow key={row.structure.id} onClick={() => router.push(`/performance/${row.structure.id}`)}>
+                      <AppTableCell sticky>
+                        {/* Link vero per tastiera e lettori di schermo; il clic sul
+                            resto della riga porta alla stessa pagina. */}
+                        <Link
+                          href={`/performance/${row.structure.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="whitespace-nowrap font-semibold text-mc-text hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal"
+                        >
+                          {row.structure.name}
+                        </Link>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                      <AppTableCell numeric className="font-semibold text-mc-text">
                         {row.monthRevenue !== null ? formatCurrencyCents(row.monthRevenue) : ND}
-                      </td>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4">
+                      <AppTableCell>
                         {row.pacing ? (
                           <CellTooltip
                             trigger={
                               <div className="flex items-center gap-2">
                                 <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pacingDotClasses[row.pacing]}`} />
-                                <span className="text-[#2B2D2F]">{pacingLabels[row.pacing]}</span>
+                                <span className="text-mc-text">{pacingLabels[row.pacing]}</span>
                               </div>
                             }
                           >
                             {detail || "Nessun dettaglio disponibile."}
                           </CellTooltip>
                         ) : (
-                          <span className="text-[#6a6d70]">{ND}</span>
+                          <span className="text-mc-text-secondary">{ND}</span>
                         )}
-                      </td>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4">
+                      <AppTableCell numeric groupStart>
                         {row.sdlyMonthRevenue !== null ? (
                           <CellTooltip
                             widthClassName="w-80"
                             trigger={
-                              <ComparisonValue
-                                actual={row.sdly.actual}
-                                reference={row.sdlyMonthRevenue}
-                                referenceLabel={sdlyComparison.cellReferenceLabel}
-                              />
+                              comparisonCell(row.sdly.actual, row.sdlyMonthRevenue, sdlyComparison.cellReferenceLabel)
                             }
                           >
                             <p className="font-semibold">{sdlyComparison.title}</p>
@@ -967,24 +1000,20 @@ export default function PerformanceOverviewPage() {
                             {row.sdly.zeroNote && <p className="mt-1">{row.sdly.zeroNote}</p>}
                           </CellTooltip>
                         ) : row.sdly.unavailableReason ? (
-                          <CellTooltip trigger={<span className="text-[#6a6d70]">{ND}</span>}>
+                          <CellTooltip trigger={<span className="text-mc-text-secondary">{ND}</span>}>
                             Confronto non disponibile: {row.sdly.unavailableReason}.
                           </CellTooltip>
                         ) : (
-                          <span className="text-[#6a6d70]">{ND}</span>
+                          <span className="text-mc-text-secondary">{ND}</span>
                         )}
-                      </td>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4">
+                      <AppTableCell numeric>
                         {row.lastYearMonthRevenue !== null ? (
                           <CellTooltip
                             widthClassName="w-80"
                             trigger={
-                              <ComparisonValue
-                                actual={row.monthRevenue}
-                                reference={row.lastYearMonthRevenue}
-                                referenceLabel={`vs Consuntivo ${lastYearPeriodLabel}`}
-                              />
+                              comparisonCell(row.monthRevenue, row.lastYearMonthRevenue, `vs Consuntivo ${lastYearPeriodLabel}`)
                             }
                           >
                             <p className="font-semibold">{consuntivoComparison.title}</p>
@@ -1004,65 +1033,65 @@ export default function PerformanceOverviewPage() {
                             <p>Variazione: {lastYearDelta.text}</p>
                           </CellTooltip>
                         ) : (
-                          <span className="text-[#6a6d70]">{ND}</span>
+                          <span className="text-mc-text-secondary">{ND}</span>
                         )}
-                      </td>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4 text-[#2B2D2F]">{formatCurrency(monthAdr)}</td>
-                      <td className="py-3 pr-4 text-[#2B2D2F]">{formatCurrency(monthRevPar)}</td>
-                      <td className="py-3 pr-4 text-[#2B2D2F]">{formatPercent(monthOcc)}</td>
+                      <AppTableCell numeric groupStart>{formatCurrency(monthAdr)}</AppTableCell>
+                      <AppTableCell numeric>{formatCurrency(monthRevPar)}</AppTableCell>
+                      <AppTableCell numeric>{formatPercent(monthOcc)}</AppTableCell>
 
-                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                      <AppTableCell numeric groupStart>
                         <GoalCell goal={goal} metric="rooms" />
-                      </td>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                      <AppTableCell numeric>
                         <GoalCell goal={goal} metric="adr" />
-                      </td>
+                      </AppTableCell>
 
-                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                      <AppTableCell numeric>
                         {(() => {
                           const b = row.budgetsForMonth.find((x) => x.level === "minimo");
                           return b ? formatCurrency(Number(b.revenue_target)) : ND;
                         })()}
-                      </td>
-                      <td className="py-3 pr-4 text-[#2B2D2F]">
+                      </AppTableCell>
+                      <AppTableCell numeric>
                         {(() => {
                           const b = row.budgetsForMonth.find((x) => x.level === "realistico");
                           return b ? formatCurrency(Number(b.revenue_target)) : ND;
                         })()}
-                      </td>
-                      <td className="py-3 text-[#2B2D2F]">
+                      </AppTableCell>
+                      <AppTableCell numeric>
                         {(() => {
                           const b = row.budgetsForMonth.find((x) => x.level === "sfidante");
                           return b ? formatCurrency(Number(b.revenue_target)) : ND;
                         })()}
-                      </td>
-                    </tr>
+                      </AppTableCell>
+                    </AppTableRow>
                   );
                 })}
               </tbody>
               {portfolio.totalStructures > 0 && (
                 <tfoot>
-                  <tr className="border-t-2 border-[#e7dfd8] bg-[#f8f6f2] font-semibold text-[#2B2D2F]">
-                    <td className="py-3 pr-4 align-top">
-                      <p className="uppercase tracking-[0.08em]">TOTALE METODO</p>
-                      <p className="mt-1 whitespace-nowrap text-[11px] font-normal text-[#6a6d70]">
+                  <AppTableRow state="total" verticalAlign="top">
+                    <AppTableCell sticky>
+                      <p className="whitespace-nowrap">Totale Metodo</p>
+                      <p className="mt-0.5 whitespace-nowrap text-[11px] font-normal text-mc-text-secondary">
                         {portfolio.includedStructures}/{portfolioOf} strutture con dati
                       </p>
-                      <p className="whitespace-nowrap text-[11px] font-normal text-[#6a6d70]">
+                      <p className="whitespace-nowrap text-[11px] font-normal text-mc-text-secondary">
                         {portfolioCoverageParts.join(" · ")}
                       </p>
                       {portfolio.partial && (
-                        <p className="text-[11px] font-normal text-[#8a3a3a]">Dati parziali</p>
+                        <p className="text-[11px] font-normal text-mc-negative">Dati parziali</p>
                       )}
-                    </td>
+                    </AppTableCell>
 
-                    <td className="py-3 pr-4 align-top">
+                    <AppTableCell numeric>
                       {portfolio.revenue !== null ? formatCurrencyCents(portfolio.revenue) : ND}
-                    </td>
+                    </AppTableCell>
 
-                    <td className="py-3 pr-4 align-top">
+                    <AppTableCell>
                       {portfolio.pacing ? (
                         <CellTooltip
                           placement="top"
@@ -1091,9 +1120,9 @@ export default function PerformanceOverviewPage() {
                           )}
                         </CellTooltip>
                       ) : (
-                        <span className="text-[#6a6d70]">{ND}</span>
+                        <span className="text-mc-text-secondary">{ND}</span>
                       )}
-                    </td>
+                    </AppTableCell>
 
                     {[
                       {
@@ -1111,7 +1140,7 @@ export default function PerformanceOverviewPage() {
                         intervals: undefined,
                       },
                     ].map(({ l4l, comparison, referenceLabel, reasonOverride, intervals }) => (
-                      <td key={comparison.title} className="py-3 pr-4 align-top">
+                      <AppTableCell key={comparison.title} numeric groupStart={comparison === sdlyComparison}>
                         {l4l ? (
                           <>
                             <CellTooltip
@@ -1119,13 +1148,9 @@ export default function PerformanceOverviewPage() {
                               widthClassName="w-80"
                               trigger={
                                 l4l.actual !== null && l4l.reference !== null ? (
-                                  <ComparisonValue
-                                    actual={l4l.actual}
-                                    reference={l4l.reference}
-                                    referenceLabel={referenceLabel}
-                                  />
+                                  comparisonCell(l4l.actual, l4l.reference, referenceLabel)
                                 ) : (
-                                  <span className="text-[#6a6d70]">{ND}</span>
+                                  <span className="text-mc-text-secondary">{ND}</span>
                                 )
                               }
                             >
@@ -1134,26 +1159,25 @@ export default function PerformanceOverviewPage() {
                             {portfolioCoverageNote(l4l.included.length, "L4L ")}
                           </>
                         ) : (
-                          <span className="text-[#6a6d70]">{ND}</span>
+                          <span className="text-mc-text-secondary">{ND}</span>
                         )}
-                      </td>
+                      </AppTableCell>
                     ))}
 
-                    <td className="py-3 pr-4 align-top">{formatCurrency(portfolio.adr)}</td>
-                    <td className="py-3 pr-4 align-top">{formatCurrency(portfolio.revpar)}</td>
-                    <td className="py-3 pr-4 align-top">{formatPercent(portfolio.occupancy)}</td>
+                    <AppTableCell numeric groupStart>{formatCurrency(portfolio.adr)}</AppTableCell>
+                    <AppTableCell numeric>{formatCurrency(portfolio.revpar)}</AppTableCell>
+                    <AppTableCell numeric>{formatPercent(portfolio.occupancy)}</AppTableCell>
 
-                    <td className="py-3 pr-4 align-top text-[#6a6d70]">—</td>
-                    <td className="py-3 pr-4 align-top text-[#6a6d70]">—</td>
+                    <AppTableCell numeric groupStart className="text-mc-text-tertiary">—</AppTableCell>
+                    <AppTableCell numeric className="text-mc-text-tertiary">—</AppTableCell>
 
-                    <td className="py-3 pr-4 align-top">{portfolioBudgetCell(portfolio.budget.minimo, "Minimo")}</td>
-                    <td className="py-3 pr-4 align-top">{portfolioBudgetCell(portfolio.budget.realistico, "Realistico")}</td>
-                    <td className="py-3 align-top">{portfolioBudgetCell(portfolio.budget.sfidante, "Sfidante")}</td>
-                  </tr>
+                    <AppTableCell numeric>{portfolioBudgetCell(portfolio.budget.minimo, "Minimo")}</AppTableCell>
+                    <AppTableCell numeric>{portfolioBudgetCell(portfolio.budget.realistico, "Realistico")}</AppTableCell>
+                    <AppTableCell numeric>{portfolioBudgetCell(portfolio.budget.sfidante, "Sfidante")}</AppTableCell>
+                  </AppTableRow>
                 </tfoot>
               )}
-            </table>
-          </div>
+          </AppTable>
         )}
       </AppCard>
     </div>
